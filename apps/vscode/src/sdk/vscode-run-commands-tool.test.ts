@@ -135,6 +135,10 @@ function createFakeTerminalProcess(options: { lines?: string[]; completionDetail
 		catch: promise.catch.bind(promise),
 		finally: promise.finally.bind(promise),
 		getCompletionDetails: () => options.completionDetails ?? {},
+		continue: () => {
+			emitter.emit("continue")
+			resolvePromise()
+		},
 		detach: () => {
 			emitter.emit("continue")
 			resolvePromise()
@@ -159,6 +163,7 @@ function createFakeTerminalManager(process: ReturnType<VscodeTerminalManager["ru
 function createControllableTerminalProcess() {
 	const emitter = new EventEmitter()
 	let resolvePromise!: () => void
+	let completionDetails: TerminalCompletionDetails = {}
 	const promise = new Promise<void>((resolve) => {
 		resolvePromise = resolve
 	})
@@ -166,7 +171,11 @@ function createControllableTerminalProcess() {
 		then: promise.then.bind(promise),
 		catch: promise.catch.bind(promise),
 		finally: promise.finally.bind(promise),
-		getCompletionDetails: () => ({}),
+		getCompletionDetails: () => completionDetails,
+		continue: () => {
+			emitter.emit("continue")
+			resolvePromise()
+		},
 		detach: () => {
 			emitter.emit("continue")
 			resolvePromise()
@@ -176,6 +185,7 @@ function createControllableTerminalProcess() {
 		process: fakeProcess as unknown as ReturnType<VscodeTerminalManager["runCommand"]>,
 		emitLine: (line: string) => emitter.emit("line", line),
 		complete: (details?: TerminalCompletionDetails) => {
+			completionDetails = details ?? {}
 			emitter.emit("completed", details)
 			emitter.emit("continue")
 			resolvePromise()
@@ -346,6 +356,127 @@ describe("executeForeground", () => {
 
 		expect(result).toBe("hello")
 		expect(coordinator.isRunning).toBe(false)
+	})
+
+	it("throws 'Command execution aborted' when the abort signal fires mid-command", async () => {
+		const abortController = new AbortController()
+		// Use the controllable process so we can order abort *after* `await process` yields.
+		const { process, complete } = createControllableTerminalProcess()
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground("long-cmd", "/workspace", terminalManager, 1000, abortController.signal)
+
+		// Let the `await process` yield. After this tick completes, the command
+		// is running and waiting (the controllable process hasn't completed yet).
+		await new Promise((resolve) => setTimeout(resolve, 5))
+
+		abortController.abort()
+
+		try {
+			await resultPromise
+			// If we get here, the command didn't throw — make the failure obvious.
+			expect(abortController.signal.aborted).toBe(true)
+			expect.unreachable("expected executeForeground to throw on abort")
+		} catch (error) {
+			expect(error).toBeInstanceOf(Error)
+			expect((error as Error).message).toBe("Command execution aborted")
+		}
+	})
+
+	it("unregisters its foreground handle when the abort signal fires", async () => {
+		const abortController = new AbortController()
+		const coordinator = new SdkForegroundCommandCoordinator()
+		const process = createFakeTerminalProcess({ lines: ["partial"] })
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground(
+			"long-cmd",
+			"/workspace",
+			terminalManager,
+			1000,
+			abortController.signal,
+			coordinator,
+		)
+
+		abortController.abort()
+
+		try {
+			await resultPromise
+			expect.unreachable("expected executeForeground to throw on abort")
+		} catch {
+			expect(coordinator.isRunning).toBe(false)
+		}
+	})
+
+	it("throws CommandExitError for terminalClosed even when the abort signal also fired", async () => {
+		// Edge case: the process completes with terminalClosed=true, then the
+		// abort signal fires. `resolvedByAbort` is true because the abort
+		// handler called process.continue(), but completion details already
+		// reflect the terminal closed. The terminalClosed error must win.
+		const abortController = new AbortController()
+		const { process, complete } = createControllableTerminalProcess()
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground("long-cmd", "/workspace", terminalManager, 1000, abortController.signal)
+
+		// Let `await process` yield first
+		await new Promise((resolve) => setTimeout(resolve, 5))
+
+		// Process completes naturally (terminal closed). The promise resolves
+		// and schedules a microtask to resume `await process`. Before that
+		// microtask fires, we call abort() synchronously below so that
+		// `resolvedByAbort = true` is set before `await process` resumes.
+		complete({ terminalClosed: true })
+		// Suppress the interim unhandled rejection: `resultPromise` will reject
+		// when `await process` resumes (inside the microtask) but the test's
+		// `try { await resultPromise }` hasn't started yet.
+		resultPromise.catch(() => {})
+
+		// THEN abort fires — simulating the TOCTOU: abort happens after
+		// the process already resolved via its own completion path, but
+		// before `await process` resumes (the microtask hasn't processed yet).
+		abortController.abort()
+
+		try {
+			await resultPromise
+			expect.unreachable("expected executeForeground to throw CommandExitError for terminalClosed")
+		} catch (error) {
+			expect(error).toBeInstanceOf(CommandExitError)
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain("Terminal closed")
+		}
+	})
+
+	it("throws CommandExitError for non-zero exit code even when the abort signal also fired", async () => {
+		// Edge case: the process completes with exitCode=1 naturally, then
+		// the abort signal fires. The exit code must win over abort.
+		const abortController = new AbortController()
+		const { process, emitLine, complete } = createControllableTerminalProcess()
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground("failing-cmd", "/workspace", terminalManager, 1000, abortController.signal)
+
+		// Let `await process` yield first
+		await new Promise((resolve) => setTimeout(resolve, 5))
+
+		// Emit some output first, then process completes with non-zero exit code
+		emitLine("error output")
+		// Same approach: complete first, then abort synchronously.
+		complete({ exitCode: 1 })
+		resultPromise.catch(() => {})
+
+		// THEN abort fires — the process already completed, so the abort
+		// handler sets `resolvedByAbort = true` but completion details
+		// (exitCode: 1) take priority.
+		abortController.abort()
+
+		try {
+			await resultPromise
+			expect.unreachable("expected executeForeground to throw CommandExitError for non-zero exit code")
+		} catch (error) {
+			expect(error).toBeInstanceOf(CommandExitError)
+			expect((error as InstanceType<typeof CommandExitError>).exitCode).toBe(1)
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain("error output")
+		}
 	})
 })
 

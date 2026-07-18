@@ -197,8 +197,17 @@ export async function executeForeground(
 	process.on("line", bufferLine)
 
 	// Handle abort signal
+	//
+	// Track *why* `await process` resolved — the "continue" event fires for
+	// natural completion, `process.continue()` (called here on abort), *and*
+	// `process.detach()` (called by the Proceed-While-Running button). We
+	// need to distinguish abort from the other two so that completion details
+	// (especially terminalClosed) are not lost to a TOCTOU between
+	// `abortSignal?.aborted` and `getCompletionDetails()`.
+	let resolvedByAbort = false
 	if (abortSignal) {
 		const onAbort = () => {
+			resolvedByAbort = true
 			process.continue()
 		}
 		const cleanupAbortListener = () => abortSignal.removeEventListener("abort", onAbort)
@@ -234,9 +243,6 @@ export async function executeForeground(
 	} finally {
 		unregister?.()
 	}
-	if (abortSignal?.aborted) {
-		throw new Error("Command execution aborted")
-	}
 
 	const bufferedOutput =
 		droppedLines > 0
@@ -254,7 +260,41 @@ export async function executeForeground(
 		].join("\n")
 	}
 
+	// Read completion details BEFORE the abort check. If the process already
+	// completed (e.g. terminal closed mid-command), the completion details are
+	// the real result — we must not lose them to a TOCTOU between
+	// `abortSignal?.aborted` and `getCompletionDetails()` when both the
+	// abort signal and the natural "completed" event fire around the same time.
 	const completionDetails = process.getCompletionDetails?.()
+
+	// resolvedByAbort means the abort handler called process.continue(), which
+	// resolved `await process`. If the process had already completed naturally
+	// by that point (completionDetails are present), we use the completion
+	// details. Only throw "aborted" when the process did NOT complete — i.e.
+	// the command was genuinely interrupted by cancellation.
+	if (resolvedByAbort) {
+		// If the terminal closed mid-command, that takes priority: the command
+		// was interrupted regardless of the abort signal.
+		if (completionDetails?.terminalClosed) {
+			const result =
+				output.length > 0
+					? `[Terminal closed while the command was running; output may be incomplete]\n${output}`
+					: "[Terminal closed while the command was running; no output was captured]"
+			throw new CommandExitError(1, result)
+		}
+		// If we have a non-zero exit code from natural completion, the command
+		// finished with an error before the abort was processed.
+		const exitCode = completionDetails?.exitCode
+		if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
+			const result =
+				output.length > 0
+					? `[Command exited with code ${exitCode}]\n${output}`
+					: `[Command exited with code ${exitCode}]`
+			throw new CommandExitError(exitCode, result)
+		}
+		// Otherwise the command was genuinely interrupted — throw aborted.
+		throw new Error("Command execution aborted")
+	}
 
 	// A terminal closed mid-command has no exit code and no reliable output —
 	// whatever the command was doing (e.g. running a test suite) was interrupted,
@@ -332,7 +372,7 @@ export function createVscodeRunCommandsTool(options: VscodeRunCommandsToolOption
 			state.snapshot = takeShellSnapshot()
 			return state.snapshot.shell
 		},
-	})
+	} as any)
 }
 
 function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state: { snapshot: ShellSnapshot }): ShellExecutor {

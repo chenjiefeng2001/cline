@@ -633,7 +633,4 @@ export class BrowserSession {
 		})
 	}
 
-	async dispose() {
-		await this.closeBrowser()
-	}
 }
