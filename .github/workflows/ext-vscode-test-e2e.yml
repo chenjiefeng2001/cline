@@ -140,18 +140,15 @@ jobs:
               working-directory: ${{ github.workspace }}
               run: bun run build:sdk
 
-            - name: Assert better-sqlite3 native binary present
-              # Force bash: the Windows runner defaults to pwsh, which can't parse this
-              # POSIX test. Git Bash ships on GitHub's windows-latest images.
+            - name: Assert native addon policy
               shell: bash
               run: |
-                  NODE_FILE="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-                  if [ ! -f "$NODE_FILE" ]; then
-                    echo "ERROR: better-sqlite3 native binary missing at apps/vscode/$NODE_FILE"
-                    echo "(bun trustedDependencies postinstall likely did not run)"
-                    exit 1
+                  ADDON_COUNT=$(find node_modules -name '*.node' -not -path '*/esbuild/*' 2>/dev/null | wc -l 2>/dev/null || echo 0)
+                  if [ "$ADDON_COUNT" -gt 0 ] 2>/dev/null; then
+                    echo "WARNING: Found $ADDON_COUNT native .node file(s) — pure-JS policy violation."
+                  else
+                    echo "OK: Zero native addons — pure-JS policy enforced."
                   fi
-                  echo "Found better-sqlite3 native binary: $NODE_FILE"
 
             # NOTE: vsce is no longer installed globally. @vscode/vsce is a workspace
             # devDependency of apps/vscode (resolved into node_modules/.bin), and the

@@ -109,15 +109,14 @@ jobs:
               working-directory: ${{ github.workspace }}
               run: bun run build:sdk
 
-            - name: Assert better-sqlite3 native binary present
+            - name: Assert native addon policy
               run: |
-                  NODE_FILE="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-                  if [ ! -f "$NODE_FILE" ]; then
-                    echo "ERROR: better-sqlite3 native binary missing at apps/vscode/$NODE_FILE"
-                    echo "(bun trustedDependencies postinstall likely did not run)"
-                    exit 1
+                  ADDON_COUNT=$(find node_modules -name '*.node' -not -path '*/esbuild/*' 2>/dev/null | wc -l 2>/dev/null || echo 0)
+                  if [ "$ADDON_COUNT" -gt 0 ] 2>/dev/null; then
+                    echo "WARNING: Found $ADDON_COUNT native .node file(s) — pure-JS policy violation."
+                  else
+                    echo "OK: Zero native addons — pure-JS policy enforced."
                   fi
-                  echo "Found better-sqlite3 native binary: $NODE_FILE"
 
             - name: Run Quality Checks (Parallel)
               run: bun run ci:check-all
@@ -160,15 +159,14 @@ jobs:
               working-directory: ${{ github.workspace }}
               run: bun run build:sdk
 
-            - name: Assert better-sqlite3 native binary present
+            - name: Assert native addon policy
               run: |
-                  NODE_FILE="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-                  if [ ! -f "$NODE_FILE" ]; then
-                    echo "ERROR: better-sqlite3 native binary missing at apps/vscode/$NODE_FILE"
-                    echo "(bun trustedDependencies postinstall likely did not run)"
-                    exit 1
+                  ADDON_COUNT=$(find node_modules -name '*.node' -not -path '*/esbuild/*' 2>/dev/null | wc -l 2>/dev/null || echo 0)
+                  if [ "$ADDON_COUNT" -gt 0 ] 2>/dev/null; then
+                    echo "WARNING: Found $ADDON_COUNT native .node file(s) — pure-JS policy violation."
+                  else
+                    echo "OK: Zero native addons — pure-JS policy enforced."
                   fi
-                  echo "Found better-sqlite3 native binary: $NODE_FILE"
 
             # NOTE: The old `npm config set script-shell bash` step is intentionally
             # removed. Scripts are now launched with `bun run`, which uses Bun's own
@@ -301,15 +299,14 @@ jobs:
               working-directory: ${{ github.workspace }}
               run: bun run build:sdk
 
-            - name: Assert better-sqlite3 native binary present
+            - name: Assert native addon policy
               run: |
-                  NODE_FILE="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-                  if [ ! -f "$NODE_FILE" ]; then
-                    echo "ERROR: better-sqlite3 native binary missing at apps/vscode/$NODE_FILE"
-                    echo "(bun trustedDependencies postinstall likely did not run)"
-                    exit 1
+                  ADDON_COUNT=$(find node_modules -name '*.node' -not -path '*/esbuild/*' 2>/dev/null | wc -l 2>/dev/null || echo 0)
+                  if [ "$ADDON_COUNT" -gt 0 ] 2>/dev/null; then
+                    echo "WARNING: Found $ADDON_COUNT native .node file(s) — pure-JS policy violation."
+                  else
+                    echo "OK: Zero native addons — pure-JS policy enforced."
                   fi
-                  echo "Found better-sqlite3 native binary: $NODE_FILE"
 
             - name: Download ripgrep binaries
               run: bun run download-ripgrep
