@@ -458,6 +458,10 @@ export class McpHub {
 			return
 		}
 
+		// `connection` is declared before the try block so it remains in scope
+		// after the try-catch for heartbeat setup (SSE monitoring).
+		let connection: McpConnection | undefined
+
 		try {
 			// Store unexpanded config for display/comparison (keeps credentials out of stored config)
 			const configForStorage = JSON.stringify(config)
@@ -638,7 +642,7 @@ export class McpHub {
 					throw new Error(`Unknown transport type: ${(config as any).type}`)
 			}
 
-			const connection: McpConnection = {
+			connection = {
 				server: {
 					name,
 					config: configForStorage,
@@ -958,8 +962,7 @@ export class McpHub {
 			try {
 				await pTimeout(
 					this.connectToServer(name, config, source),
-					McpHub.CONNECTION_TIMEOUT_MS,
-					`MCP server "${name}" connection timed out after ${McpHub.CONNECTION_TIMEOUT_MS}ms`,
+					{ milliseconds: McpHub.CONNECTION_TIMEOUT_MS },
 				)
 			} catch (error) {
 				Logger.error(`Failed to connect to MCP server "${name}" (concurrent limit ${3}):`, error)
