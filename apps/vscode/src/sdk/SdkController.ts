@@ -1940,10 +1940,10 @@ export class Controller {
 	 * Fire-and-forget: errors are logged but not propagated.
 	 * The next full flush always carries ground truth.
 	 */
-	private sendDeltaToWebview(delta: import("@sdk/state-post-debouncer").StateDelta): void {
+	private async sendDeltaToWebview(delta: import("@/sdk/state-post-debouncer").StateDelta): Promise<void> {
 		// Delegate to the gRPC bridge's state delta sender.
 		// Import dynamically to avoid circular deps.
-		this.webviewGrpcBridge?.sendStateDelta(delta).catch((err) => {
+		this.grpcBridge?.sendStateDelta(delta).catch((err) => {
 			import("@shared/services/Logger").then(({ Logger }) => {
 				Logger.error("[SdkController] Failed to send state delta:", err)
 			})

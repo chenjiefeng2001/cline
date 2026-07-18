@@ -156,7 +156,7 @@ export class WebviewGrpcBridge {
 	 *
 	 * @param delta The state delta to ship to the webview.
 	 */
-	async sendStateDelta(delta: import("@sdk/state-post-debouncer").StateDelta): Promise<void> {
+	async sendStateDelta(delta: import("@/sdk/state-post-debouncer").StateDelta): Promise<void> {
 		try {
 			const { sendStateDelta: sendDelta } = await import("@core/controller/state/subscribeToState")
 			await sendDelta({
