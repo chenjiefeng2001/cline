@@ -188,9 +188,8 @@ export const CommandOutputRow = memo(
 				{commandHeader}
 				<div
 					className="bg-code rounded-sm border border-editor-group-border"
-					style={{
-						transition: "all 0.3s ease-in-out",
-					}}>
+					style={{}}
+				>
 					{command && (
 						<div className="bg-code flex items-center justify-between px-2 py-2.5 border-b border-editor-group-border rounded-sm rounded-b-none overflow-hidden">
 							<div className="flex items-center gap-2 flex-1 m-w-0">

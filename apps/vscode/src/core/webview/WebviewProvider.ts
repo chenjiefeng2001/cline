@@ -102,7 +102,7 @@ export abstract class WebviewProvider {
 			<html lang="en">
 				<head>
 				<meta charset="utf-8">
-				<meta name="viewport" content="width=device-width,initial-scale=1,shrink-to-fit=no">
+				<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,shrink-to-fit=no">
 				<meta name="theme-color" content="#000000">
 				<link rel="stylesheet" type="text/css" href="${stylesUrl}">
 				<meta http-equiv="Content-Security-Policy" content="default-src 'none';
@@ -204,7 +204,7 @@ export abstract class WebviewProvider {
 			<html lang="en">
 				<head>
 					<meta charset="utf-8">
-					<meta name="viewport" content="width=device-width,initial-scale=1,shrink-to-fit=no">
+					<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,shrink-to-fit=no">
 					<meta http-equiv="Content-Security-Policy" content="${csp.join("; ")}">
 					<link rel="stylesheet" type="text/css" href="${stylesUrl}">
 					<title>Cline</title>
