@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from "child_process"
+import { terminateProcessTree } from "@/utils/process-termination"
 import { EventEmitter } from "events"
 import { Logger } from "@/shared/services/Logger"
 import { resolveWindowsPowerShellExecutable } from "@/utils/powershell"
@@ -398,8 +399,14 @@ export class HookProcess extends EventEmitter {
 
 	/**
 	 * Terminate the process and its entire process tree.
-	 * Uses process groups on Unix to kill child processes.
-	 * Implements graceful shutdown with 2-second timeout before force kill.
+	 *
+	 * Uses `terminateProcessTree()` which sends SIGTERM first via `tree-kill`
+	 * (handles cross-platform process tree termination), waits up to 2 seconds
+	 * for graceful shutdown, then escalates to SIGKILL.
+	 *
+	 * `tree-kill` is cross-platform:
+	 * - On Unix: Signals the entire process group.
+	 * - On Windows: Uses `taskkill /T /F` to force-kill the tree.
 	 */
 	async terminate(): Promise<void> {
 		if (!this.childProcess || this.isCompleted) {
@@ -414,42 +421,19 @@ export class HookProcess extends EventEmitter {
 		}
 
 		try {
-			// On Unix, kill process group (negative PID kills all children)
-			// On Windows, just kill the process (tree-kill would be better but adds dependency)
-			if (process.platform !== "win32") {
-				// Kill process group with SIGTERM for graceful shutdown
-				process.kill(-pid, "SIGTERM")
-			} else {
-				// On Windows, just kill the process
-				this.childProcess.kill("SIGTERM")
-			}
-
-			// Wait up to 2 seconds for graceful shutdown
-			const gracefulTimeout = new Promise((resolve) => setTimeout(resolve, 2000))
-			const processExit = new Promise((resolve) => {
-				this.childProcess?.once("exit", resolve)
+			await terminateProcessTree({
+				pid,
+				childProcess: this.childProcess,
+				isCompleted: () => this.isCompleted,
+				gracefulTimeoutMs: 2000,
 			})
-
-			await Promise.race([processExit, gracefulTimeout])
-
-			// Force kill if still running
-			if (!this.isCompleted) {
-				if (process.platform !== "win32") {
-					process.kill(-pid, "SIGKILL")
-				} else {
-					this.childProcess?.kill("SIGKILL")
-				}
-			}
 		} catch (error) {
-			// Process might already be dead, which is fine
 			Logger.debug(`[HookProcess] Error during termination: ${error}`)
 		} finally {
-			// Clear timeout regardless
 			if (this.timeoutHandle) {
 				clearTimeout(this.timeoutHandle)
 				this.timeoutHandle = null
 			}
-			// Ensure unregistration even if termination fails
 			this.safeUnregister()
 		}
 	}

@@ -12,7 +12,7 @@ import { ExternalHostBridgeClientManager } from "@hosts/external/host-bridge-cli
 import { retryOperation } from "@utils/retry"
 import * as path from "path"
 import { initialize, tearDown } from "@/common"
-import { SqliteLockManager } from "@/core/locks/SqliteLockManager"
+import { FileLockManager } from "@/core/locks/FileLockManager"
 import { WebviewProvider } from "@/core/webview"
 import { AuthHandler } from "@/hosts/external/AuthHandler"
 import { HostProvider } from "@/hosts/host-provider"
@@ -25,7 +25,7 @@ import { PROTOBUS_PORT, startProtobusService } from "./protobus-service"
 import { log } from "./utils"
 import { initializeContext } from "./vscode-context"
 
-let globalLockManager: SqliteLockManager | undefined
+let globalLockManager: FileLockManager | undefined
 
 async function main() {
 	log("\n\n\nStarting cline-core service...\n\n\n")
@@ -82,23 +82,21 @@ async function main() {
 		// Now this will throw instead of exit if binding fails
 		const protobusAddress = await startProtobusService(webviewProvider.controller)
 
-		// Initialize SQLite lock manager for instance registration
-		const dbPath = `${DATA_DIR}/locks.db`
-		globalLockManager = new SqliteLockManager({
-			dbPath,
+		// Initialize lock manager for instance registration (pure JS, no native deps)
+		const lockFilePath = `${DATA_DIR}/locks.json`
+		globalLockManager = new FileLockManager({
+			filePath: lockFilePath,
 			instanceAddress: protobusAddress,
 		})
 
-		await globalLockManager.registerInstance({
-			hostAddress,
-		})
-		log(`Registered instance in SQLite locks: ${protobusAddress}`)
+		globalLockManager.registerInstance(hostAddress)
+		log(`Registered instance in lock manager: ${protobusAddress}`)
 
 		// Clean up any orphaned folder locks from dead instances
 		globalLockManager.cleanupOrphanedFolderLocks()
 
-		// Mark instance healthy after services are up
-		globalLockManager.touchInstance()
+		// Mark instance healthy after services are up (re-register to update timestamp)
+		globalLockManager.registerInstance(hostAddress)
 
 		log("All services started successfully")
 
@@ -234,7 +232,7 @@ async function requestHostBridgeShutdown(): Promise<void> {
  * 3. Tearing down services
  * 4. Exiting the process
  */
-async function shutdownGracefully(lockManager?: SqliteLockManager) {
+async function shutdownGracefully(lockManager?: FileLockManager) {
 	try {
 		// Step 1: Tell the paired host bridge to shut down
 		log("Requesting host bridge shutdown...")

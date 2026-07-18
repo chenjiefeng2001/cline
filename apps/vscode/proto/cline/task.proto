@@ -4,6 +4,7 @@ package cline;
 
 import "cline/common.proto";
 import "cline/state.proto";
+import "cline/ui.proto";
 
 option go_package = "github.com/cline/grpc-go/cline";
 option java_multiple_files = true;
@@ -35,6 +36,11 @@ service TaskService {
   rpc toggleTaskFavorite(TaskFavoriteRequest) returns (Empty);
   // Gets filtered task history
   rpc getTaskHistory(GetTaskHistoryRequest) returns (TaskHistoryArray);
+  // Loads a batch of messages for an existing task (pagination).
+  // The webview requests older message batches as the user scrolls up
+  // in a long conversation. The response contains the batch prepended to
+  // the already-displayed messages.
+  rpc loadHistoryBatch(LoadHistoryBatchRequest) returns (LoadHistoryBatchResponse);
   // Sends a response to a previous ask operation
   rpc askResponse(AskResponseRequest) returns (Empty);
   // Edits a previous user message, truncates following conversation, and regenerates
@@ -88,6 +94,31 @@ message GetTaskHistoryRequest {
   bool current_workspace_only = 5;
   int32 limit = 6;
   int32 offset = 7;
+}
+
+// Request for loading a batch of older messages for a task (pagination).
+// The webview sends this when the user scrolls up past the first batch.
+message LoadHistoryBatchRequest {
+  Metadata metadata = 1;
+  // The task ID to load messages for
+  string task_id = 2;
+  // The timestamp of the oldest currently-displayed message.
+  // The server returns messages BEFORE this timestamp.
+  int64 before_ts = 3;
+  // Maximum number of messages to return (default 50, cap 200)
+  int32 limit = 4;
+}
+
+// Response for loadHistoryBatch. Messages should be prepended to the
+// existing conversation in the webview.
+message LoadHistoryBatchResponse {
+  // Messages in reverse chronological order (newest first).
+  // The webview prepends these to its existing message list.
+  repeated ClineMessage messages = 1;
+  // True if there are more messages available before this batch.
+  bool has_more = 2;
+  // The total message count for this task (for scrollbar sizing).
+  int32 total_count = 3;
 }
 
 // Response for task history

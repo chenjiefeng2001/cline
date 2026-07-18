@@ -384,6 +384,15 @@ export class VscodeTerminalManager {
 		this.disposables = []
 	}
 
+	/**
+	 * Dispose the terminal manager. Idempotent alias for `disposeAll()`.
+	 * Also disposes the shell-execution listener and other registered VS Code
+	 * disposables.
+	 */
+	dispose(): void {
+		this.disposeAll()
+	}
+
 	setShellIntegrationTimeout(timeout: number): void {
 		this.shellIntegrationTimeout = timeout
 	}

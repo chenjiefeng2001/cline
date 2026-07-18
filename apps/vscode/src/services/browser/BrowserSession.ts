@@ -3,7 +3,7 @@ import { Controller } from "@core/controller"
 import { BrowserActionResult } from "@shared/ExtensionMessage"
 import { fileExistsAtPath } from "@utils/fs"
 import axios from "axios"
-import { spawn } from "child_process"
+import { spawn, type ChildProcess } from "child_process"
 import * as chromeLauncher from "chrome-launcher"
 import os from "os"
 import pWaitFor from "p-wait-for"
@@ -14,6 +14,7 @@ import { Browser, connect, launch, Page, TimeoutError } from "puppeteer-core"
 import { StateManager } from "@/core/storage/StateManager"
 import { telemetryService } from "@/services/telemetry"
 import { Logger } from "@/shared/services/Logger"
+import { terminateProcessTree } from "@/utils/process-termination"
 import { discoverChromeInstances, isPortOpen, testBrowserConnection } from "./BrowserDiscovery"
 import { ensureChromiumExists } from "./utils"
 
@@ -43,6 +44,7 @@ export class BrowserSession {
 	private lastConnectionAttempt: number = 0
 	private isConnectedToRemote: boolean = false
 	private useWebp: boolean
+	private _chromeDebugProcess?: ChildProcess
 
 	// Telemetry tracking properties
 	private sessionStartTime: number = 0
@@ -124,6 +126,7 @@ export class BrowserSession {
 				stdio: "ignore", // Detach stdio to prevent hanging
 				shell: false, // Don't run in a shell
 			})
+			this._chromeDebugProcess = chromeProcess
 
 			// Unref the process to allow Node to exit independently
 			chromeProcess.unref()
@@ -373,6 +376,40 @@ export class BrowserSession {
 			this.browserActions = []
 		}
 		return {}
+	}
+
+	/**
+	 * Dispose of all resources held by this browser session.
+	 *
+	 * Cleans up:
+	 * 1. Puppeteer browser/page connection (via closeBrowser)
+	 * 2. Any detached Chrome debug process spawned by relaunchChromeDebugMode
+	 *
+	 * Safe to call multiple times — idempotent.
+	 */
+	async dispose(): Promise<void> {
+		// 1. Close the puppeteer browser first
+		await this.closeBrowser().catch((err) => {
+			Logger.warn("[BrowserSession.dispose] closeBrowser error (ignored):", err)
+		})
+
+		// 2. Kill any spawned Chrome debug process tree
+		const debugProcess = this._chromeDebugProcess
+		if (debugProcess?.pid && !debugProcess.killed) {
+			const pid = debugProcess.pid
+			Logger.info(`[BrowserSession.dispose] Terminating Chrome debug process tree (pid=${pid})`)
+			try {
+				await terminateProcessTree({
+					pid,
+					childProcess: debugProcess,
+					isCompleted: () => debugProcess.killed,
+					gracefulTimeoutMs: 3000,
+				})
+			} catch (err) {
+				Logger.warn("[BrowserSession.dispose] terminateProcessTree error (ignored):", err)
+			}
+		}
+		this._chromeDebugProcess = undefined
 	}
 
 	async doAction(action: (page: Page) => Promise<void>): Promise<BrowserActionResult> {

@@ -41,8 +41,11 @@ import { fetch } from "@/shared/net"
 import { ShowMessageType } from "@/shared/proto/host/window"
 import { Logger } from "@/shared/services/Logger"
 import { expandEnvironmentVariables } from "@/utils/envExpansion"
+import pLimit from "p-limit"
+import pTimeout from "p-timeout"
 import type { TelemetryService } from "../telemetry/TelemetryService"
 import { DEFAULT_REQUEST_TIMEOUT_MS } from "./constants"
+import { SseHeartbeat } from "./SseHeartbeat"
 import { McpOAuthManager } from "./McpOAuthManager"
 import { updateMcpSettingsFile } from "./settingsLock"
 import { StreamableHttpReconnectHandler } from "./StreamableHttpReconnectHandler"
@@ -86,6 +89,12 @@ export class McpHub {
 	 * Map of unique keys to each connected server names
 	 */
 	private static mcpServerKeys = new Map<string, string>()
+
+	/** Concurrency limiter for MCP server connections. Max 3 concurrent connections. */
+	private readonly connectionLimit = pLimit(3)
+
+	/** Per-connection timeout (30s). Connections exceeding this are auto-cancelled. */
+	private static readonly CONNECTION_TIMEOUT_MS = 30_000
 
 	// Store notifications for display in chat
 	private pendingNotifications: Array<{
@@ -377,6 +386,14 @@ export class McpHub {
 		source: "rpc" | "internal",
 	): Promise<void> {
 		// Remove existing connection if it exists (should never happen, the connection should be deleted beforehand)
+		const existingConn = this.connections.find((conn) => conn.server.name === name)
+		if (existingConn) {
+			// Clean up SSE heartbeat monitoring on stale connection
+			const heartbeatCleanup = (existingConn as any)._heartbeatCleanup
+			if (typeof heartbeatCleanup === "function") {
+				heartbeatCleanup()
+			}
+		}
 		this.connections = this.connections.filter((conn) => conn.server.name !== name)
 
 		// Validate remote MCP server URL against remote config if blockPersonalRemoteMCPServers is enabled
@@ -755,6 +772,27 @@ export class McpHub {
 			}
 			throw error
 		}
+
+		// Start SSE heartbeat monitoring for streamable HTTP connections
+		// This detects silent connection drops (e.g., proxy kills TCP without RST)
+		// where ReconnectingEventSource may not trigger onerror.
+		if (config.type === "streamableHttp" && connection.transport) {
+			const cleanup = SseHeartbeat.start(
+				name,
+				connection.transport,
+				() => this.findConnection(name, source),
+				() => this.connectToServer(name, config, source),
+				(err) => {
+					const conn = this.findConnection(name, source)
+					if (conn) {
+						this.appendErrorMessage(conn, err)
+						conn.server.status = "disconnected"
+					}
+				},
+			)
+			// Store cleanup on connection so it's called on disconnect
+			;(connection as any)._heartbeatCleanup = cleanup
+		}
 	}
 
 	private appendErrorMessage(connection: McpConnection, error: string) {
@@ -872,6 +910,12 @@ export class McpHub {
 	async deleteConnection(name: string): Promise<void> {
 		const connection = this.connections.find((conn) => conn.server.name === name)
 		if (connection) {
+			// Clean up SSE heartbeat monitoring
+			const heartbeatCleanup = (connection as any)._heartbeatCleanup
+			if (typeof heartbeatCleanup === "function") {
+				heartbeatCleanup()
+			}
+
 			try {
 				// Only close transport and client if they exist (disabled servers don't have them)
 				if (connection.transport) {
@@ -901,6 +945,29 @@ export class McpHub {
 		}
 	}
 
+	/**
+	 * Connect to an MCP server with concurrency limit and per-connection timeout.
+	 * Wraps `connectToServer` with p-limit (max 3 concurrent) and p-timeout (30s).
+	 */
+	private async connectToServerWithLimit(
+		name: string,
+		config: z.infer<typeof ServerConfigSchema>,
+		source: "rpc" | "internal",
+	): Promise<void> {
+		return this.connectionLimit(async () => {
+			try {
+				await pTimeout(
+					this.connectToServer(name, config, source),
+					McpHub.CONNECTION_TIMEOUT_MS,
+					`MCP server "${name}" connection timed out after ${McpHub.CONNECTION_TIMEOUT_MS}ms`,
+				)
+			} catch (error) {
+				Logger.error(`Failed to connect to MCP server "${name}" (concurrent limit ${3}):`, error)
+				throw error
+			}
+		})
+	}
+
 	async updateServerConnectionsRPC(newServers: Record<string, McpServerConfig>): Promise<void> {
 		this.isConnecting = true
 		this.removeAllFileWatchers()
@@ -925,7 +992,7 @@ export class McpHub {
 					if (config.type === "stdio") {
 						this.setupFileWatcher(name, config)
 					}
-					await this.connectToServer(name, config, "rpc")
+					await this.connectToServerWithLimit(name, config, "rpc")
 				} catch (error) {
 					Logger.error(`Failed to connect to new MCP server ${name}:`, error)
 				}
@@ -940,7 +1007,7 @@ export class McpHub {
 						this.setupFileWatcher(name, config)
 					}
 					await this.deleteConnection(name) // Don't clear OAuth - just reconnecting with new config
-					await this.connectToServer(name, config, "rpc")
+					await this.connectToServerWithLimit(name, config, "rpc")
 					Logger.log(`Reconnected MCP server with updated config: ${name}`)
 				} catch (error) {
 					Logger.error(`Failed to reconnect MCP server ${name}:`, error)
@@ -997,7 +1064,7 @@ export class McpHub {
 					if (config.type === "stdio") {
 						this.setupFileWatcher(name, config)
 					}
-					await this.connectToServer(name, config, "internal")
+					await this.connectToServerWithLimit(name, config, "internal")
 					connectionChangesOccurred = true
 				} catch (error) {
 					Logger.error(`Failed to connect to new MCP server ${name}:`, error)
@@ -1019,7 +1086,7 @@ export class McpHub {
 						this.setupFileWatcher(name, config)
 					}
 					await this.deleteConnection(name)
-					await this.connectToServer(name, config, "internal")
+					await this.connectToServerWithLimit(name, config, "internal")
 					Logger.log(`Reconnected MCP server with updated config: ${name}`)
 					connectionChangesOccurred = true
 				} catch (error) {

@@ -22,7 +22,16 @@ import { CLINE_ACCOUNT_AUTH_ERROR_MESSAGE } from "@shared/ClineAccount"
 import { mentionRegexGlobal } from "@shared/context-mentions"
 import type { ClineApiReqInfo, ClineMessage, ExtensionState } from "@shared/ExtensionMessage"
 import type { HistoryItem } from "@shared/HistoryItem"
-import { DeleteAllTaskHistoryCount, type GetTaskHistoryRequest, TaskHistoryArray, TaskResponse } from "@shared/proto/cline/task"
+import {
+	DeleteAllTaskHistoryCount,
+	type GetTaskHistoryRequest,
+	LoadHistoryBatchRequest,
+	LoadHistoryBatchResponse,
+	TaskHistoryArray,
+	TaskResponse,
+} from "@shared/proto/cline/task"
+import { ClineMessage as ProtoClineMessage } from "@shared/proto/cline/ui"
+import { convertClineMessageToProto } from "@shared/proto-conversions/cline-message"
 import type { Settings } from "@shared/storage/state-keys"
 import type { Mode } from "@shared/storage/types"
 import type { TelemetrySetting } from "@shared/TelemetrySetting"
@@ -252,6 +261,7 @@ export class Controller {
 		this.statePostDebouncer = new StatePostDebouncer({
 			debounceMs: Controller.STATE_POST_DEBOUNCE_MS,
 			flush: () => this.flushStateToWebview(),
+			sendDelta: (delta) => this.sendDeltaToWebview(delta),
 		})
 		this.providerConfigStore = createProviderConfigStore()
 		this.providerCatalog = createProviderCatalog(this.providerConfigStore)
@@ -1532,6 +1542,60 @@ export class Controller {
 		return historyItemToTaskResponse(historyItem)
 	}
 
+	/**
+	 * Loads a batch of older messages for a task (pagination).
+	 * The webview requests older message batches as the user scrolls up.
+	 *
+	 * Messages are loaded via the SDK session host, with a fallback to
+	 * legacy on-disk storage for pre-SDK tasks. The batch is filtered by
+	 * `before_ts` and limited to `limit` messages, returned in reverse
+	 * chronological order (newest first) so the webview can prepend them.
+	 */
+	async loadHistoryBatch(request: LoadHistoryBatchRequest): Promise<LoadHistoryBatchResponse> {
+		const taskId = request.taskId
+		const beforeTs = request.beforeTs
+		const limit = Math.min(Math.max(request.limit || 50, 1), 200)
+
+		if (!taskId) {
+			return LoadHistoryBatchResponse.create({
+				messages: [],
+				hasMore: false,
+				totalCount: 0,
+			})
+		}
+
+		// Load all messages for this task
+		const allMessages = await this.taskHistory.getClineMessages(taskId)
+		const totalCount = allMessages.length
+
+		// Sort newest-first for batch filtering
+		const sorted = [...allMessages].sort((a, b) => (b.ts || 0) - (a.ts || 0))
+
+		// Filter to messages strictly before beforeTs
+		const beforeIndex = beforeTs > 0 ? sorted.findIndex((m) => (m.ts || 0) < beforeTs) : 0
+
+		if (beforeIndex === -1) {
+			// No messages before the cursor
+			return LoadHistoryBatchResponse.create({
+				messages: [],
+				hasMore: false,
+				totalCount,
+			})
+		}
+
+		const batchSlice = sorted.slice(beforeIndex, beforeIndex + limit)
+		const hasMore = beforeIndex + limit < sorted.length
+
+		// Convert internal ClineMessage[] to proto ClineMessage[]
+		const protoMessages: ProtoClineMessage[] = batchSlice.map((msg) => convertClineMessageToProto(msg))
+
+		return LoadHistoryBatchResponse.create({
+			messages: protoMessages,
+			hasMore,
+			totalCount,
+		})
+	}
+
 	// ---- Mode switching ----
 
 	async toggleActModeForYoloMode(): Promise<boolean> {
@@ -1866,6 +1930,24 @@ export class Controller {
 		const { sendStateUpdate } = await import("@core/controller/state/subscribeToState")
 		const state = await this.getStateToPostToWebview()
 		await sendStateUpdate(state)
+	}
+
+	/**
+	 * Send an incremental state delta to the webview.
+	 * This is lighter-weight than a full flush because it only ships
+	 * the changed fields. The webview applies the delta convergently.
+	 *
+	 * Fire-and-forget: errors are logged but not propagated.
+	 * The next full flush always carries ground truth.
+	 */
+	private sendDeltaToWebview(delta: import("@sdk/state-post-debouncer").StateDelta): void {
+		// Delegate to the gRPC bridge's state delta sender.
+		// Import dynamically to avoid circular deps.
+		this.webviewGrpcBridge?.sendStateDelta(delta).catch((err) => {
+			import("@shared/services/Logger").then(({ Logger }) => {
+				Logger.error("[SdkController] Failed to send state delta:", err)
+			})
+		})
 	}
 
 	/**

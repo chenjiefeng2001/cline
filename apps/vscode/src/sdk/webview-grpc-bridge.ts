@@ -146,6 +146,28 @@ export class WebviewGrpcBridge {
 			Logger.error("[WebviewGrpcBridge] Failed to push state update from controller:", error)
 		}
 	}
+
+	/**
+	 * Send an incremental state delta to the webview.
+	 *
+	 * The delta contains only the changed fields — the webview applies
+	 * it convergently without a full state rebuild. If the webview detects
+	 * a version gap, it falls back to requesting a full snapshot.
+	 *
+	 * @param delta The state delta to ship to the webview.
+	 */
+	async sendStateDelta(delta: import("@sdk/state-post-debouncer").StateDelta): Promise<void> {
+		try {
+			const { sendStateDelta: sendDelta } = await import("@core/controller/state/subscribeToState")
+			await sendDelta({
+				type: delta.type,
+				payload: delta,
+				version: delta.version,
+			})
+		} catch (error) {
+			Logger.error("[WebviewGrpcBridge] Failed to send state delta:", error)
+		}
+	}
 }
 
 /**

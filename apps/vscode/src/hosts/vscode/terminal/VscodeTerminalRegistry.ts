@@ -82,4 +82,21 @@ export class TerminalRegistry {
 	private static isTerminalClosed(terminal: vscode.Terminal): boolean {
 		return terminal.exitStatus !== undefined
 	}
+
+	/**
+	 * Dispose all tracked terminals and clear the registry.
+	 * Idempotent — safe to call multiple times.
+	 */
+	static disposeAll(): void {
+		for (const info of TerminalRegistry.terminals) {
+			try {
+				if (!TerminalRegistry.isTerminalClosed(info.terminal)) {
+					info.terminal.dispose()
+				}
+			} catch {
+				// best effort — a failed terminal dispose must not skip the rest
+			}
+		}
+		TerminalRegistry.terminals = []
+	}
 }

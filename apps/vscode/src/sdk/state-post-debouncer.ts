@@ -6,13 +6,37 @@
 // owns the debounce timer, in-flight/queued bookkeeping, and the resolver
 // list, extracted from SdkController so the concurrency behavior can be unit
 // tested in isolation.
+//
+// ## Delta Push (Optional)
+//
+// Besides full snapshots, this class supports an optional "delta" mode where
+// small incremental updates (append a message, update a field) are shipped
+// without rebuilding the entire state. The delta is a lightweight JSON payload
+// that the webview's convergent-replica reducer applies in place.
+//
+// Feature flag: controlled by the `sendDelta` callback — if null, falls back
+// to full-snapshot flush. This makes the delta path safe for gradual rollout.
 import { Logger } from "@/shared/services/Logger"
+
+// ─── Delta Types ───────────────────────────────────────────────────────────
+
+export type StateDelta =
+	| { type: "append_message"; message: unknown; version: number }
+	| { type: "update_message"; messageId: string; patch: Record<string, unknown>; version: number }
+	| { type: "replace_all"; messages: unknown[]; version: number }
 
 export interface StatePostDebouncerOptions {
 	/** Trailing debounce window: bursts of post() calls within this window collapse into one flush. */
 	debounceMs: number
 	/** Builds and ships the current state snapshot. Rejections propagate to post() callers. */
 	flush: () => Promise<void>
+	/**
+	 * Optional delta sender. When provided, `postDelta()` ships deltas instead
+	 * of full snapshots. Callers that `await post()` always wait for the next
+	 * flush so consistency is maintained. When null, deltas are silently dropped
+	 * and `post()` is the only path.
+	 */
+	sendDelta?: (delta: StateDelta) => Promise<void>
 }
 
 /**
@@ -24,6 +48,10 @@ export interface StatePostDebouncerOptions {
  * webview). Requests arriving while a flush is in flight are folded into
  * `queued`; exactly one more flush runs afterward so the final snapshot is
  * never stale.
+ *
+ * `postDelta()` ships an incremental delta (append/update message) without
+ * rebuilding the full state. Deltas are fire-and-forget — they do NOT block
+ * on delivery — but the next full `flush()` always carries the ground truth.
  */
 export class StatePostDebouncer {
 	private debounceTimer?: NodeJS.Timeout
@@ -33,7 +61,26 @@ export class StatePostDebouncer {
 	private pendingResolvers: Array<{ resolve: () => void; reject: (error: unknown) => void }> = []
 	private disposed = false
 
+	/** Monotonically increasing version counter for delta ordering. */
+	private deltaVersion = 0
+
 	constructor(private readonly options: StatePostDebouncerOptions) {}
+
+	/**
+	 * Ship an incremental delta to the webview without a full state rebuild.
+	 *
+	 * Deltas are fire-and-forget: errors are logged but never propagated.
+	 * The next full `post()` / `flush()` always carries the ground truth,
+	 * so a dropped delta is eventually reconciled.
+	 */
+	postDelta(delta: Omit<StateDelta, "version">): void {
+		if (this.disposed || !this.options.sendDelta) return
+
+		const versioned: StateDelta = { ...delta, version: ++this.deltaVersion } as StateDelta
+		this.options.sendDelta(versioned).catch((err) => {
+			Logger.error("[StatePostDebouncer] Delta send failed (will reconcile on next full flush):", err)
+		})
+	}
 
 	post(): Promise<void> {
 		if (this.disposed) {

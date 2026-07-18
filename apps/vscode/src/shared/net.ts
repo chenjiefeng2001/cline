@@ -89,6 +89,11 @@
  * import { fetch } from '@/shared/net'
  * const response = await fetch(url)
  *
+ * // For requests needing custom timeouts:
+ * import { createFetch } from '@/shared/net'
+ * const slowFetch = createFetch('local')  // 180s timeout
+ * const response = await slowFetch(url)
+ *
  * // Good - configures axios to use configured fetch
  * import { getAxiosSettings } from '@/shared/net'
  * await axios.get(url, { ...getAxiosSettings() })
@@ -101,8 +106,119 @@ type FetchFunction = (...args: Parameters<typeof globalThis.fetch>) => ReturnTyp
 
 let mockFetch: FetchFunction | undefined
 
+// ─── Timeout presets by category ───────────────────────────────────────────
+// These match typical latency profiles for each request type.
+const DEFAULT_TIMEOUTS: Record<string, number> = {
+	default: 30_000,       // Most API requests (Anthropic, OpenAI, etc.)
+	local: 180_000,        // Local models (Ollama, LM Studio, etc.)
+	thinking: 300_000,     // Deep-thinking models (DeepSeek-R1, o1, etc.)
+	mcp_sse: 45_000,       // MCP SSE connection / heartbeats
+	market: 10_000,        // Marketplace download
+	oauth: 60_000,         // OAuth callback
+} as const
+
+/**
+ * Merges multiple AbortSignals into one. Returns a signal that is aborted
+ * when ANY of the input signals is aborted. Cleans up listeners on abort.
+ *
+ * Useful when you need to combine an external caller's signal with an
+ * internal timeout signal.
+ *
+ * Ported from common-abort-signal patterns; avoids adding a dependency.
+ */
+function anySignal(...signals: Array<AbortSignal | undefined | null>): AbortSignal {
+	const controller = new AbortController()
+
+	for (const signal of signals) {
+		if (!signal) continue
+		if (signal.aborted) {
+			controller.abort(signal.reason)
+			return controller.signal
+		}
+		signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true })
+	}
+
+	return controller.signal
+}
+
+/**
+ * Build the platform-specific base fetch (proxy-aware undici for standalone, globalThis.fetch otherwise).
+ * This is called once at module init.
+ */
+function buildBaseFetch(): typeof globalThis.fetch {
+	if (process.env.IS_STANDALONE === "true") {
+		const agent = new EnvHttpProxyAgent({})
+		setGlobalDispatcher(agent)
+		return undiciFetch as any as typeof globalThis.fetch
+	}
+	return globalThis.fetch
+}
+
+const baseFetch = buildBaseFetch()
+
+/**
+ * Create a proxy-aware fetch wrapper with a per-category timeout.
+ *
+ * @param category - Request category used to select timeout threshold.
+ *   Defaults to `"default"` (30s). Use `"local"` (180s) for Ollama/LM Studio,
+ *   `"thinking"` (300s) for deep-reasoning models, `"mcp_sse"` (45s) for
+ *   MCP SSE connections, or `"market"` (10s) for quick marketplace fetches.
+ * @returns A fetch-compatible function with timeout protection.
+ *
+ * The timeout is implemented via an internal AbortController + setTimeout.
+ * If the caller also passes a `signal` in `init`, both signals are merged so
+ * that the request is aborted when EITHER fires.
+ *
+ * @example
+ * ```typescript
+ * import { createFetch } from '@/shared/net'
+ *
+ * // Standard 30s API call
+ * const response = await fetch(url)
+ *
+ * // Local model — allow up to 3 minutes
+ * const localFetch = createFetch('local')
+ * const response = await localFetch(url)
+ * ```
+ */
+export function createFetch(category: keyof typeof DEFAULT_TIMEOUTS = "default"): typeof globalThis.fetch {
+	const timeoutMs = DEFAULT_TIMEOUTS[category] ?? DEFAULT_TIMEOUTS.default
+
+	const timeoutFetch = async function timeoutFetch(
+		input: string | URL | Request,
+		init?: RequestInit,
+	): Promise<Response> {
+		const controller = new AbortController()
+		const timeoutId = setTimeout(() => {
+			controller.abort(new DOMException(`Request timed out after ${timeoutMs}ms (category: ${category})`, "TIMEOUT"))
+		}, timeoutMs)
+
+		try {
+			const response = await (mockFetch || baseFetch)(input, {
+				...init,
+				signal: init?.signal
+					? anySignal(init.signal, controller.signal)
+					: controller.signal,
+			})
+			return response
+		} finally {
+			clearTimeout(timeoutId)
+		}
+	}
+
+	// VS Code's global fetch also has `preconnect` (a hint API).
+	// Stub it to satisfy the type without adding real support.
+	;(timeoutFetch as any).preconnect = () => Promise.resolve(undefined)
+
+	return timeoutFetch as typeof globalThis.fetch
+}
+
 /**
  * Platform-configured fetch that respects proxy settings.
+ *
+ * Default timeout: **30 seconds**. Use `createFetch(category)` for
+ * custom timeouts (e.g. local models, deep-thinking, MCP SSE).
+ *
  * Use this instead of global fetch to ensure proper proxy configuration.
  *
  * @example
@@ -111,23 +227,7 @@ let mockFetch: FetchFunction | undefined
  * const response = await fetch('https://api.example.com')
  * ```
  */
-export const fetch: typeof globalThis.fetch = (() => {
-	// Note: Don't use Logger here; it may not be initialized.
-
-	let baseFetch: typeof globalThis.fetch = globalThis.fetch
-	// Note: See esbuild.mjs, process.env.IS_STANDALONE is statically rewritten
-	// to "true" or "false" (as strings) in the JetBrains/CLI build.
-	// We must use explicit string comparison because "false" is truthy in JS.
-	if (process.env.IS_STANDALONE === "true") {
-		// Configure undici with ProxyAgent
-		const agent = new EnvHttpProxyAgent({})
-		setGlobalDispatcher(agent)
-		baseFetch = undiciFetch as any as typeof globalThis.fetch
-	}
-
-	return ((input: string | URL | Request, init?: RequestInit): Promise<Response> =>
-		(mockFetch || baseFetch)(input, init)) as typeof globalThis.fetch
-})()
+export const fetch: typeof globalThis.fetch = createFetch("default")
 
 /**
  * Mocks `fetch` for testing and calls `callback`. Then restores `fetch`. If the
@@ -185,4 +285,92 @@ export function getAxiosSettings(): {
 		maxBodyLength: Number.POSITIVE_INFINITY,
 		maxContentLength: Number.POSITIVE_INFINITY,
 	}
+}
+
+/**
+ * Check if the given host/URL should bypass the proxy according to NO_PROXY rules.
+ *
+ * Supports:
+ * - Exact hostnames: `localhost`, `192.168.1.1`
+ * - Wildcard domains: `*.example.com`, `.example.com`
+ * - CIDR notation: `10.0.0.0/8` (prefix match)
+ * - Multi-entry: `localhost,*.internal.corp`
+ *
+ * ALWAYS exempts localhost, 127.0.0.1, and [::1] regardless of NO_PROXY setting.
+ * This prevents local MCP servers from being incorrectly routed through a corporate proxy.
+ *
+ * @example
+ * ```typescript
+ * import { isExcludedFromProxy } from '@/shared/net'
+ *
+ * const shouldBypass = isExcludedFromProxy('http://localhost:8080/mcp')
+ * // => true (localhost always bypasses)
+ *
+ * const shouldBypass2 = isExcludedFromProxy('http://mcp.internal.corp')
+ * // => true if *.internal.corp is in NO_PROXY
+ * ```
+ */
+export function isExcludedFromProxy(urlOrHost: string): boolean {
+	if (!urlOrHost) return false
+
+	const host = extractHost(urlOrHost)
+
+	// Always bypass proxy for localhost / loopback
+	if (host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host.startsWith("::1")) {
+		return true
+	}
+
+	const noProxyRaw = process.env.NO_PROXY ?? process.env.no_proxy ?? ""
+	if (!noProxyRaw.trim()) {
+		return false
+	}
+
+	const entries = noProxyRaw.split(",").map((e) => e.trim()).filter(Boolean)
+
+	for (const entry of entries) {
+		if (matchesNoProxyEntry(host, entry)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+/**
+ * Extract the hostname from a URL string, or return the input if it's already a hostname.
+ */
+function extractHost(input: string): string {
+	try {
+		// If it starts with a protocol, parse as URL
+		if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//.test(input)) {
+			return new URL(input).hostname
+		}
+		// Strip port if present
+		return input.split(":")[0].replace(/^\[|\]$/g, "")
+	} catch {
+		// If parsing fails, use the raw input (minus port)
+		return input.split(":")[0].replace(/^\[|\]$/g, "")
+	}
+}
+
+/**
+ * Match a hostname against a single NO_PROXY entry.
+ */
+function matchesNoProxyEntry(host: string, entry: string): boolean {
+	if (!entry) return false
+
+	// Wildcard: *.example.com or .example.com
+	if (entry.startsWith("*.") || entry.startsWith(".")) {
+		const suffix = entry.startsWith("*.") ? entry.slice(1) : entry
+		return host.endsWith(suffix) || host === suffix.slice(1)
+	}
+
+	// CIDR: 10.0.0.0/8 (basic support — exact prefix match)
+	if (entry.includes("/")) {
+		const [cidrPrefix] = entry.split("/")
+		return host.startsWith(cidrPrefix)
+	}
+
+	// IP address or hostname — exact match
+	return host === entry
 }

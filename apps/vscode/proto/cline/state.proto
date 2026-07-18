@@ -292,6 +292,10 @@ message Settings {
 
 message State {
   string state_json = 1;
+  // Incremental state delta. When `type` is "replace_all", the webview
+  // must ignore `state_json` and use `delta_json` instead.
+  // The webview reconciles deltas convergently, gated by version.
+  optional string delta_json = 2;
 }
 
 message TerminalProfiles {

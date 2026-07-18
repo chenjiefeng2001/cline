@@ -10,7 +10,7 @@
 import { type ApiHandler, createHandler, type ProviderConfig } from "@cline/llms"
 import type { ApiConfiguration } from "@shared/api"
 import type { Mode } from "@shared/storage/types"
-import { fetch } from "@/shared/net"
+import { createFetch } from "@/shared/net"
 import { buildBedrockProviderConfig } from "./bedrock-config"
 import { resolveApiKey, resolveBaseUrl, resolveModelId, resolveVertexProviderConfig } from "./cline-session-factory"
 import { toSdkProviderId } from "./model-catalog/sdk-provider-id"
@@ -24,6 +24,24 @@ export interface BuildApiHandlerOptions {
 	 * OpenRouter don't receive a reasoning config at all.
 	 */
 	disableReasoning?: boolean
+}
+
+/**
+ * Map a provider id (+ optional model id) to a fetch timeout category.
+ *
+ * Local inference providers need generous timeouts; deep-thinking model ids
+ * get the "thinking" bucket.
+ */
+const THINKING_MODEL_PATTERNS = /deepseek.*r[1-9]|o[1-9]|thinking|reasoner/i
+
+function pickFetchCategory(providerId: string, modelId?: string): ReturnType<typeof createFetch> {
+	if (providerId === "ollama" || providerId === "lmstudio") {
+		return createFetch("local")
+	}
+	if (modelId && THINKING_MODEL_PATTERNS.test(modelId)) {
+		return createFetch("thinking")
+	}
+	return createFetch("default")
 }
 
 /**
@@ -57,15 +75,19 @@ export function buildSdkProviderConfig(
 
 	const vertexProviderConfig = providerId === "vertex" ? resolveVertexProviderConfig(configuration) : undefined
 
+	// Pick timeout category based on provider type and model id
+	const providerFetch = pickFetchCategory(providerId, modelId)
+
 	const base: ProviderConfig = {
 		providerId: toSdkProviderId(providerId),
 		modelId: modelId ?? "",
 		apiKey: apiKey ?? "",
 		baseUrl,
 		...(vertexProviderConfig ?? {}),
-		// Use the proxy-aware fetch so gateway providers respect corporate proxy
-		// configuration (see .clinerules/network.md).
-		fetch,
+		// Use the proxy-aware fetch with provider-appropriate timeout so gateway
+		// providers respect corporate proxy configuration (see .clinerules/network.md)
+		// and local/thinking models have generous timeouts.
+		fetch: providerFetch,
 		onRetryAttempt: configuration.onRetryAttempt,
 		// Bedrock needs its region + structured AWS auth options forwarded to the
 		// SDK gateway. Without these, a pasted Bedrock API key / region is dropped.

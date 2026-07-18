@@ -85,6 +85,45 @@ export async function sendStateUpdate(state: ExtensionState): Promise<void> {
 	}
 }
 
+/**
+ * State delta types for incremental state updates.
+ */
+export interface StateDeltaMessage {
+	type: "append_message" | "update_message" | "replace_all"
+	payload: unknown
+	version: number
+}
+
+/**
+ * Send a state delta to all active subscribers (incremental update).
+ * This is lighter-weight than sendStateUpdate() because it ships only
+ * the changed fields instead of the full ExtensionState.
+ *
+ * Fire-and-forget: errors are logged but not propagated. The next full
+ * snapshot always carries ground truth.
+ */
+export async function sendStateDelta(delta: StateDeltaMessage): Promise<void> {
+	let deltaJson: string
+	try {
+		deltaJson = JSON.stringify(delta)
+	} catch (error) {
+		Logger.error("Error serializing state delta:", error)
+		return
+	}
+
+	for (const responseStream of activeStateSubscriptions) {
+		responseStream(
+			{
+				stateJson: deltaJson,
+			},
+			false,
+		).catch((error) => {
+			Logger.error("Error sending state delta:", error)
+			activeStateSubscriptions.delete(responseStream)
+		})
+	}
+}
+
 function recordStateSizeTelemetry(sizeBytes: number): void {
 	telemetryService.captureGrpcResponseSize(sizeBytes, "cline.StateService", "subscribeToState")
 }
