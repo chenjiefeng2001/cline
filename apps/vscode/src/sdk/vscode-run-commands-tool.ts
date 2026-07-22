@@ -98,11 +98,17 @@ export function formatCommandForTerminal(command: ShellCommand): string {
  * Stream the rest of a detached command's output to a log file: write the
  * lines buffered so far, then append each further 'line' event until
  * 'completed'. The write volume is capped at PROCEED_LOG_MAX_BYTES; the
- * stream is always closed by the 'completed' event, which the terminal
- * process emits on every exit path (command end, Ctrl+C, terminal closed,
- * markerless fallback).
+ * stream is closed when the command completes or its process/acquisition
+ * fails. Completion covers command end, Ctrl+C, terminal close, and the
+ * markerless fallback.
  */
-function beginLogCapture(process: ITerminalProcess, terminalCommand: string, existingLines: string[]): string {
+interface DetachedCommandLog {
+	path: string
+	attach(process: ITerminalProcess): void
+	fail(error: unknown): void
+}
+
+function createDetachedCommandLog(terminalCommand: string, existingLines: string[]): DetachedCommandLog {
 	const logFilePath = ClineTempManager.createTempFilePath("proceed-while-running")
 	const stream = fs.createWriteStream(logFilePath, { flags: "a" })
 	const sizeCapMessage = `[Log size cap of ${PROCEED_LOG_MAX_BYTES} bytes reached; further output is not logged.]`
@@ -130,32 +136,67 @@ function beginLogCapture(process: ITerminalProcess, terminalCommand: string, exi
 		}
 	}
 
-	const onLine = (line: string): void => {
-		// Check the cap before writing: a single huge line (e.g. a dumped
-		// binary blob or minified bundle) must not blow past the cap.
-		if (!tryWriteLine(line)) {
-			tryWriteLine(sizeCapMessage)
-			process.removeListener("line", onLine)
+	let settled = false
+	let removeAttachedListeners = (): void => {}
+	const end = (message: string): void => {
+		if (settled) {
+			return
 		}
-	}
-	if (sizeCapReached) {
-		tryWriteLine(sizeCapMessage)
-	} else {
-		process.on("line", onLine)
-	}
-	process.once("completed", (details) => {
-		process.removeListener("line", onLine)
-		const exitCode = details?.exitCode
-		tryWriteLine(
-			exitCode !== undefined && exitCode !== null
-				? `[Command completed with exit code ${exitCode}]`
-				: "[Command completed]",
-		)
+		settled = true
+		removeAttachedListeners()
+		tryWriteLine(message)
 		stream.end()
-	})
+	}
 
-	return logFilePath
+	return {
+		path: logFilePath,
+		attach: (process) => {
+			const onLine = (line: string): void => {
+				// Check the cap before writing: a single huge line (e.g. a dumped
+				// binary blob or minified bundle) must not blow past the cap.
+				if (!tryWriteLine(line)) {
+					tryWriteLine(sizeCapMessage)
+					process.removeListener("line", onLine)
+				}
+			}
+			const onCompleted = (details?: { exitCode?: number | null }): void => {
+				const exitCode = details?.exitCode
+				end(
+					exitCode !== undefined && exitCode !== null
+						? `[Command completed with exit code ${exitCode}]`
+						: "[Command completed]",
+				)
+			}
+			const onError = (error: Error): void => end(`[Command failed before log capture completed: ${error.message}]`)
+			removeAttachedListeners = () => {
+				process.removeListener("line", onLine)
+				process.removeListener("completed", onCompleted)
+				process.removeListener("error", onError)
+			}
+			if (sizeCapReached) {
+				tryWriteLine(sizeCapMessage)
+			} else {
+				process.on("line", onLine)
+			}
+			process.once("completed", onCompleted)
+			process.once("error", onError)
+		},
+		fail: (error) => {
+			const message = error instanceof Error ? error.message : String(error)
+			end(`[Command failed before log capture completed: ${message}]`)
+		},
+	}
 }
+
+function formatDetachedResult(logFilePath: string, output: string): string {
+	return [
+		"The user chose to proceed while the command is starting or still running in their terminal.",
+		`This is partial output; further output is being redirected to this file, which you can read to check progress: ${logFilePath}`,
+		output.length > 0 ? `Output so far:\n${output}` : "No output so far.",
+	].join("\n")
+}
+
+type PreStartControl = "detach" | "abort"
 
 /** Exported for direct unit testing of the CommandExitError/terminalClosed mapping. */
 export async function executeForeground(
@@ -169,51 +210,68 @@ export async function executeForeground(
 	emitUpdate?: (update: unknown) => void,
 ): Promise<string> {
 	const terminalCommand = formatCommandForTerminal(command)
-	const terminalInfo = await terminalManager.getOrCreateTerminal(cwd, terminalProfileId)
-	// preserveFocus=true — show the terminal in the background without stealing
-	// the user's keyboard focus from the active text editor.
-	terminalInfo.terminal.show(true)
 
-	const process = terminalManager.runCommand(terminalInfo, terminalCommand)
-	const outputLines: string[] = []
+	// "Proceed While Running": register a per-invocation handle so the user
+	// can detach this command. Detaching redirects the remaining output to a
+	// log file and resolves the awaited promise; the command keeps running in
+	// the user's terminal (and the terminal stays busy until it completes).
+	//
+	// Registered BEFORE terminal acquisition so every command in a parallel
+	// run_commands batch is registered before the user can click the button.
+	// A command still awaiting its terminal when the user detaches records the
+	// request and applies it the moment its process starts — otherwise that
+	// late command would re-block the turn the button just released.
+	const state: { phase: "waiting" | "started" | "detached" | "aborted" } = { phase: "waiting" }
+	let detachedLog: DetachedCommandLog | undefined
+	let applyDetach: (() => void) | undefined
+	let resolvePreStartControl!: (control: PreStartControl) => void
+	const preStartControl = new Promise<PreStartControl>((resolve) => {
+		resolvePreStartControl = resolve
+	})
+	const unregister = foregroundCommands?.register({
+		detach: () => {
+			if (state.phase === "waiting") {
+				state.phase = "detached"
+				detachedLog = createDetachedCommandLog(terminalCommand, [])
+				telemetryService.captureTerminalUserIntervention(TerminalUserInterventionAction.PROCESS_WHILE_RUNNING, "vscode")
+				resolvePreStartControl("detach")
+			} else if (state.phase === "started") {
+				applyDetach?.()
+			}
+		},
+	})
+	const onAbort = (): void => {
+		if (state.phase === "waiting") {
+			state.phase = "aborted"
+			resolvePreStartControl("abort")
+		} else if (state.phase === "started") {
+			applyAbort?.()
+		}
+	}
+	let applyAbort: (() => void) | undefined
+	abortSignal?.addEventListener("abort", onAbort, { once: true })
+	if (abortSignal?.aborted) {
+		onAbort()
+	}
+
+	// Live output streaming state.
+	//
+	// Declared at function scope rather than next to the buffer below, because the
+	// flush has to run from the `finally` — that is the only place guaranteed to cover
+	// completion, abort, and throw alike, and a build's error is usually in its last
+	// lines, which is exactly what the flush exists to deliver.
+	//
+	// `emitUpdate` is wired by the runtime (`agent-runtime.ts` → `tool-updated`), but the
+	// VS Code host still drops `content_update` for every tool except `spawn_agent`
+	// (`message-translator.ts`), so these lines do not reach the chat UI yet. The value
+	// returned to the model is unaffected, so this is additive and safe to land ahead of
+	// the host-side rendering.
 	let droppedLines = 0
-
-	// Accumulate output lines to return the full output once the command completes,
-	// and stream the same lines to the chat as they arrive.
-	//
-	// The buffer still exists because `execute` must return the complete output as
-	// its result — the model reads it from the tool result, and a truncated return
-	// would change tool semantics. But the user should not have to wait for the
-	// command to finish to see that it is producing anything at all: a build or test
-	// run can go minutes, and with output shown only at the end there is no way to
-	// tell a slow command from a hung one.
-	//
-	// This is a second buffer on top of the process's own `fullOutput` (capped at
-	// MAX_FULL_OUTPUT_SIZE — see VscodeTerminalProcess), so it needs its own cap:
-	// a long-running command emitting many lines must not accumulate them here
-	// without bound. Once the cap is hit, keep only the head and tail — matching
-	// truncateCommandOutput's own head/tail strategy below — since build/test
-	// failures usually appear at the end of output.
-	//
-	// REACHABILITY: `emitUpdate` is wired by the runtime
-	// (`agent-runtime.ts:2525` → `tool-updated`), but the VS Code host drops
-	// `content_update` for every tool except `spawn_agent`
-	// (`message-translator.ts:1177`), so these lines do not reach the chat UI yet.
-	// The buffer below is unaffected — `execute` still returns the full output —
-	// so this is additive and safe to land ahead of the host-side rendering.
-	// See doc/agent-capability-gap-review-2026-10-03.md §5.3.
-	const maxBufferedLines = MAX_UNRETRIEVED_LINES
-	// Streamed lines are throttled: a command emitting thousands of lines would
-	// otherwise flood the host with one event per line. Leading lines are always
-	// delivered (the error usually appears early in a build), then the cadence
-	// relaxes, and the final line is always delivered so the last error is never
-	// the one that gets dropped.
 	const STREAM_LEAD_LINES = 20
 	const STREAM_INTERVAL_MS = 250
 	let lastStreamedAt = 0
 	let streamedLines = 0
 	let pendingTail: string | undefined
-
 	const emitStreamUpdate = (line: string): void => {
 		if (!emitUpdate) {
 			return
@@ -224,6 +282,9 @@ export async function executeForeground(
 			emitUpdate({ type: "command_output", line, dropped: droppedLines })
 			return
 		}
+		// Throttle: a command emitting thousands of lines would otherwise send one
+		// event per line. Keep only the newest and let the flush deliver it, so the
+		// final error is never the one that gets dropped.
 		pendingTail = line
 		if (Date.now() - lastStreamedAt >= STREAM_INTERVAL_MS) {
 			lastStreamedAt = Date.now()
@@ -231,7 +292,7 @@ export async function executeForeground(
 			pendingTail = undefined
 		}
 	}
-	/** Flushes the throttled tail. Called once when the command settles. */
+	/** Flushes the throttled tail. Called on every settle path. */
 	const flushStreamUpdate = (): void => {
 		if (pendingTail !== undefined) {
 			const line = pendingTail
@@ -244,49 +305,121 @@ export async function executeForeground(
 			})
 		}
 	}
-	const bufferLine = (line: string): void => {
-		if (outputLines.length < maxBufferedLines) {
-			outputLines.push(line)
-		} else {
-			outputLines.shift()
-			outputLines.push(line)
-			droppedLines++
-		}
-		emitStreamUpdate(line)
-	}
-	process.on("line", bufferLine)
 
-	// Handle abort signal
-	//
-	// Track *why* `await process` resolved — the "continue" event fires for
-	// natural completion, `process.continue()` (called here on abort), *and*
-	// `process.detach()` (called by the Proceed-While-Running button). We
-	// need to distinguish abort from the other two so that completion details
-	// (especially terminalClosed) are not lost to a TOCTOU between
-	// `abortSignal?.aborted` and `getCompletionDetails()`.
-	let resolvedByAbort = false
-	if (abortSignal) {
-		const onAbort = () => {
+	try {
+		const terminalPromise = terminalManager.getOrCreateTerminal(cwd, terminalProfileId)
+		const startDetached = (terminalInfo: Awaited<typeof terminalPromise>, log: DetachedCommandLog): void => {
+			try {
+				// preserveFocus=true — reveal the terminal without stealing the user's
+				// keyboard focus. Same reason as the foreground path below: a background
+				// dev server coming up should not yank the cursor out of the editor.
+				terminalInfo.terminal.show(true)
+				const process = terminalManager.runCommand(terminalInfo, terminalCommand)
+				log.attach(process)
+				void process.catch((error) => log.fail(error))
+				process.detach()
+			} catch (error) {
+				log.fail(error)
+			}
+		}
+		const acquisition = terminalPromise.then(
+			(terminalInfo) => ({ type: "terminal" as const, terminalInfo }),
+			(error: unknown) => ({ type: "error" as const, error }),
+		)
+		const finishDetachedAcquisition = (outcome: Awaited<typeof acquisition>, log: DetachedCommandLog): void => {
+			if (outcome.type === "terminal") {
+				startDetached(outcome.terminalInfo, log)
+			} else {
+				log.fail(outcome.error)
+			}
+		}
+		const firstOutcome = await Promise.race([
+			acquisition,
+			preStartControl.then((control) => ({ type: "control" as const, control })),
+		])
+
+		if (firstOutcome.type === "control") {
+			if (firstOutcome.control === "abort") {
+				throw new Error("Command execution aborted")
+			}
+
+			const log = detachedLog
+			if (!log) {
+				throw new Error("Detached command log was not initialized")
+			}
+			void acquisition.then((outcome) => finishDetachedAcquisition(outcome, log))
+			return formatDetachedResult(log.path, "")
+		}
+
+		// Acquisition and a user action can resolve in the same microtask turn.
+		// Re-check the invocation phase after the await so an already-queued
+		// terminal outcome cannot overwrite a detach or abort that happened while
+		// the promise continuation was pending.
+		if (state.phase === "aborted") {
+			throw new Error("Command execution aborted")
+		}
+		if (state.phase === "detached") {
+			const log = detachedLog
+			if (!log) {
+				throw new Error("Detached command log was not initialized")
+			}
+			finishDetachedAcquisition(firstOutcome, log)
+			return formatDetachedResult(log.path, "")
+		}
+		if (firstOutcome.type === "error") {
+			throw firstOutcome.error
+		}
+
+		state.phase = "started"
+		const { terminalInfo } = firstOutcome
+		// preserveFocus=true — reveal the terminal without stealing the user's keyboard
+		// focus from the active editor. Without it, starting any command yanks the
+		// cursor out from under whatever the user was typing.
+		terminalInfo.terminal.show(true)
+
+		const process = terminalManager.runCommand(terminalInfo, terminalCommand)
+		const outputLines: string[] = []
+
+		// Accumulate output lines to return the full output once the command completes.
+		// The chat shows command output at completion, not incrementally.
+		//
+		// This is a second buffer on top of the process's own `fullOutput` (capped at
+		// MAX_FULL_OUTPUT_SIZE — see VscodeTerminalProcess), so it needs its own cap:
+		// a long-running command emitting many lines must not accumulate them here
+		// without bound. Once the cap is hit, keep only the head and tail — matching
+		// truncateCommandOutput's own head/tail strategy below — since build/test
+		// failures usually appear at the end of output.
+		const maxBufferedLines = MAX_UNRETRIEVED_LINES
+		const bufferLine = (line: string): void => {
+			if (outputLines.length < maxBufferedLines) {
+				outputLines.push(line)
+			} else {
+				outputLines.shift()
+				outputLines.push(line)
+				droppedLines++
+			}
+			emitStreamUpdate(line)
+		}
+		process.on("line", bufferLine)
+
+		// Track *why* `await process` resolved. The "continue" event fires for natural
+		// completion, for this abort-driven `continue()`, and for `detach()` — so a
+		// truthy `abortSignal.aborted` afterwards does not tell us whether the command
+		// was actually interrupted or had already finished on its own. Both can happen
+		// in the same turn, and reporting "aborted" for a command that really failed
+		// hides the failure from the agent.
+		let resolvedByAbort = false
+		applyAbort = () => {
 			resolvedByAbort = true
 			process.continue()
 		}
-		const cleanupAbortListener = () => abortSignal.removeEventListener("abort", onAbort)
-		abortSignal.addEventListener("abort", onAbort, { once: true })
-		process.once("completed", cleanupAbortListener)
-		process.once("continue", cleanupAbortListener)
-	}
 
-	// "Proceed While Running": register a per-invocation handle so the user
-	// can detach this command. Detaching redirects the remaining output to a
-	// log file and resolves the awaited promise; the command keeps running in
-	// the user's terminal (and the terminal stays busy until it completes).
-	let detachedLogFilePath: string | undefined
-	const unregister = foregroundCommands?.register({
-		detach: () => {
-			if (detachedLogFilePath !== undefined) {
+		applyDetach = () => {
+			if (detachedLog !== undefined) {
 				return
 			}
-			detachedLogFilePath = beginLogCapture(process, terminalCommand, outputLines)
+			detachedLog = createDetachedCommandLog(terminalCommand, outputLines)
+			detachedLog.attach(process)
 			telemetryService.captureTerminalUserIntervention(TerminalUserInterventionAction.PROCESS_WHILE_RUNNING, "vscode")
 			// detach() flushes any partial line (reaching both bufferLine and
 			// the log) before resolving the awaited promise. After that the
@@ -294,51 +427,65 @@ export async function executeForeground(
 			// (log-only) output doesn't mutate outputLines while it's read.
 			process.detach()
 			process.removeListener("line", bufferLine)
-		},
-	})
+		}
 
-	try {
 		// Wait for completion (or detach, which also resolves the promise)
 		await process
-	} finally {
-		unregister?.()
-		// Flush the throttled tail on every settle path — completion, abort and
-		// throw alike. A build's error is usually in its last lines, so dropping
-		// the pending tail here is exactly the case the tail exists to cover.
-		flushStreamUpdate()
-	}
 
-	const bufferedOutput =
-		droppedLines > 0
-			? [...outputLines, `\n... (${droppedLines} earlier lines dropped) ...\n`].join("\n")
-			: outputLines.join("\n")
-	const output = truncateCommandOutput(bufferedOutput.trim(), {
-		maxChars: maxOutputChars,
-	})
+		const bufferedOutput =
+			droppedLines > 0
+				? [...outputLines, `\n... (${droppedLines} earlier lines dropped) ...\n`].join("\n")
+				: outputLines.join("\n")
+		const output = truncateCommandOutput(bufferedOutput.trim(), {
+			maxChars: maxOutputChars,
+		})
 
-	if (detachedLogFilePath !== undefined) {
-		return [
-			"The user chose to proceed while the command is still running in their terminal.",
-			`This is partial output; further output is being redirected to this file, which you can read to check progress: ${detachedLogFilePath}`,
-			output.length > 0 ? `Output so far:\n${output}` : "No output so far.",
-		].join("\n")
-	}
+		if (detachedLog !== undefined) {
+			return formatDetachedResult(detachedLog.path, output)
+		}
 
-	// Read completion details BEFORE the abort check. If the process already
-	// completed (e.g. terminal closed mid-command), the completion details are
-	// the real result — we must not lose them to a TOCTOU between
-	// `abortSignal?.aborted` and `getCompletionDetails()` when both the
-	// abort signal and the natural "completed" event fire around the same time.
-	const completionDetails = process.getCompletionDetails?.()
+		// Read completion details BEFORE deciding this was an abort.
+		//
+		// This is the fork's behaviour, deliberately kept against upstream's ordering.
+		// Upstream tests `abortSignal.aborted` first and throws "Command execution
+		// aborted" immediately, which discards `getCompletionDetails()`. But the abort
+		// signal and a natural completion can fire in the same turn: the command has
+		// already produced a non-zero exit code, and reporting it as "aborted" throws
+		// away the only signal the agent had about why the build failed. So when the
+		// resolve was caused by our own `continue()`, the terminal's own verdict wins.
+		const completionDetails = process.getCompletionDetails?.()
 
-	// resolvedByAbort means the abort handler called process.continue(), which
-	// resolved `await process`. If the process had already completed naturally
-	// by that point (completionDetails are present), we use the completion
-	// details. Only throw "aborted" when the process did NOT complete — i.e.
-	// the command was genuinely interrupted by cancellation.
-	if (resolvedByAbort) {
-		// If the terminal closed mid-command, that takes priority: the command
-		// was interrupted regardless of the abort signal.
+		if (resolvedByAbort) {
+			if (completionDetails?.terminalClosed) {
+				const result =
+					output.length > 0
+						? `[Terminal closed while the command was running; output may be incomplete]\n${output}`
+						: "[Terminal closed while the command was running; no output was captured]"
+				throw new CommandExitError(1, result)
+			}
+			// Finished with an error before the abort was processed.
+			const exitCode = completionDetails?.exitCode
+			if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
+				const result =
+					output.length > 0
+						? `[Command exited with code ${exitCode}]\n${output}`
+						: `[Command exited with code ${exitCode}]`
+				throw new CommandExitError(exitCode, result)
+			}
+			// Genuinely interrupted: the process did not complete on its own.
+			throw new Error("Command execution aborted")
+		}
+
+		// Aborted without our abort path running (e.g. the signal fired before the
+		// process started but after acquisition resolved). Nothing completed, so there
+		// is no terminal verdict to prefer.
+		if (abortSignal?.aborted) {
+			throw new Error("Command execution aborted")
+		}
+
+		// A terminal closed mid-command has no exit code and no reliable output —
+		// whatever the command was doing (e.g. running a test suite) was interrupted,
+		// so this must never look like success to the agent.
 		if (completionDetails?.terminalClosed) {
 			const result =
 				output.length > 0
@@ -346,46 +493,32 @@ export async function executeForeground(
 					: "[Terminal closed while the command was running; no output was captured]"
 			throw new CommandExitError(1, result)
 		}
-		// If we have a non-zero exit code from natural completion, the command
-		// finished with an error before the abort was processed.
+
+		// Plumb the exit code from onDidEndTerminalShellExecution through to the tool
+		// result. When shell integration reports a non-zero exit code, throw
+		// CommandExitError so the SDK's shell tool wrapper marks the result as
+		// `success: false` and includes the exit code in the error message —
+		// matching the background (child_process) executor's behavior.
+		// If no exit code was captured (shell integration present but not reporting
+		// completion for this execution — e.g. a command run inside an ssh session),
+		// we can't determine success/failure, so we return the output as-is
+		// (success: true).
 		const exitCode = completionDetails?.exitCode
 		if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
 			const result =
 				output.length > 0 ? `[Command exited with code ${exitCode}]\n${output}` : `[Command exited with code ${exitCode}]`
 			throw new CommandExitError(exitCode, result)
 		}
-		// Otherwise the command was genuinely interrupted — throw aborted.
-		throw new Error("Command execution aborted")
-	}
 
-	// A terminal closed mid-command has no exit code and no reliable output —
-	// whatever the command was doing (e.g. running a test suite) was interrupted,
-	// so this must never look like success to the agent.
-	if (completionDetails?.terminalClosed) {
-		const result =
-			output.length > 0
-				? `[Terminal closed while the command was running; output may be incomplete]\n${output}`
-				: "[Terminal closed while the command was running; no output was captured]"
-		throw new CommandExitError(1, result)
+		return output
+	} finally {
+		abortSignal?.removeEventListener("abort", onAbort)
+		unregister?.()
+		// Flush the throttled tail on every settle path — completion, abort and throw
+		// alike. A build's error is usually in its last lines, so dropping the pending
+		// tail here is exactly the case the tail exists to cover.
+		flushStreamUpdate()
 	}
-
-	// Plumb the exit code from onDidEndTerminalShellExecution through to the tool
-	// result. When shell integration reports a non-zero exit code, throw
-	// CommandExitError so the SDK's shell tool wrapper marks the result as
-	// `success: false` and includes the exit code in the error message —
-	// matching the background (child_process) executor's behavior.
-	// If no exit code was captured (shell integration present but not reporting
-	// completion for this execution — e.g. a command run inside an ssh session),
-	// we can't determine success/failure, so we return the output as-is
-	// (success: true).
-	const exitCode = completionDetails?.exitCode
-	if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
-		const result =
-			output.length > 0 ? `[Command exited with code ${exitCode}]\n${output}` : `[Command exited with code ${exitCode}]`
-		throw new CommandExitError(exitCode, result)
-	}
-
-	return output
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +567,7 @@ export function createVscodeRunCommandsTool(options: VscodeRunCommandsToolOption
 			state.snapshot = takeShellSnapshot()
 			return state.snapshot.shell
 		},
-	} as any)
+	})
 }
 
 function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state: { snapshot: ShellSnapshot }): ShellExecutor {
