@@ -135,14 +135,22 @@ function createFakeTerminalProcess(options: { lines?: string[]; completionDetail
 		catch: promise.catch.bind(promise),
 		finally: promise.finally.bind(promise),
 		getCompletionDetails: () => options.completionDetails ?? {},
-		continue: () => {
-			emitter.emit("continue")
-			resolvePromise()
-		},
 		detach: () => {
 			emitter.emit("continue")
 			resolvePromise()
 		},
+	})
+	return fakeProcess as unknown as ReturnType<VscodeTerminalManager["runCommand"]>
+}
+
+function createRejectedTerminalProcess(error: Error) {
+	const emitter = new EventEmitter()
+	const promise = new Promise<void>((_resolve, reject) => setTimeout(() => reject(error), 0))
+	const fakeProcess = Object.assign(emitter, {
+		then: promise.then.bind(promise),
+		catch: promise.catch.bind(promise),
+		finally: promise.finally.bind(promise),
+		getCompletionDetails: () => ({}),
 	})
 	return fakeProcess as unknown as ReturnType<VscodeTerminalManager["runCommand"]>
 }
@@ -171,7 +179,14 @@ function createControllableTerminalProcess() {
 		then: promise.then.bind(promise),
 		catch: promise.catch.bind(promise),
 		finally: promise.finally.bind(promise),
+		// Mirror the real VscodeTerminalProcess: report whatever the test completed
+		// with, instead of a hardcoded {}. With `() => ({})` the completion signal is
+		// silently dropped, so an exit code or terminalClosed set by the test could not
+		// reach executeForeground and every assertion about it became unprovable.
 		getCompletionDetails: () => completionDetails,
+		// The real process exposes continue(); applyAbort() calls it when a turn is
+		// cancelled mid-command. Without it, aborting a started command threw
+		// "process.continue is not a function" inside the abort listener.
 		continue: () => {
 			emitter.emit("continue")
 			resolvePromise()
@@ -184,13 +199,21 @@ function createControllableTerminalProcess() {
 	return {
 		process: fakeProcess as unknown as ReturnType<VscodeTerminalManager["runCommand"]>,
 		emitLine: (line: string) => emitter.emit("line", line),
-		fail: (error: Error) => emitter.emit("error", error),
 		complete: (details?: TerminalCompletionDetails) => {
 			completionDetails = details ?? {}
 			emitter.emit("completed", details)
 			emitter.emit("continue")
 			resolvePromise()
 		},
+		fail: (error: Error) => emitter.emit("error", error),
+	}
+}
+
+function createControllableUnobservedTerminalProcess() {
+	const controlled = createControllableTerminalProcess()
+	return {
+		...controlled,
+		completeUnobserved: () => controlled.complete({ unobservedCommand: { source: "sendText", ownership: "detached" } }),
 	}
 }
 
@@ -274,58 +297,6 @@ describe("formatCommandForTerminal", () => {
 })
 
 describe("executeForeground", () => {
-	it("streams output lines while keeping the return value intact", async () => {
-		// Output used to be shown only at completion, so a multi-minute build was
-		// indistinguishable from a hang. Streaming must not change what `execute`
-		// returns — the model still reads the complete result from the tool result.
-		const process = createFakeTerminalProcess({ lines: ["compiling a", "compiling b"] })
-		const terminalManager = createFakeTerminalManager(process)
-		const updates: unknown[] = []
-
-		const result = await executeForeground(
-			"build",
-			"/workspace",
-			terminalManager,
-			1000,
-			undefined,
-			undefined,
-			undefined,
-			(update) => updates.push(update),
-		)
-
-		expect(result).toBe("compiling a\ncompiling b")
-		expect(updates.length).toBeGreaterThan(0)
-		for (const update of updates) {
-			expect(update).toMatchObject({ type: "command_output" })
-		}
-	})
-
-	it("delivers the final throttled line", async () => {
-		// The last line of a failing build is usually the error, so the throttled
-		// tail is flushed on settle and must be observable.
-		const lines = Array.from({ length: 60 }, (_, i) => `line ${i}`)
-		const process = createFakeTerminalProcess({ lines })
-		const terminalManager = createFakeTerminalManager(process)
-		const updates: Array<{ line?: string; final?: boolean }> = []
-
-		await executeForeground("build", "/workspace", terminalManager, 100000, undefined, undefined, undefined, (u) =>
-			updates.push(u as { line?: string; final?: boolean }),
-		)
-
-		const final = updates.filter((u) => u.final === true)
-		expect(final).toHaveLength(1)
-		expect(final[0]?.line).toBe("line 59")
-	})
-
-	it("runs normally when no emitUpdate is supplied", async () => {
-		const process = createFakeTerminalProcess({ lines: ["ok"] })
-		const terminalManager = createFakeTerminalManager(process)
-
-		const result = await executeForeground("echo ok", "/workspace", terminalManager, 1000)
-
-		expect(result).toBe("ok")
-	})
-
 	it("returns output as-is on success (no exit code captured)", async () => {
 		const process = createFakeTerminalProcess({ lines: ["hello"] })
 		const terminalManager = createFakeTerminalManager(process)
@@ -401,6 +372,45 @@ describe("executeForeground", () => {
 		}
 	})
 
+	it("throws an indeterminate CommandExitError when command completion cannot be observed", async () => {
+		const process = createFakeTerminalProcess({
+			lines: ["partial output"],
+			completionDetails: { unobservedCommand: { source: "sendText", ownership: "managed" } },
+		})
+		const terminalManager = createFakeTerminalManager(process)
+
+		try {
+			await executeForeground("long-running-cmd", "/workspace", terminalManager, 1000)
+			expect.unreachable("expected executeForeground to reject indeterminate completion")
+		} catch (error) {
+			expect(error).toBeInstanceOf(CommandExitError)
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain("must not be assumed to have succeeded")
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain(
+				"The terminal remains open for now, but starting another foreground command will attempt to close it",
+			)
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain("partial output")
+		}
+	})
+
+	it("says markerless terminals will be preserved when completion cannot be observed", async () => {
+		const process = createFakeTerminalProcess({
+			completionDetails: {
+				unobservedCommand: { source: "markerlessShellIntegration", ownership: "managed" },
+			},
+		})
+
+		try {
+			await executeForeground("remote-command", "/workspace", createFakeTerminalManager(process), 1000)
+			expect.unreachable("expected executeForeground to reject indeterminate completion")
+		} catch (error) {
+			expect(error).toBeInstanceOf(CommandExitError)
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain(
+				"left open and will not be closed automatically",
+			)
+			expect((error as InstanceType<typeof CommandExitError>).output).not.toContain("next foreground command")
+		}
+	})
+
 	it("unregisters its foreground handle when the command completes normally", async () => {
 		const coordinator = new SdkForegroundCommandCoordinator()
 		const terminalManager = createFakeTerminalManager(createFakeTerminalProcess({ lines: ["hello"] }))
@@ -411,125 +421,27 @@ describe("executeForeground", () => {
 		expect(coordinator.isRunning).toBe(false)
 	})
 
-	it("throws 'Command execution aborted' when the abort signal fires mid-command", async () => {
-		const abortController = new AbortController()
-		// Use the controllable process so we can order abort *after* `await process` yields.
-		const { process, complete } = createControllableTerminalProcess()
-		const terminalManager = createFakeTerminalManager(process)
+	it("removes per-call listeners when the command completes", async () => {
+		const process = createFakeTerminalProcess({ lines: ["hello"] })
 
-		const resultPromise = executeForeground("long-cmd", "/workspace", terminalManager, 1000, abortController.signal)
+		await executeForeground("echo hello", "/workspace", createFakeTerminalManager(process), 1000)
 
-		// Let the `await process` yield. After this tick completes, the command
-		// is running and waiting (the controllable process hasn't completed yet).
-		await new Promise((resolve) => setTimeout(resolve, 5))
-
-		abortController.abort()
-
-		try {
-			await resultPromise
-			// If we get here, the command didn't throw — make the failure obvious.
-			expect(abortController.signal.aborted).toBe(true)
-			expect.unreachable("expected executeForeground to throw on abort")
-		} catch (error) {
-			expect(error).toBeInstanceOf(Error)
-			expect((error as Error).message).toBe("Command execution aborted")
-		}
+		expect(process.listenerCount("line")).toBe(0)
 	})
 
-	it("unregisters its foreground handle when the abort signal fires", async () => {
+	it("removes per-call and abort listeners when the command rejects", async () => {
+		const process = createRejectedTerminalProcess(new Error("stream failed"))
 		const abortController = new AbortController()
-		const coordinator = new SdkForegroundCommandCoordinator()
-		const process = createFakeTerminalProcess({ lines: ["partial"] })
-		const terminalManager = createFakeTerminalManager(process)
+		const removeAbortListener = vi.spyOn(abortController.signal, "removeEventListener")
 
-		const resultPromise = executeForeground(
-			"long-cmd",
-			"/workspace",
-			terminalManager,
-			1000,
-			abortController.signal,
-			coordinator,
-		)
+		await expect(
+			executeForeground("failing-command", "/workspace", createFakeTerminalManager(process), 1000, abortController.signal),
+		).rejects.toThrow("stream failed")
 
-		abortController.abort()
-
-		try {
-			await resultPromise
-			expect.unreachable("expected executeForeground to throw on abort")
-		} catch {
-			expect(coordinator.isRunning).toBe(false)
-		}
-	})
-
-	it("throws CommandExitError for terminalClosed even when the abort signal also fired", async () => {
-		// Edge case: the process completes with terminalClosed=true, then the
-		// abort signal fires. `resolvedByAbort` is true because the abort
-		// handler called process.continue(), but completion details already
-		// reflect the terminal closed. The terminalClosed error must win.
-		const abortController = new AbortController()
-		const { process, complete } = createControllableTerminalProcess()
-		const terminalManager = createFakeTerminalManager(process)
-
-		const resultPromise = executeForeground("long-cmd", "/workspace", terminalManager, 1000, abortController.signal)
-
-		// Let `await process` yield first
-		await new Promise((resolve) => setTimeout(resolve, 5))
-
-		// Process completes naturally (terminal closed). The promise resolves
-		// and schedules a microtask to resume `await process`. Before that
-		// microtask fires, we call abort() synchronously below so that
-		// `resolvedByAbort = true` is set before `await process` resumes.
-		complete({ terminalClosed: true })
-		// Suppress the interim unhandled rejection: `resultPromise` will reject
-		// when `await process` resumes (inside the microtask) but the test's
-		// `try { await resultPromise }` hasn't started yet.
-		resultPromise.catch(() => {})
-
-		// THEN abort fires — simulating the TOCTOU: abort happens after
-		// the process already resolved via its own completion path, but
-		// before `await process` resumes (the microtask hasn't processed yet).
-		abortController.abort()
-
-		try {
-			await resultPromise
-			expect.unreachable("expected executeForeground to throw CommandExitError for terminalClosed")
-		} catch (error) {
-			expect(error).toBeInstanceOf(CommandExitError)
-			expect((error as InstanceType<typeof CommandExitError>).output).toContain("Terminal closed")
-		}
-	})
-
-	it("throws CommandExitError for non-zero exit code even when the abort signal also fired", async () => {
-		// Edge case: the process completes with exitCode=1 naturally, then
-		// the abort signal fires. The exit code must win over abort.
-		const abortController = new AbortController()
-		const { process, emitLine, complete } = createControllableTerminalProcess()
-		const terminalManager = createFakeTerminalManager(process)
-
-		const resultPromise = executeForeground("failing-cmd", "/workspace", terminalManager, 1000, abortController.signal)
-
-		// Let `await process` yield first
-		await new Promise((resolve) => setTimeout(resolve, 5))
-
-		// Emit some output first, then process completes with non-zero exit code
-		emitLine("error output")
-		// Same approach: complete first, then abort synchronously.
-		complete({ exitCode: 1 })
-		resultPromise.catch(() => {})
-
-		// THEN abort fires — the process already completed, so the abort
-		// handler sets `resolvedByAbort = true` but completion details
-		// (exitCode: 1) take priority.
-		abortController.abort()
-
-		try {
-			await resultPromise
-			expect.unreachable("expected executeForeground to throw CommandExitError for non-zero exit code")
-		} catch (error) {
-			expect(error).toBeInstanceOf(CommandExitError)
-			expect((error as InstanceType<typeof CommandExitError>).exitCode).toBe(1)
-			expect((error as InstanceType<typeof CommandExitError>).output).toContain("error output")
-		}
+		expect(process.listenerCount("line")).toBe(0)
+		expect(process.listenerCount("completed")).toBe(0)
+		expect(process.listenerCount("continue")).toBe(0)
+		expect(removeAbortListener).toHaveBeenCalledWith("abort", expect.any(Function))
 	})
 })
 
@@ -570,6 +482,130 @@ describe("executeForeground — Proceed While Running", () => {
 		const log = fs.readFileSync(logFilePath!, "utf8")
 		expect(log).toContain("listening on :3000") // buffered lines flushed at detach
 		expect(log).toContain("compiled successfully") // streamed after detach
+		fs.rmSync(logFilePath!, { force: true })
+	})
+
+	it("does not label a detached unobserved command as completed in its log", async () => {
+		const coordinator = new SdkForegroundCommandCoordinator()
+		const { process, completeUnobserved } = createControllableUnobservedTerminalProcess()
+		const resultPromise = executeForeground(
+			"devserver",
+			"/workspace",
+			createFakeTerminalManager(process),
+			100_000,
+			undefined,
+			coordinator,
+		)
+
+		await waitFor(() => coordinator.isRunning)
+		expect(coordinator.proceedWhileRunning()).toBe(1)
+		const result = await resultPromise
+		const logFilePath = /redirected to this file[^:]*: (.+)$/m.exec(result)?.[1]?.trim()
+		expect(logFilePath).toBeTruthy()
+
+		completeUnobserved()
+		await waitFor(() => {
+			try {
+				return fs.readFileSync(logFilePath!, "utf8").includes("completion could not be observed")
+			} catch {
+				return false
+			}
+		})
+		const log = fs.readFileSync(logFilePath!, "utf8")
+		expect(log).toContain("the command may still be running")
+		expect(log).not.toContain("[Command completed]")
+		fs.rmSync(logFilePath!, { force: true })
+	})
+
+	it("does not label a detached terminal closure as completed in its log", async () => {
+		const coordinator = new SdkForegroundCommandCoordinator()
+		const { process, complete } = createControllableTerminalProcess()
+		const resultPromise = executeForeground(
+			"devserver",
+			"/workspace",
+			createFakeTerminalManager(process),
+			100_000,
+			undefined,
+			coordinator,
+		)
+
+		await waitFor(() => coordinator.isRunning)
+		expect(coordinator.proceedWhileRunning()).toBe(1)
+		const result = await resultPromise
+		const logFilePath = /redirected to this file[^:]*: (.+)$/m.exec(result)?.[1]?.trim()
+		expect(logFilePath).toBeTruthy()
+
+		complete({ terminalClosed: true })
+		await waitFor(() => {
+			try {
+				return fs.readFileSync(logFilePath!, "utf8").includes("Terminal closed while the command was running")
+			} catch {
+				return false
+			}
+		})
+		const log = fs.readFileSync(logFilePath!, "utf8")
+		expect(log).toContain("output may be incomplete")
+		expect(log).not.toContain("[Command completed]")
+		fs.rmSync(logFilePath!, { force: true })
+	})
+
+	it("records a command failure that occurs after detaching and closes the log", async () => {
+		const coordinator = new SdkForegroundCommandCoordinator()
+		const { process, fail } = createControllableTerminalProcess()
+		const resultPromise = executeForeground(
+			"devserver",
+			"/workspace",
+			createFakeTerminalManager(process),
+			100_000,
+			undefined,
+			coordinator,
+		)
+
+		await waitFor(() => coordinator.isRunning)
+		expect(coordinator.proceedWhileRunning()).toBe(1)
+		const result = await resultPromise
+		const logFilePath = /redirected to this file[^:]*: (.+)$/m.exec(result)?.[1]?.trim()
+		expect(logFilePath).toBeTruthy()
+
+		fail(new Error("stream failed"))
+		await waitFor(() => {
+			try {
+				return fs.readFileSync(logFilePath!, "utf8").includes("[Command failed after detaching: stream failed]")
+			} catch {
+				return false
+			}
+		})
+		expect(fs.readFileSync(logFilePath!, "utf8")).not.toContain("[Command completed]")
+		fs.rmSync(logFilePath!, { force: true })
+	})
+
+	it("records a detached failure even after command output reaches the log cap", async () => {
+		const coordinator = new SdkForegroundCommandCoordinator()
+		const { process, emitLine, fail } = createControllableTerminalProcess()
+		const resultPromise = executeForeground(
+			"devserver",
+			"/workspace",
+			createFakeTerminalManager(process),
+			100_000,
+			undefined,
+			coordinator,
+		)
+
+		await waitFor(() => coordinator.isRunning)
+		expect(coordinator.proceedWhileRunning()).toBe(1)
+		const result = await resultPromise
+		const logFilePath = /redirected to this file[^:]*: (.+)$/m.exec(result)?.[1]?.trim()
+		expect(logFilePath).toBeTruthy()
+
+		emitLine("x".repeat(PROCEED_LOG_MAX_BYTES))
+		fail(new Error("stream failed after cap"))
+		await waitFor(() => {
+			try {
+				return fs.readFileSync(logFilePath!, "utf8").includes("[Command failed after detaching: stream failed after cap]")
+			} catch {
+				return false
+			}
+		})
 		fs.rmSync(logFilePath!, { force: true })
 	})
 
@@ -683,12 +719,17 @@ describe("executeForeground — Proceed While Running", () => {
 			releaseTerminal = resolve
 		})
 		const runCommand = vi.fn()
+		const terminalInfo = { terminal: { show: () => {} }, busy: true }
+		const releaseTerminalReservation = vi.fn(() => {
+			terminalInfo.busy = false
+		})
 		const terminalManager = {
 			getOrCreateTerminal: async () => {
 				await terminalGate
-				return { terminal: { show: () => {} } } as never
+				return terminalInfo as never
 			},
 			runCommand,
+			releaseTerminalReservation,
 		} as unknown as VscodeTerminalManager
 
 		const resultPromise = executeForeground(
@@ -708,11 +749,41 @@ describe("executeForeground — Proceed While Running", () => {
 		releaseTerminal()
 		await new Promise((resolve) => setTimeout(resolve, 0))
 		expect(runCommand).not.toHaveBeenCalled()
+		expect(releaseTerminalReservation).toHaveBeenCalledWith(terminalInfo)
+		expect(terminalInfo.busy).toBe(false)
+	})
+
+	it("releases the reservation when acquisition and abort settle in the same promise turn", async () => {
+		const coordinator = new SdkForegroundCommandCoordinator()
+		const abortController = new AbortController()
+		const terminalInfo = { terminal: { show: () => {} }, busy: true }
+		const runCommand = vi.fn()
+		const releaseTerminalReservation = vi.fn(() => {
+			terminalInfo.busy = false
+		})
+		const terminalManager = {
+			getOrCreateTerminal: () =>
+				Promise.resolve(terminalInfo as never).then((terminal) => {
+					abortController.abort()
+					return terminal
+				}),
+			runCommand,
+			releaseTerminalReservation,
+		} as unknown as VscodeTerminalManager
+
+		await expect(
+			executeForeground("cancelled-as-acquired", "/workspace", terminalManager, 1000, abortController.signal, coordinator),
+		).rejects.toThrow("Command execution aborted")
+
+		expect(runCommand).not.toHaveBeenCalled()
+		expect(releaseTerminalReservation).toHaveBeenCalledWith(terminalInfo)
+		expect(terminalInfo.busy).toBe(false)
+		expect(coordinator.isRunning).toBe(false)
 	})
 
 	it("detach requested during terminal acquisition applies once the command starts", async () => {
 		const coordinator = new SdkForegroundCommandCoordinator()
-		const { process, emitLine, complete } = createControllableTerminalProcess()
+		const { process, emitLine, completeUnobserved } = createControllableUnobservedTerminalProcess()
 		let releaseTerminal!: () => void
 		const terminalGate = new Promise<void>((resolve) => {
 			releaseTerminal = resolve
@@ -743,15 +814,18 @@ describe("executeForeground — Proceed While Running", () => {
 		releaseTerminal()
 		await waitFor(() => process.listenerCount("line") > 0)
 		emitLine("started late")
-		complete({ exitCode: 0 })
+		completeUnobserved()
 		await waitFor(() => {
 			try {
-				return fs.readFileSync(logFilePath!, "utf8").includes("[Command completed with exit code 0]")
+				return fs.readFileSync(logFilePath!, "utf8").includes("completion could not be observed")
 			} catch {
 				return false
 			}
 		})
-		expect(fs.readFileSync(logFilePath!, "utf8")).toContain("started late")
+		const log = fs.readFileSync(logFilePath!, "utf8")
+		expect(log).toContain("started late")
+		expect(log).toContain("the command may still be running")
+		expect(log).not.toContain("[Command completed]")
 		fs.rmSync(logFilePath!, { force: true })
 	})
 
@@ -989,5 +1063,190 @@ describe("executeForeground — Proceed While Running", () => {
 		expect(log).toContain("before detach")
 		expect(log).toContain("after detach")
 		fs.rmSync(logFilePath!, { force: true })
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Fork-specific behaviour restored during the #12352 resolution.
+//
+// #12352 rewrote this file, and taking it wholesale silently dropped seven tests
+// this fork added. Three of them exist specifically to pin the abort/completion
+// ordering that #12352's version would otherwise regress (upstream tests
+// `abortSignal.aborted` before reading `getCompletionDetails()`), and two cover
+// the `emitUpdate` streaming that the source resolution re-applies. Restored from
+// `main` rather than retyped, so no assertion is quietly weakened.
+// ---------------------------------------------------------------------------
+describe("executeForeground (fork behaviour)", () => {
+	it("delivers the final throttled line", async () => {
+		// The last line of a failing build is usually the error, so the throttled
+		// tail is flushed on settle and must be observable.
+		const lines = Array.from({ length: 60 }, (_, i) => `line ${i}`)
+		const process = createFakeTerminalProcess({ lines })
+		const terminalManager = createFakeTerminalManager(process)
+		const updates: Array<{ line?: string; final?: boolean }> = []
+
+		await executeForeground("build", "/workspace", terminalManager, 100000, undefined, undefined, undefined, (u) =>
+			updates.push(u as { line?: string; final?: boolean }),
+		)
+
+		const final = updates.filter((u) => u.final === true)
+		expect(final).toHaveLength(1)
+		expect(final[0]?.line).toBe("line 59")
+	})
+
+	it("runs normally when no emitUpdate is supplied", async () => {
+		const process = createFakeTerminalProcess({ lines: ["ok"] })
+		const terminalManager = createFakeTerminalManager(process)
+
+		const result = await executeForeground("echo ok", "/workspace", terminalManager, 1000)
+
+		expect(result).toBe("ok")
+	})
+
+	it("streams output lines while keeping the return value intact", async () => {
+		// Output used to be shown only at completion, so a multi-minute build was
+		// indistinguishable from a hang. Streaming must not change what `execute`
+		// returns — the model still reads the complete result from the tool result.
+		const process = createFakeTerminalProcess({ lines: ["compiling a", "compiling b"] })
+		const terminalManager = createFakeTerminalManager(process)
+		const updates: unknown[] = []
+
+		const result = await executeForeground(
+			"build",
+			"/workspace",
+			terminalManager,
+			1000,
+			undefined,
+			undefined,
+			undefined,
+			(update) => updates.push(update),
+		)
+
+		expect(result).toBe("compiling a\ncompiling b")
+		expect(updates.length).toBeGreaterThan(0)
+		for (const update of updates) {
+			expect(update).toMatchObject({ type: "command_output" })
+		}
+	})
+
+	it("throws 'Command execution aborted' when the abort signal fires mid-command", async () => {
+		const abortController = new AbortController()
+		// Use the controllable process so we can order abort *after* `await process` yields.
+		const { process, complete } = createControllableTerminalProcess()
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground("long-cmd", "/workspace", terminalManager, 1000, abortController.signal)
+
+		// Let the `await process` yield. After this tick completes, the command
+		// is running and waiting (the controllable process hasn't completed yet).
+		await new Promise((resolve) => setTimeout(resolve, 5))
+
+		abortController.abort()
+
+		try {
+			await resultPromise
+			// If we get here, the command didn't throw — make the failure obvious.
+			expect(abortController.signal.aborted).toBe(true)
+			expect.unreachable("expected executeForeground to throw on abort")
+		} catch (error) {
+			expect(error).toBeInstanceOf(Error)
+			expect((error as Error).message).toBe("Command execution aborted")
+		}
+	})
+
+	it("throws CommandExitError for non-zero exit code even when the abort signal also fired", async () => {
+		// Edge case: the process completes with exitCode=1 naturally, then
+		// the abort signal fires. The exit code must win over abort.
+		const abortController = new AbortController()
+		const { process, emitLine, complete } = createControllableTerminalProcess()
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground("failing-cmd", "/workspace", terminalManager, 1000, abortController.signal)
+
+		// Let `await process` yield first
+		await new Promise((resolve) => setTimeout(resolve, 5))
+
+		// Emit some output first, then process completes with non-zero exit code
+		emitLine("error output")
+		// Same approach: complete first, then abort synchronously.
+		complete({ exitCode: 1 })
+		resultPromise.catch(() => {})
+
+		// THEN abort fires — the process already completed, so the abort
+		// handler sets `resolvedByAbort = true` but completion details
+		// (exitCode: 1) take priority.
+		abortController.abort()
+
+		try {
+			await resultPromise
+			expect.unreachable("expected executeForeground to throw CommandExitError for non-zero exit code")
+		} catch (error) {
+			expect(error).toBeInstanceOf(CommandExitError)
+			expect((error as InstanceType<typeof CommandExitError>).exitCode).toBe(1)
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain("error output")
+		}
+	})
+
+	it("throws CommandExitError for terminalClosed even when the abort signal also fired", async () => {
+		// Edge case: the process completes with terminalClosed=true, then the
+		// abort signal fires. `resolvedByAbort` is true because the abort
+		// handler called process.continue(), but completion details already
+		// reflect the terminal closed. The terminalClosed error must win.
+		const abortController = new AbortController()
+		const { process, complete } = createControllableTerminalProcess()
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground("long-cmd", "/workspace", terminalManager, 1000, abortController.signal)
+
+		// Let `await process` yield first
+		await new Promise((resolve) => setTimeout(resolve, 5))
+
+		// Process completes naturally (terminal closed). The promise resolves
+		// and schedules a microtask to resume `await process`. Before that
+		// microtask fires, we call abort() synchronously below so that
+		// `resolvedByAbort = true` is set before `await process` resumes.
+		complete({ terminalClosed: true })
+		// Suppress the interim unhandled rejection: `resultPromise` will reject
+		// when `await process` resumes (inside the microtask) but the test's
+		// `try { await resultPromise }` hasn't started yet.
+		resultPromise.catch(() => {})
+
+		// THEN abort fires — simulating the TOCTOU: abort happens after
+		// the process already resolved via its own completion path, but
+		// before `await process` resumes (the microtask hasn't processed yet).
+		abortController.abort()
+
+		try {
+			await resultPromise
+			expect.unreachable("expected executeForeground to throw CommandExitError for terminalClosed")
+		} catch (error) {
+			expect(error).toBeInstanceOf(CommandExitError)
+			expect((error as InstanceType<typeof CommandExitError>).output).toContain("Terminal closed")
+		}
+	})
+
+	it("unregisters its foreground handle when the abort signal fires", async () => {
+		const abortController = new AbortController()
+		const coordinator = new SdkForegroundCommandCoordinator()
+		const process = createFakeTerminalProcess({ lines: ["partial"] })
+		const terminalManager = createFakeTerminalManager(process)
+
+		const resultPromise = executeForeground(
+			"long-cmd",
+			"/workspace",
+			terminalManager,
+			1000,
+			abortController.signal,
+			coordinator,
+		)
+
+		abortController.abort()
+
+		try {
+			await resultPromise
+			expect.unreachable("expected executeForeground to throw on abort")
+		} catch {
+			expect(coordinator.isRunning).toBe(false)
+		}
 	})
 })
