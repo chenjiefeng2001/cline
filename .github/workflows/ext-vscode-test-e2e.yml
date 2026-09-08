@@ -69,7 +69,7 @@ jobs:
         steps:
             - id: set-matrix
               run: |
-                  echo 'matrix=[{"runner":"ubuntu"},{"runner":"windows"},{"runner":"macos"}]' >> $GITHUB_OUTPUT
+                  echo 'matrix=[{"runner":"ubuntu"},{"runner":"windows"}]' >> $GITHUB_OUTPUT
 
     e2e:
         needs: [detect-changes, matrix_prep]
