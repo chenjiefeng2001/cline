@@ -155,3 +155,33 @@
 | P4-4 | `cb3591d0e` | R9 | test | doctor --fix 用例门控（产品在 win32 显式短路返回空枚举，属既定契约）；plugin 四个 `/bin/sh` fake-npm 夹具用例门控（含参数解析+建目录、中途改写翻转退出码两种形态，cmd.exe 无法执行） | 两文件 34 pass / 5 skip（win32） |
 
 **新增路线图**：fake-npm 夹具跨平台化（.cmd 包装 + .cjs 行为体，恢复 Windows 安装流覆盖）；doctor 的 win32 进程枚举产品实现（tasklist/PowerShell Get-Process）。
+
+---
+
+# 第五阶段：P0-1 tracing 收敛 + P0-3 词汇表冻结
+
+> 依据：`doc/architecture-gap-analysis-vs-mainstream-agents-2026-08.md` 路线图。约束不变：小提交、可单独回退、每步验证门。本轮全部为**纯增量**（spans 无 provider 时为 no-op，不改现有行为）。
+
+## Phase-5 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P5-1 | `50bc20ee1` | P0-1 | feat | **hub 层 OTel span**：NodeHubClient.executeCommand 包裹 `hub.command` span（command/session_id/url/request_id/timeout_ms 属性，reply 信封错误→ERROR 状态）；HubServerTransport.handleCommand 包裹 `hub.dispatch` span，经 `hub.request_id` 与客户端侧关联 | core typecheck 干净；hub 套件 22 文件/170 用例；core 全量 1395 pass/0 fail |
+| P5-2 | `5c669ef83` | P0-1 | feat | **agent/tool 层 OTel span**（@cline/agents）：execute→`agent.run` span（agent.id/session_id/parent_agent_id/model_id/provider_id，failed→记录异常+ERROR）；executePreparedTool→`agent.tool` span（tool.name/call_id/iteration，isError→ERROR+错误文本）。主体移至 executeLoop/runPreparedTool 私有助手，行为不变；@opentelemetry/api 加入依赖（bundle-only，全局注册表兼容） | agents typecheck 干净；47 用例；build 产出含 span |
+| P5-3 | `8da4fbab6` | P0-1 | feat | **W3C traceparent 环境提取助手**（core telemetry trace-env.ts）：traceparentFromEnv/remoteSpanContextFromTraceparent/runWithTraceparentFromEnv——从 TRACEPARENT 环境变量解析远端 SpanContext 并在其下运行回调，跨进程调用方（eval runner/CI）可把宿主 span 树锚定到自己的 trace；无 TRACEPARENT 或畸形时原样执行 | trace-env 5/5；telemetry 7 文件/68 用例；core 全量 1400 pass/0 fail |
+| P5-4 | `d4f017814` | P0-1 | feat | **CLI 无头运行支持 TRACEPARENT**：run-agent 将 sessionManager.start/send 包裹在 runWithTraceparentFromEnv 中，CLI 运行的 agent.run/agent.tool span 挂接到调用方 trace（无 provider 时 no-op）；测试 mock 补直传 | run-agent 17/17；main.test 71/71；cli typecheck 干净 |
+| P5-5 | `6fa846d8d` | P0-1 | feat | **evals↔traceId 闭环**：smoke runner 每个 trial 生成 W3C traceparent（crypto 随机 trace-id/span-id）经 TRACEPARENT 传给 cline CLI 子进程，ClineResult/TrialResult 行携带 trace id——评测回归可锚定到确切执行树 | evals tsc --noEmit 干净 |
+| P5-6 | `1909e83e6` | P0-3 | docs | **架构差距分析报告 + hub/webview 词汇表 v1 冻结**：差距矩阵（D1–D8）与 ROI 排序路线图；v1 冻结 hub 命令（70）/事件（48）词汇表与 webview protobus 服务面（16），附方向性 →A2A（Agent Card/Task 生命周期）与 →AG-UI（RUN/TEXT/TOOL/STATE）映射草案、漂移规则（v1 只增不改、重命名/删除要求 v2、新增必须同步登记映射）与代码锚点 | 纯文档，零代码变更 |
+| P5-7 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-5 取证结论
+
+1. **span 树形态**：agent 层 span（agent.run 根 + agent.tool 子）+ hub 层 span（hub.command/hub.dispatch 经 hub.request_id 关联）+ 跨进程 W3C traceparent 传播——三层 OTel 对齐完成，为 P0-1 收官。LLM 请求层 span（llms providers）未做，留作后续增量（P0-1 剩余可选）。
+2. **mock 同步教训**：向 `@cline/core` barrel 新增导出时，所有 vi.mock 该 barrel 的测试工厂需同步补齐（run-agent.test.ts 即例），否则运行时 undefined 导致静默失败——新增导出后应 grep `vi.mock("@cline/core"` 逐个检查。
+3. **context 传播依赖 provider**：runWithTraceparentFromEnv 的跨 await 传播依赖 NodeTracerProvider.register() 注册的 AsyncLocalStorage context manager；无 provider 时退化为直接执行，spans 仍为根 span——与既有行为一致。
+
+## Phase-5 后剩余项
+
+- P0 路线图三项全部收官（P0-1 tracing、P0-2 win32 spawn 收敛、P0-3 词汇表冻结）。
+- 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射在 P2 动工前对照当期规范逐条核验。
+- 既定路线不变：P1-1 Memory 抽象层 → P1-2 沙箱两档 → P1-3 teams pattern → P1-4 middleware 链 → P2-1 A2A server → P2-2 工具副作用账本。
