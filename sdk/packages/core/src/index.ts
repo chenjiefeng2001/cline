@@ -407,10 +407,6 @@ export {
 	sdkDebug,
 	setSdkLogger,
 } from "./logging/early-logger";
-export {
-	SqliteMemoryStore,
-	type SqliteMemoryStoreOptions,
-} from "./memory/stores/sqlite-memory-store";
 export type { MemoryStore } from "./memory/memory-store";
 export type {
 	EpisodicMemoryInput,
@@ -422,6 +418,10 @@ export type {
 	SemanticMemoryInput,
 	SemanticMemoryRecord,
 } from "./memory/models/memory-records";
+export {
+	SqliteMemoryStore,
+	type SqliteMemoryStoreOptions,
+} from "./memory/stores/sqlite-memory-store";
 export {
 	buildRemoteConfigSessionBlobUploadMetadata,
 	createRemoteConfigSessionMessagesArtifactUploader,
@@ -487,6 +487,29 @@ export {
 	isRuleEnabled,
 	mergeRulesForSystemPrompt,
 } from "./runtime/safety/rules";
+export {
+	ProcessSandboxRuntime,
+	type ProcessSandboxRuntimeOptions,
+} from "./runtime/sandbox/process-sandbox-runtime";
+export {
+	buildProcessSandboxCommand,
+	buildSeatbeltProfile,
+	defaultProcessSandboxBackend,
+	detectProcessSandbox,
+	type PlatformCommand,
+	type ProcessSandboxBackend,
+	type ProcessSandboxCommandInput,
+	type ProcessSandboxDetection,
+	type ProcessSandboxDetectOptions,
+} from "./runtime/sandbox/sandbox-command";
+export {
+	isSandboxUnavailableError,
+	SANDBOX_UNAVAILABLE_ERROR_CODE,
+	type SandboxExecutionRequest,
+	type SandboxExecutionResult,
+	type SandboxRuntime,
+	SandboxUnavailableError,
+} from "./runtime/sandbox/sandbox-runtime";
 export {
 	type SandboxCallOptions,
 	SubprocessSandbox,
