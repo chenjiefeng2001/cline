@@ -1,4 +1,9 @@
 export { resolveCoreDistinctId } from "./distinct-id";
+export {
+	remoteSpanContextFromTraceparent,
+	runWithTraceparentFromEnv,
+	traceparentFromEnv,
+} from "./trace-env";
 export type {
 	ITelemetryAdapter,
 	TelemetryArray,

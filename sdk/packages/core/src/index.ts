@@ -624,6 +624,11 @@ export {
 	type SqliteTeamStoreOptions,
 } from "./services/storage/team-store";
 export { resolveCoreDistinctId } from "./services/telemetry";
+export {
+	remoteSpanContextFromTraceparent,
+	runWithTraceparentFromEnv,
+	traceparentFromEnv,
+} from "./services/telemetry/trace-env";
 export type {
 	CaptureAgentUnexpectedReasoningTokensInput,
 	CaptureCompactionExecutedProperties,
