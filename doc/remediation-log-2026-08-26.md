@@ -185,3 +185,29 @@
 - P0 路线图三项全部收官（P0-1 tracing、P0-2 win32 spawn 收敛、P0-3 词汇表冻结）。
 - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射在 P2 动工前对照当期规范逐条核验。
 - 既定路线不变：P1-1 Memory 抽象层 → P1-2 沙箱两档 → P1-3 teams pattern → P1-4 middleware 链 → P2-1 A2A server → P2-2 工具副作用账本。
+
+---
+
+# 第六阶段：P1-3 teams 官方 pattern 收官
+
+> 依据：架构差距分析路线图 P1-3（D5：teams 编排语义碎片化）。约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量**（新模式发布在 hub session bus 之上，零内核改动）。
+
+## Phase-6 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P6-1 | `3d042dc3e` | P1-3 | feat | **teams 官方 pattern**（core `session/patterns.ts`）：①handoff——会话所有权转移（当前 owner `session.detach` → 目标 owner `session.attach`，顺序 await 防 attach 竞速 detach），替换各集成私有编排语义；②evaluator——独立评审会话 + 结构化 critique schema（verdict/score/strengths/weaknesses/risks/suggestions/summary），评审会话只接收被评审 artifact（不带产出会话上下文），阻断自我评估膨胀渗入结论；parseAgentCritique 接受直接对象/原始 JSON 串/首个 ```json 围栏块，fallback 扫描 tool_result content 块；两助手均为传输解耦的结构化形状（`NodeHubClient` / `ClineCore.start` / 测试桩皆满足），导出至 core barrel 与 session 子路径 | core test:unit 1414 pass / 7 平台跳过 / 0 fail；patterns 套件 14/14；tsc 干净；biome 干净 |
+| P6-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-6 取证结论
+
+1. **结构化形状 vs `Pick` 全量类型的取舍**：evaluator 的 `start` 回调若用 `Pick<StartSessionResult, "sessionId" \| "result">`，`result` 仍是完整 `AgentResult`（usage/messages/toolCalls 等 10+ 必填字段），测试桩 `{ text }` 无法满足。改为镜像 `StartSessionResult` 信封的 `EvaluatorSessionOutcome`（`result?: { text?; messages? }` 结构化子集）——完整 `AgentResult` 结构上天然满足，最小桩亦满足，`ClineCore.start(...)` 零适配直通。
+2. **拍平信封是错误方向**：曾把 outcome 拍平为顶层 `{ sessionId, text, messages }`，导致 `StartSessionResult`（text 嵌在 `result` 下）不再结构兼容、doc 声明失真；两个嵌套桩用例由绿转红后回退。教训：**结构化类型的锚点是上游真实返回形状（信封），不是内部消费字段**。
+3. **tool_result 载荷字段取证**：`@cline/shared` 的 `ToolResultContent` 载荷字段是 `content`（string 或 content-block 数组），不是 `output`——初版 fallback 读错字段，已修正并补 tool_result 恢复/忽略两用例。
+4. **biome organizeImports 顺带收敛**：core barrel 新增导出块触发 import/export 排序检查，biome 安全修复把 patterns 块移到排序位（trace-env 之后），无行为影响。
+
+## Phase-6 后剩余项
+
+- P1-3 收官。P1 剩余：P1-1 Memory 抽象层 → P1-2 沙箱两档 → P1-4 middleware 链。
+- 之后 P2：P2-1 A2A server（依赖 P0-3，已收官）→ P2-2 工具副作用账本。
+- 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
