@@ -624,11 +624,6 @@ export {
 	type SqliteTeamStoreOptions,
 } from "./services/storage/team-store";
 export { resolveCoreDistinctId } from "./services/telemetry";
-export {
-	remoteSpanContextFromTraceparent,
-	runWithTraceparentFromEnv,
-	traceparentFromEnv,
-} from "./services/telemetry/trace-env";
 export type {
 	CaptureAgentUnexpectedReasoningTokensInput,
 	CaptureCompactionExecutedProperties,
@@ -690,6 +685,11 @@ export {
 	type TelemetryLoggerSinkOptions,
 } from "./services/telemetry/TelemetryLoggerSink";
 export {
+	remoteSpanContextFromTraceparent,
+	runWithTraceparentFromEnv,
+	traceparentFromEnv,
+} from "./services/telemetry/trace-env";
+export {
 	accumulateUsageTotals,
 	createInitialAccumulatedUsage,
 	getCurrentContextSize,
@@ -736,6 +736,18 @@ export {
 } from "./session/models/session-graph";
 export type { SessionManifest } from "./session/models/session-manifest";
 export type { SessionRow } from "./session/models/session-row";
+export {
+	type AgentCritique,
+	type AgentEvaluationInput,
+	type AgentEvaluationResult,
+	buildEvaluatorPrompt,
+	type HubSessionCommandClient,
+	handoffSession,
+	parseAgentCritique,
+	runAgentEvaluation,
+	type SessionHandoffInput,
+	type SessionHandoffResult,
+} from "./session/patterns";
 export type {
 	CreateRootSessionWithArtifactsInput,
 	RootSessionArtifacts,

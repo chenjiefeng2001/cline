@@ -25,6 +25,18 @@ export type {
 	RootSessionArtifacts,
 	SessionRow,
 } from "./models/session-row";
+export {
+	type AgentCritique,
+	type AgentEvaluationInput,
+	type AgentEvaluationResult,
+	buildEvaluatorPrompt,
+	type HubSessionCommandClient,
+	handoffSession,
+	parseAgentCritique,
+	runAgentEvaluation,
+	type SessionHandoffInput,
+	type SessionHandoffResult,
+} from "./patterns";
 export { CoreSessionService } from "./services/session-service";
 export {
 	FileTeamPersistenceStore,
