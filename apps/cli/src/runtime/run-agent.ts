@@ -3,6 +3,7 @@ import {
 	type AgentResult,
 	type ProviderSettings,
 	prewarmFileIndex,
+	runWithTraceparentFromEnv,
 	SessionSource,
 	type UserInstructionConfigService,
 } from "@cline/core";
@@ -276,31 +277,33 @@ export async function runAgent(
 			userImages,
 			userFiles,
 		} = await buildUserInputMessage(prompt, userInstructionService);
-		const started = await sessionManager.start({
-			source: SessionSource.CLI,
-			config: {
-				...config,
-				sessionId: plannedSessionId,
-				execution: {
-					...config.execution,
-					loopDetection:
-						config.execution?.loopDetection ?? CLI_DEFAULT_LOOP_DETECTION,
+		const started = await runWithTraceparentFromEnv(() =>
+			sessionManager.start({
+				source: SessionSource.CLI,
+				config: {
+					...config,
+					sessionId: plannedSessionId,
+					execution: {
+						...config.execution,
+						loopDetection:
+							config.execution?.loopDetection ?? CLI_DEFAULT_LOOP_DETECTION,
+					},
+					checkpoint: config.checkpoint ?? CLI_DEFAULT_CHECKPOINT_CONFIG,
+					hooks: runtimeHooks.hooks,
+					onTeamEvent: handleTeamEvent,
+					onConsecutiveMistakeLimitReached: async (
+						context: ConsecutiveMistakeLimitContext,
+					) => resolveMistakeLimitDecision(config, context),
 				},
-				checkpoint: config.checkpoint ?? CLI_DEFAULT_CHECKPOINT_CONFIG,
-				hooks: runtimeHooks.hooks,
-				onTeamEvent: handleTeamEvent,
-				onConsecutiveMistakeLimitReached: async (
-					context: ConsecutiveMistakeLimitContext,
-				) => resolveMistakeLimitDecision(config, context),
-			},
-			prompt: userInput,
-			userImages: userImages.length > 0 ? userImages : undefined,
-			userFiles: userFiles.length > 0 ? userFiles : undefined,
-			interactive: false,
-			localRuntime: {
-				onTeamRestored: () => emitTeamRestored(config),
-			},
-		});
+				prompt: userInput,
+				userImages: userImages.length > 0 ? userImages : undefined,
+				userFiles: userFiles.length > 0 ? userFiles : undefined,
+				interactive: false,
+				localRuntime: {
+					onTeamRestored: () => emitTeamRestored(config),
+				},
+			}),
+		);
 
 		activeSessionId = started.sessionId;
 		setActiveCliSession({
@@ -332,14 +335,14 @@ export async function runAgent(
 			clearRunTimeout();
 			result = started.result;
 		} else {
-			result = await sessionManager
-				.send({
+			result = await runWithTraceparentFromEnv(() =>
+				sessionManager.send({
 					sessionId: started.sessionId,
 					prompt: userInput,
 					userImages: userImages.length > 0 ? userImages : undefined,
 					userFiles: userFiles.length > 0 ? userFiles : undefined,
-				})
-				.finally(clearRunTimeout);
+				}),
+			).finally(clearRunTimeout);
 		}
 		if (!result) {
 			throw new Error("session manager did not return a result");

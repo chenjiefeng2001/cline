@@ -99,6 +99,7 @@ vi.mock("@cline/core", () => ({
 		);
 	},
 	prewarmFileIndex: vi.fn(async () => undefined),
+	runWithTraceparentFromEnv: (fn: () => Promise<unknown>) => fn(),
 	SessionSource: {
 		CLI: "cli",
 	},
