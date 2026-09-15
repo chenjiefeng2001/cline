@@ -32,7 +32,13 @@ import {
 	omitUndefinedValues,
 	trimNonEmpty,
 } from "@cline/shared";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { nanoid } from "nanoid";
+
+// No-op unless a TracerProvider is registered (OpenTelemetryProvider/Langfuse
+// do so when telemetry is configured). Spans give every agent run and tool
+// execution a causal slot under the caller's active context.
+const agentTracer = trace.getTracer("cline.agents");
 
 const MAX_TOKENS_INCOMPLETE_TURN_MESSAGE =
 	"Model reached the maximum output token limit before completing the turn";
@@ -571,6 +577,43 @@ export class AgentRuntime {
 	}
 
 	private async execute(input?: AgentRunInput): Promise<AgentRunResult> {
+		// No-op span unless a TracerProvider is registered. Root of the
+		// agent-layer span tree; "agent.tool" spans below attach as children.
+		const span = agentTracer.startSpan("agent.run", {
+			attributes: {
+				"agent.id": this.state.agentId,
+				"agent.session_id": this.config.sessionId,
+				"agent.parent_agent_id": this.state.parentAgentId ?? undefined,
+				"agent.model_id": this.config.messageModelInfo?.id,
+				"agent.provider_id": this.config.messageModelInfo?.provider,
+			},
+		});
+		try {
+			const result = await this.executeLoop(input);
+			span.setAttribute("agent.status", result.status);
+			span.setAttribute("agent.iterations", result.iterations);
+			span.setAttribute("agent.run_id", result.runId);
+			if (result.status === "failed" && result.error) {
+				span.recordException(result.error);
+				span.setStatus({
+					code: SpanStatusCode.ERROR,
+					message: result.error.message,
+				});
+			}
+			return result;
+		} catch (error) {
+			span.recordException(error as Error);
+			span.setStatus({ code: SpanStatusCode.ERROR });
+			throw error;
+		} finally {
+			span.end();
+		}
+	}
+
+	/** Body of the agent loop, wrapped by the "agent.run" span in execute(). */
+	private async executeLoop(
+		input?: AgentRunInput,
+	): Promise<AgentRunResult> {
 		await this.ensureInitialized();
 		if (this.state.status === "running") {
 			throw new Error("Agent runtime is already running");
@@ -1323,6 +1366,51 @@ export class AgentRuntime {
 	}
 
 	private async executePreparedTool(
+		prepared: PreparedToolExecution,
+	): Promise<AgentMessage> {
+		// No-op span unless a TracerProvider is registered. Child of the
+		// surrounding "agent.run" span via the active context.
+		const span = agentTracer.startSpan("agent.tool", {
+			attributes: {
+				"agent.tool.name": prepared.toolCall.toolName,
+				"agent.tool.call_id": prepared.toolCall.toolCallId,
+				"agent.iteration": this.state.iteration,
+				"agent.id": this.state.agentId,
+				"agent.session_id": this.config.sessionId,
+			},
+		});
+		try {
+			const message = await this.runPreparedTool(prepared);
+			const toolResult = message.content.find(
+				(
+					part,
+				): part is Extract<AgentMessagePart, { type: "tool-result" }> =>
+					part.type === "tool-result" &&
+					part.toolCallId === prepared.toolCall.toolCallId,
+			);
+			if (toolResult?.isError) {
+				const output = toolResult.output;
+				const errorText =
+					typeof output === "object" &&
+					output !== null &&
+					"error" in output &&
+					typeof (output as { error?: unknown }).error === "string"
+						? (output as { error: string }).error
+						: `Tool ${prepared.toolCall.toolName} failed`;
+				span.setStatus({ code: SpanStatusCode.ERROR, message: errorText });
+			}
+			return message;
+		} catch (error) {
+			span.recordException(error as Error);
+			span.setStatus({ code: SpanStatusCode.ERROR });
+			throw error;
+		} finally {
+			span.end();
+		}
+	}
+
+	/** Body of one prepared tool execution, wrapped by "agent.tool". */
+	private async runPreparedTool(
 		prepared: PreparedToolExecution,
 	): Promise<AgentMessage> {
 		const startedAt = new Date();

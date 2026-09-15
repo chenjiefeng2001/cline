@@ -628,6 +628,7 @@
       "dependencies": {
         "@cline/llms": "workspace:*",
         "@cline/shared": "workspace:*",
+        "@opentelemetry/api": "^1.9.0",
         "nanoid": "^5.1.7",
       },
     },
