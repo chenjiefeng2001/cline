@@ -408,6 +408,21 @@ export {
 	setSdkLogger,
 } from "./logging/early-logger";
 export {
+	SqliteMemoryStore,
+	type SqliteMemoryStoreOptions,
+} from "./memory/stores/sqlite-memory-store";
+export type { MemoryStore } from "./memory/memory-store";
+export type {
+	EpisodicMemoryInput,
+	EpisodicMemoryRecord,
+	MemoryKind,
+	MemoryQueryFilter,
+	MemoryRecord,
+	MemoryRecordInput,
+	SemanticMemoryInput,
+	SemanticMemoryRecord,
+} from "./memory/models/memory-records";
+export {
 	buildRemoteConfigSessionBlobUploadMetadata,
 	createRemoteConfigSessionMessagesArtifactUploader,
 	type PreparedRemoteConfigCoreIntegration,
