@@ -18,6 +18,7 @@
  */
 
 import { execSync, spawn } from "child_process"
+import { randomBytes } from "crypto"
 import * as fs from "fs"
 import * as path from "path"
 import * as dotenv from "dotenv"
@@ -182,6 +183,8 @@ interface TrialResult {
 	durationMs: number
 	stdout: string
 	stderr: string
+	/** W3C trace id of the CLI subprocess run (see generateTraceparent). */
+	traceId?: string
 }
 
 async function runTrial(scenario: SmokeScenario, modelId: string, trialWorkdir: string): Promise<TrialResult> {
@@ -223,6 +226,7 @@ async function runTrial(scenario: SmokeScenario, modelId: string, trialWorkdir: 
 				durationMs: Date.now() - startTime,
 				stdout: result.stdout,
 				stderr: result.stderr,
+				traceId: result.traceId,
 			}
 		}
 
@@ -237,6 +241,7 @@ async function runTrial(scenario: SmokeScenario, modelId: string, trialWorkdir: 
 						durationMs: Date.now() - startTime,
 						stdout: result.stdout,
 						stderr: result.stderr,
+						traceId: result.traceId,
 					}
 				}
 			}
@@ -253,6 +258,7 @@ async function runTrial(scenario: SmokeScenario, modelId: string, trialWorkdir: 
 						durationMs: Date.now() - startTime,
 						stdout: result.stdout,
 						stderr: result.stderr,
+						traceId: result.traceId,
 					}
 				}
 				const content = fs.readFileSync(filePath, "utf-8")
@@ -263,6 +269,7 @@ async function runTrial(scenario: SmokeScenario, modelId: string, trialWorkdir: 
 						durationMs: Date.now() - startTime,
 						stdout: result.stdout,
 						stderr: result.stderr,
+						traceId: result.traceId,
 					}
 				}
 			}
@@ -273,6 +280,7 @@ async function runTrial(scenario: SmokeScenario, modelId: string, trialWorkdir: 
 			durationMs: Date.now() - startTime,
 			stdout: result.stdout,
 			stderr: result.stderr,
+			traceId: result.traceId,
 		}
 	} catch (error: any) {
 		return {
@@ -291,16 +299,28 @@ interface ClineResult {
 	error?: string
 	stdout: string
 	stderr: string
+	traceId?: string
+}
+
+// Generate a W3C traceparent for cross-process trace correlation (see
+// @cline/core telemetry trace-env). Each trial gets its own trace so eval
+// rows anchor to the exact span tree of that run when the CLI's OTel
+// pipeline is configured (OTEL_TELEMETRY_ENABLED + traces exporter).
+function generateTraceparent(): { traceparent: string; traceId: string } {
+	const traceId = randomBytes(16).toString("hex")
+	const spanId = randomBytes(8).toString("hex")
+	return { traceparent: `00-${traceId}-${spanId}-01`, traceId }
 }
 
 function runClineWithTimeout(args: string[], cwd: string, timeoutMs: number): Promise<ClineResult> {
 	return new Promise((resolve) => {
 		let stdout = ""
 		let stderr = ""
+		const { traceparent, traceId } = generateTraceparent()
 
 		const proc = spawn("cline", args, {
 			cwd,
-			env: { ...process.env },
+			env: { ...process.env, TRACEPARENT: traceparent },
 			stdio: ["ignore", "pipe", "pipe"], // stdin: ignore, stdout/stderr: pipe
 		})
 
@@ -311,6 +331,7 @@ function runClineWithTimeout(args: string[], cwd: string, timeoutMs: number): Pr
 				error: "Timeout exceeded",
 				stdout,
 				stderr,
+				traceId,
 			})
 		}, timeoutMs)
 
@@ -329,6 +350,7 @@ function runClineWithTimeout(args: string[], cwd: string, timeoutMs: number): Pr
 				error: err.message,
 				stdout,
 				stderr,
+				traceId,
 			})
 		})
 
@@ -345,6 +367,7 @@ function runClineWithTimeout(args: string[], cwd: string, timeoutMs: number): Pr
 				error,
 				stdout,
 				stderr,
+				traceId,
 			})
 		})
 	})
