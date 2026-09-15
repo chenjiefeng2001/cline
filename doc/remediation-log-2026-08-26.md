@@ -236,3 +236,28 @@
 - P1-1 后续切片：procedural 记录形状；检索接入 agentic search 调用方；向量兜底；Mem0/Zep 托管适配器（按需）。
 - P1 路线不变：P1-2 沙箱两档 → P1-4 middleware 链；之后 P2-1 A2A server → P2-2 工具副作用账本。
 - 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
+
+---
+
+# 第八阶段：P1-2 沙箱两档首批切片（隔离层接口 + 进程沙箱档）
+
+> 依据：架构差距分析路线图 P1-2（D4：执行隔离层级不足，审批当沙箱）。约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量**（新 runtime/sandbox 模块，零既有行为变更——执行器未接线，接口先行）。
+
+## Phase-8 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P8-1 | `781225d80` | P1-2 | feat | **隔离层接口 + 进程沙箱档**（core `runtime/sandbox/`）：①`sandbox-command`——纯函数进程沙箱命令构造：macOS Seatbelt workspace-write profile（default allow + file-write 收敛到 workspace root）与 Linux bubblewrap（ro-bind 根 + workspace bind、/dev + /proc、die-with-parent）；win32 返回 undefined → 调用方 fail-closed，绝不静默降级；②`detectProcessSandbox`——平台 + PATH 检测，platform/pathEnv 覆盖参数使全平台可测；③`SandboxRuntime` 适配器接口（isAvailable/exec + 类型化 `SandboxUnavailableError`，fail-closed 契约）——Docker/E2B 后端成为未来 drop-in，remote 模式天然兼容云沙箱；④`ProcessSandboxRuntime` 首个适配器——路由到检测到的绝对二进制、capped stdout/stderr 捕获 + 超时 SIGKILL、exec 为 async（契约违例以 rejection 浮出）；导出至 runtime 子路径与 core barrel | core test:unit 1432 pass / 7 平台跳过 / 0 fail；sandbox 套件 12/12（全平台，测试无需真实沙箱执行）；tsc 干净；biome 干净 |
+| P8-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-8 取证结论
+
+1. **测试全平台零平台债**：命令构造是纯函数 + platform/pathEnv 覆盖参数，12 个用例在 win32 CI 上全部可跑（与 P3-3 的 POSIX-only 债形成对照）——**接口先行的切片天然可测**，接线执行器时才需要真实沙箱环境。
+2. **同步 throw vs rejection**：适配器 `exec` 初版为同步方法，不可用时同步 throw——`rejects.toThrow` 捕不到（throw 发生在 Promise 构造之前）。改为 async 后按接口契约以 rejection 浮出。教训：**声明返回 Promise 的方法，前置校验失败也应 async 化**，否则 await 消费方拿到的是同步异常，契约分裂。
+3. **fail-closed 是契约不是实现细节**：`buildProcessSandboxCommand` 在 win32 返回 undefined、检测不可用抛类型化错误——绝不静默降级到无沙箱执行；调用方（后续接线 toolPolicies 时）显式决定降级还是审批。
+
+## Phase-8 后剩余项
+
+- P1-2 后续：SandboxRuntime 接线 toolPolicies/执行器（真实沙箱环境验证）；Docker/E2B 后端适配器。
+- P1 路线不变：P1-4 middleware 链；之后 P2-1 A2A server → P2-2 工具副作用账本。
+- 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
