@@ -261,3 +261,29 @@
 - P1-2 后续：SandboxRuntime 接线 toolPolicies/执行器（真实沙箱环境验证）；Docker/E2B 后端适配器。
 - P1 路线不变：P1-4 middleware 链；之后 P2-1 A2A server → P2-2 工具副作用账本。
 - 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
+
+---
+
+# 第九阶段：P1-4 middleware 链首批切片 —— P1 路线收官
+
+> 依据：架构差距分析路线图 P1-4（D7：Guardrails 未形式化为原语/管道）。约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量**（新 middleware 模块，零既有行为变更——hooks/审批流未接线，链与官方中间件先行）。至此 **P1 路线四项全部落地**（P1-1 Memory / P1-2 沙箱 / P1-3 teams pattern / P1-4 middleware）。
+
+## Phase-9 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P9-1 | `56870d1f7` | P1-4 | feat | **工具中间件链 + 官方中间件**（core `middleware/`）：①`tool-middleware`——洋葱式有序链（先注册 = 最外层），重复注册抛错（排序错误不再静默）；②**retry**——瞬时失败重试 + 指数退避，retryOn 谓词可插拔、sleep 可注入（测试零真实等待）；③**budget**——链实例级调用预算，超支返回结构化 `BudgetExceededDenial` 而非执行，`reset()` 跨 run 清零；④**redaction**——scrub 字符串结果与纯对象字符串字段中的机密/PII（email、Bearer、sk-/ghp_/AKIA key 形状），类实例（Buffer/Date）原样透传；⑤**approval**——链上人工节点：`autoApprove: false` 时按调用接线宿主 `requestToolApproval`，被拒调用返回结构化 `ToolDenial` 而非执行；导出至 core barrel | core test:unit 1447 pass / 7 平台跳过 / 0 fail；middleware 套件 15/15；tsc 干净；biome 干净 |
+| P9-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-9 取证结论
+
+1. **同目录导入路径惯性错误**：四个内置中间件从 `../tool-middleware` 导入链抽象（同目录应为 `./tool-middleware`）——P1-3 的同类错误第二次出现；规律：**新目录下首个文件确定相对层级后，后续文件逐个核对**。
+2. **scrub 不得下钻类实例**：redaction 初版对一切对象走 `Object.entries` 重建——Buffer 被展开成 `{0:111,...}` 索引对象而销毁。修复：仅重建纯对象（`getPrototypeOf === Object.prototype/null`）与数组，类实例透传。教训：**深遍历转换必须区分 plain object 与类实例**。
+3. **denial 分型**：`ToolDenial` 基类型（denied+reason）与 `BudgetExceededDenial`（+limit/spent 记账上下文）分立——approval 拒绝没有预算上下文，`satisfies` 单类型会把两节点强行对齐。类型化守卫 `isToolDenial`/`isBudgetExceededDenial` 各自收窄。
+4. **预算语义为拒绝而非异常**：budget 超支返回结构化 denial（正常流），retry 失败抛错（异常流）——横切关注点的失败形态各自对齐消费方语义，不统一成 throw。
+
+## Phase-9 后剩余项
+
+- **P1 全线收官**（P1-1/P1-2/P1-3/P1-4 均有首批切片落地）；后续切片按需：middleware 接线 agent runtime（替换 beforeTool/afterTool 散点）、P1-1 检索接 agentic search、P1-2 接线 toolPolicies、P1-3 hub 命令注册 attach/detach 对外暴露。
+- P2 路线：P2-1 A2A server（依赖 P0-3，已收官）→ P2-2 工具副作用账本。
+- 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
