@@ -6,7 +6,10 @@ import type {
 	ToolApprovalRequest,
 } from "@cline/shared";
 import { captureSdkError, createSessionId } from "@cline/shared";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { CronService } from "../../cron/service/cron-service";
+
+const hubServerTracer = trace.getTracer("cline.hub.server");
 import { HubScheduleCommandService } from "../../cron/service/schedule-command-service";
 import { HubScheduleService } from "../../cron/service/schedule-service";
 import { LocalRuntimeHost } from "../../runtime/host/local-runtime-host";
@@ -310,11 +313,29 @@ export class HubServerTransport implements NativeHubTransport {
 	}
 
 	async handleCommand(envelope: HubCommandEnvelope): Promise<HubReplyEnvelope> {
+		// No-op span unless a TracerProvider is registered. Pairs with the
+		// client-side "hub.command" span via hub.request_id correlation.
+		const span = hubServerTracer.startSpan("hub.dispatch", {
+			attributes: {
+				"hub.command": envelope.command,
+				"hub.request_id": envelope.requestId,
+				"hub.session_id": envelope.sessionId,
+				"hub.client_id": envelope.clientId,
+			},
+		});
 		try {
 			const reply = await this.dispatchCommand(envelope);
+			if (!reply.ok) {
+				span.setStatus({
+					code: SpanStatusCode.ERROR,
+					message: `${reply.error?.code ?? "unknown"}: ${reply.error?.message ?? ""}`,
+				});
+			}
 			this.captureFailedReply(envelope, reply);
 			return reply;
 		} catch (error) {
+			span.recordException(error as Error);
+			span.setStatus({ code: SpanStatusCode.ERROR });
 			captureSdkError(this.options.telemetry, {
 				component: "core",
 				operation: "hub.command",
@@ -324,6 +345,8 @@ export class HubServerTransport implements NativeHubTransport {
 				context: this.commandTelemetryContext(envelope),
 			});
 			throw error;
+		} finally {
+			span.end();
 		}
 	}
 

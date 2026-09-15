@@ -24,6 +24,9 @@ import {
 	resolveProductionHubOwnerContext,
 	resolveSharedHubOwnerContext,
 } from "../discovery/workspace";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
+
+const hubClientTracer = trace.getTracer("cline.hub.client");
 
 type PendingReply = {
 	resolve: (reply: HubReplyEnvelope) => void;
@@ -495,12 +498,75 @@ export class NodeHubClient {
 		sessionId?: string,
 		options?: { timeoutMs?: number | null },
 	): Promise<HubReplyEnvelope> {
-		await this.connect();
-		const requestId = createSessionId("hubreq_");
-		const effectiveTimeoutMs = resolveHubCommandTimeoutMs(
-			command,
-			options?.timeoutMs,
-		);
+		// No-op unless a TracerProvider is registered (OpenTelemetryProvider
+		// does so when telemetry is configured). Spans give every hub command
+		// a causal slot under the caller's active context.
+		const span = hubClientTracer.startSpan("hub.command", {
+			attributes: {
+				"hub.command": command,
+				"hub.session_id": sessionId,
+				"hub.url": this.currentUrl,
+			},
+		});
+		try {
+			await this.connect();
+			const requestId = createSessionId("hubreq_");
+			span.setAttribute("hub.request_id", requestId);
+			const effectiveTimeoutMs = resolveHubCommandTimeoutMs(
+				command,
+				options?.timeoutMs,
+			);
+			if (typeof effectiveTimeoutMs === "number") {
+				span.setAttribute("hub.timeout_ms", effectiveTimeoutMs);
+			}
+			const resolved = await this.sendAndAwaitReply({
+				command,
+				requestId,
+				sessionId,
+				timeoutMs: effectiveTimeoutMs,
+				payload,
+			});
+			if (!resolved.ok) {
+				span.setStatus({
+					code: SpanStatusCode.ERROR,
+					message: `${resolved.error?.code ?? "unknown"}: ${resolved.error?.message ?? ""}`,
+				});
+				if (resolved.error?.code === SESSION_NOT_FOUND_ERROR_CODE) {
+					const targetSessionId =
+						sessionId ??
+						(typeof payload?.sessionId === "string"
+							? payload.sessionId
+							: undefined);
+					throw new SessionNotFoundError(
+						targetSessionId,
+						resolved.error.message,
+					);
+				}
+				throw new HubCommandError(
+					command,
+					resolved.error?.code,
+					resolved.error?.message ?? `Hub command ${command} failed`,
+				);
+			}
+			return resolved;
+		} catch (error) {
+			span.recordException(error as Error);
+			span.setStatus({ code: SpanStatusCode.ERROR });
+			throw error;
+		} finally {
+			span.end();
+		}
+	}
+
+	private async sendAndAwaitReply(input: {
+		command: HubCommandEnvelope["command"];
+		requestId: string;
+		sessionId?: string;
+		timeoutMs: number | null;
+		payload?: Record<string, unknown>;
+	}): Promise<HubReplyEnvelope> {
+		const { command, requestId, sessionId, timeoutMs: effectiveTimeoutMs } =
+			input;
 		const reply = new Promise<HubReplyEnvelope>((resolve, reject) => {
 			const timeout =
 				effectiveTimeoutMs === null
@@ -542,30 +608,14 @@ export class NodeHubClient {
 					clientId: this.clientId,
 					sessionId,
 					timeoutMs: effectiveTimeoutMs,
-					payload,
+					payload: input.payload,
 				},
 			});
 		} catch (error) {
 			this.pendingReplies.delete(requestId);
 			throw error;
 		}
-		const resolved = await reply;
-		if (!resolved.ok) {
-			if (resolved.error?.code === SESSION_NOT_FOUND_ERROR_CODE) {
-				const targetSessionId =
-					sessionId ??
-					(typeof payload?.sessionId === "string"
-						? payload.sessionId
-						: undefined);
-				throw new SessionNotFoundError(targetSessionId, resolved.error.message);
-			}
-			throw new HubCommandError(
-				command,
-				resolved.error?.code,
-				resolved.error?.message ?? `Hub command ${command} failed`,
-			);
-		}
-		return resolved;
+		return await reply;
 	}
 
 	private async recoverLocalHubTransport(error: unknown): Promise<boolean> {
