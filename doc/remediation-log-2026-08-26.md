@@ -211,3 +211,28 @@
 - P1-3 收官。P1 剩余：P1-1 Memory 抽象层 → P1-2 沙箱两档 → P1-4 middleware 链。
 - 之后 P2：P2-1 A2A server（依赖 P0-3，已收官）→ P2-2 工具副作用账本。
 - 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
+
+---
+
+# 第七阶段：P1-1 Memory 抽象层首批切片
+
+> 依据：架构差距分析路线图 P1-1（D2：长期记忆缺失，只有工作记忆）。约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量**（新 memory 模块，零既有行为变更）。
+
+## Phase-7 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P7-1 | `7a36d8a15` | P1-1 | feat | **Memory 抽象层 + 首个适配器**（core `memory/`）：①models——CoALA 分型收窄到编码切片：episodic（决策/踩坑记录，append-only）+ semantic（代码库事实卡，按 subject 键控）+ procedural（保留给后续切片）；②`MemoryStore` 接口（init/append/get/query）——托管型后端（Mem0/Zep/Letta）成为未来 drop-in；③sqlite 适配器完全跟随 `SqliteTeamStore` 既有模式（WAL、busy_timeout、单行 schema-version 表、`@cline/shared/db` loadSqliteDb）；**semantic 冲突消解在 append 事务内完成**——同 subject 新事实取代既有 active 事实（时间性 trail 经 `supersededById` 保留），读者永远看不到同一 subject 的两条 active 事实；④结构化/关键词查询（kind/subtype/subject/workspace/session/tags/activeOnly/keyword/limit）供 agentic search 调用，向量召回留作后续增量 | core test:unit 1420 pass / 7 平台跳过 / 0 fail；memory 套件 6/6；tsc 干净；biome 干净 |
+| P7-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-7 取证结论
+
+1. **参数化查询漏传 params（测试先行价值）**：适配器 `query()` 构造好 `params` 后调用 `selectRows(sql)` 时**漏传第二参**——无过滤查询（默认参数 `[]`）恰好工作、kind 过滤静默返回空。定位手段：独立 node:sqlite 复现（参数查询正常）→ 适配器内埋点打印 `params` 到达 selectRows 时已是 `[]`。教训：**默认参数路径全绿的测试不能证明参数化路径正确**，过滤矩阵用例（本批 5 个维度）是必须的。
+2. **Windows 句柄债**：sqlite 连接保持 `.db/.wal/.shm` 打开，`rmSync` 清理临时目录报 EPERM——适配器暴露 `close()`（SqliteDb 已有可选 close，wrapNodeDb 已转发），测试 afterEach 先 close 再 rm；顺手补 WAL 持久性跨实例用例。
+3. **落位复用**：`@cline/shared/db`（busy retry/WAL/sqlite 实验告警抑制）与 `resolveDbDataDir` 直接承载 memory.db，一行基建代码未新增；项目级作用域走 nullable `workspace_path` 列，与全局单库并存。
+
+## Phase-7 后剩余项
+
+- P1-1 后续切片：procedural 记录形状；检索接入 agentic search 调用方；向量兜底；Mem0/Zep 托管适配器（按需）。
+- P1 路线不变：P1-2 沙箱两档 → P1-4 middleware 链；之后 P2-1 A2A server → P2-2 工具副作用账本。
+- 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
