@@ -422,6 +422,31 @@ export {
 	SqliteMemoryStore,
 	type SqliteMemoryStoreOptions,
 } from "./memory/stores/sqlite-memory-store";
+export { createApprovalMiddleware } from "./middleware/approval-middleware";
+export {
+	BUDGET_EXCEEDED_REASON,
+	type BudgetExceededDenial,
+	createBudgetMiddleware,
+	isBudgetExceededDenial,
+	isToolDenial,
+	type ToolDenial,
+} from "./middleware/budget-middleware";
+export {
+	createRedactionMiddleware,
+	DEFAULT_REDACTION_PATTERNS,
+	DEFAULT_REDACTION_REPLACEMENT,
+	type RedactionMiddlewareOptions,
+} from "./middleware/redaction-middleware";
+export {
+	createRetryMiddleware,
+	type RetryMiddlewareOptions,
+} from "./middleware/retry-middleware";
+export {
+	composeToolMiddleware,
+	type ToolMiddleware,
+	type ToolMiddlewareChain,
+	type ToolMiddlewareContext,
+} from "./middleware/tool-middleware";
 export {
 	buildRemoteConfigSessionBlobUploadMetadata,
 	createRemoteConfigSessionMessagesArtifactUploader,
