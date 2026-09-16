@@ -221,7 +221,13 @@ describe("mountA2AHttpHandler", () => {
 			ok: true,
 			payload: { session: { sessionId: "s1", status: "completed" } },
 		});
-		const a2aServer = makeServer(client);
+		const a2aServer = new A2AServer(
+			client,
+			{ agentCard: { name: "cline-hub", version: "1.0.0" } },
+			// Event source bound → the Agent Card claims streaming and
+			// `message/stream` is available.
+			{ subscribe: () => () => {} },
+		);
 		const handler = mountA2AHttpHandler({ server: a2aServer });
 		server = http.createServer((req, res) => {
 			void handler(req, res).then((handled) => {

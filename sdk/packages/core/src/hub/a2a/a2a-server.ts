@@ -138,7 +138,12 @@ export class A2AServer {
 	) {
 		this.client = client;
 		this.events = events;
-		this.card = buildAgentCard(options.agentCard);
+		this.card = buildAgentCard({
+			...options.agentCard,
+			// The card reflects the real capability: without a bound event
+			// source `message/stream` fails, so the card must not claim it.
+			streaming: events !== undefined,
+		});
 	}
 
 	/** A2A Agent Card (discovery document). */

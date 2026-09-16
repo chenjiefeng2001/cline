@@ -72,6 +72,16 @@ describe("buildAgentCard", () => {
 		expect(card.defaultInputModes).toEqual(["text"]);
 		expect(card.skills).toHaveLength(1);
 	});
+
+	it("reflects the streaming flag when provided", () => {
+		const card = buildAgentCard({
+			name: "cline-hub",
+			version: "1.0.0",
+			streaming: false,
+		});
+		expect(card.capabilities.streaming).toBe(false);
+		expect(card.capabilities.pushNotifications).toBe(true);
+	});
 });
 
 describe("A2AServer", () => {
@@ -105,7 +115,8 @@ describe("A2AServer", () => {
 		const server = makeServer(client);
 		const card = server.getAgentCard();
 		expect(card.name).toBe("cline-hub");
-		expect(card.capabilities.streaming).toBe(true);
+		// No event source bound → the card must not claim streaming.
+		expect(card.capabilities.streaming).toBe(false);
 	});
 
 	it("routes message/send for a new prompt to session.create", async () => {

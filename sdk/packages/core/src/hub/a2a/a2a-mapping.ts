@@ -96,6 +96,8 @@ export function buildAgentCard(input: {
 	url?: string;
 	version: string;
 	skills?: A2AAgentSkill[];
+	/** Reflects whether an event source is actually bound (SSE capability). */
+	streaming?: boolean;
 }): A2AAgentCard {
 	return {
 		name: input.name,
@@ -103,7 +105,7 @@ export function buildAgentCard(input: {
 		url: input.url,
 		version: input.version,
 		capabilities: {
-			streaming: true,
+			streaming: input.streaming ?? true,
 			pushNotifications: true,
 		},
 		defaultInputModes: ["text"],
