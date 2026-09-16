@@ -507,3 +507,26 @@
 ## Phase-18 后剩余项
 
 - 可选增量：A2A SSE 流式（message/stream）；A2A/AG-UI 映射对照当期规范逐条核验（需当期规范访问，登记待办）。
+
+---
+
+# 第十九阶段：A2A SSE 流式（message/stream）落地
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为 **P0-3 冻结映射 §3 的协议出口收口**（Phase-14/17/18 后剩余项清单上的头号可选增量）：hub 事件流直接投影到 A2A Task 生命周期，SSE 帧从 HTTP 挂载流出。
+
+## Phase-19 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P19-1 | （本次提交） | P2-1 SSE | feat | **A2A SSE 流式（message/stream）**：core `hub/a2a/` 新增 `a2a-sse.ts`（纯函数：hub 事件 → Task 状态映射、status-update 构造、SSE 帧格式化、终态判定）；`A2AServer` 增加可选第三参 `A2AHubEventClient`（结构化事件订阅面，`NodeHubClient`/`HubServerTransport` 天然满足）与 `streamMessage`/`streamTask`/`supportsStreaming`：先发初始 Task 快照，再把会话事件流映射为 TaskStatusUpdateEvent（`run.started`/`heartbeat`/`assistant.delta`/`reasoning.delta`/`tool.*`/`approval.resolved` → `working`，`approval.requested` → `input-required`（HITL 自然映射），`run.completed`/`failed`/`aborted` → `completed`/`failed`/`canceled` 终态），终态后自动退订关闭；`idleTimeoutMs` 选项兜底不活跃流。JSON-RPC 分发器新增 `message/stream` 分支：返回 `A2AJsonRpcStreamResult` 标记（stream=true + contentType + subscribe(onFrame, onClose)），未绑定事件源时回 -32603 JSON-RPC 错误（非破坏回退到 message/send 语义）。node:http 挂载识别流式结果：`text/event-stream` + no-cache + keep-alive 头，逐帧 `data: <json>\n\n` 写出，onClose 后 res.end()，客户端断连（res close/req aborted）即退订；未绑定事件源的独立挂载回 JSON-RPC 错误信封。a2a barrel 导出 SSE 全表面 | core test:unit 143 文件/1521 pass / 0 fail（a2a 基线 39/39，新增 16：纯函数 12 + SSE 语义 4 + HTTP 端到端流 2 + 流不可用回退 1）；tsc 全 workspace 干净；biome check src/hub/a2a 干净 |
+| P19-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-19 取证结论
+
+1. **流式分发器的传输解耦标记**：JSON-RPC 分发器保持纯函数（请求对象 → 响应对象），但 `message/stream` 的响应是"流"不是信封——用 `A2AJsonRpcStreamResult`（`stream: true` + `contentType` + `subscribe(onFrame, onClose) => cancel`）作结构化标记，HTTP 挂载据此切换 SSE 通道，非 HTTP 传输可复用同一分发实现。教训：**协议分发器的返回类型要为流式留结构化出口，而不是让传输层字符串嗅探 method 名**。
+2. **async subscribe 的取消时序**：`streamMessage` 是 async（先 `session.create` 再订阅），subscribe 回调必须处理"取消先于订阅建立"的竞态——promise resolve 时若已 finish 立即调用 unsubscribe，onFrame 在 done 后静默丢弃。教训：**推送式 API 与异步建立过程的组合要把 done 标志放在两条路径的交汇点**（同 Phase-11 idempotency claim 的 fence 语义同源）。
+3. **半启用事件源的回退边界**：`supportsStreaming()` 为 false（构造时未绑定事件源）时 `message/stream` 返回 JSON-RPC -32603 错误信封而非空流——Agent Card 的 streaming=true 声明与运行时能力分离，客户端以错误信封为准。`streamMessage` 无事件源时仍完成 sendMessage（语义 = message/send），只是不产生流事件。
+
+## Phase-19 后剩余项
+
+- 可选增量：A2A/AG-UI 映射对照当期规范逐条核验（需当期规范访问，登记待办）；A2A HTTP 挂载进 hub server 正式入口（当前 mountable，host 显式挂载）。
