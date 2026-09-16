@@ -497,6 +497,27 @@ export {
 	SessionNotFoundError,
 	splitCoreSessionConfig,
 } from "./runtime/host/runtime-host";
+export type {
+	EffectLedger,
+	EffectLedgerClaim,
+	EffectLedgerClaimInput,
+	EffectLedgerOutcome,
+	EffectLedgerRecord,
+	EffectLedgerStatus,
+} from "./runtime/ledger/effect-ledger";
+export {
+	deriveIdempotencyKey,
+	deriveIdempotencyKeyFromContext,
+	hashToolInput,
+} from "./runtime/ledger/idempotency-key";
+export {
+	createIdempotencyMiddleware,
+	type IdempotencyMiddlewareOptions,
+} from "./runtime/ledger/idempotency-middleware";
+export {
+	SqliteEffectLedger,
+	type SqliteEffectLedgerOptions,
+} from "./runtime/ledger/stores/sqlite-effect-ledger";
 export {
 	createTeamName,
 	DefaultRuntimeBuilder,
