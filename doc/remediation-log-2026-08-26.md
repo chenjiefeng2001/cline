@@ -312,3 +312,31 @@
 - P2-1 后续切片：HTTP/SSE 接线（JSON-RPC over HTTP + SSE，挂载 hub server）；Agent Card 从 hub 能力面动态生成（skills 取 catalog.list）；pushNotifications 接 ui.notify 通道。
 - P2 路线不变：P2-2 工具副作用账本 + idempotency-key（恢复期 replay-or-fork 语义，**差异化反超点**）。
 - P1 后续切片按需：middleware 接线 agent runtime、P1-1 检索接 agentic search、P1-2 接线 toolPolicies。
+
+---
+
+# 第十一阶段：P2-2 工具副作用账本 —— P2 路线收官
+
+> 依据：架构差距分析路线图 P2-2（D1：durable execution 缺位——checkpoint ≠ 断点续跑）。差距分析定位的**全场唯一"大家都没做好"的差异化反超点**（ACRFence：包括 LangGraph/Claude Code/Cursor/ADK 在内，没有任何框架在工具边界强制 exactly-once）。约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量**（新 runtime/ledger 模块，零既有行为变更——执行器接线留后续切片）。至此 **P2 路线两项全部落地**（P2-1 A2A server / P2-2 副作用账本）。
+
+## Phase-11 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P11-1 | `749d86cad` | P2-2 | feat | **工具副作用账本 + idempotency-key**（core `runtime/ledger/`）：①`effect-ledger`——每个工具调用一条幂等键记录；`claim` 原子认领：succeeded 调用**重放**记录结果（恢复期绝不二次生效），failed 调用**分叉**进正常执行（无记录副作用，重试安全）；②`idempotency-key`——确定性派生（sessionId+iteration+tool+toolCallId+稳定输入哈希，sorted-key JSON、数组保序），恢复期重派生同键即命中重放路径；③sqlite 适配器完全跟随 store 模式（WAL/busy_timeout/schema-version 表），幂等键即主键——读者永远看不到同一逻辑调用的两条记录；④`idempotency-middleware`——工具边界 exactly-once 执行点，接入 P1-4 中间件链零侵入执行器；无 session 身份时显式不记账执行（fork without ledger）；导出至 core barrel | core test:unit 1473 pass / 7 平台跳过 / 0 fail（×2；1 例为既有 hooks 套件并行负载 flake，单独运行 2/2 全绿，按 Phase-4 门禁策略采信单独运行信号）；ledger 套件 14/14；tsc 干净；biome 干净 |
+| P11-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-11 取证结论
+
+1. **replay-or-fork 语义分型**：succeeded → 重放（防重放/二次生效）；failed → 分叉重试（失败调用无副作用或副作用未知，重试安全）——exactly-once 的边界在"成功调用的副作用"，不是一切调用。
+2. **幂等键派生是恢复语义的核心**：键含 sessionId+iteration+toolCallId+输入哈希——确定性派生使恢复期无需额外传递状态即可命中重放路径；输入哈希 sorted-key JSON（对象键序无关、数组保序），循环引用降级为 "unserializable" 不抛错。
+3. **测试断言写错一例**：重试语义用例用单一计数器断言两次执行——第二个 executor 不递增计数器导致假红；改为执行轨迹断言（`["first","second"]`）。教训：**跨调用断言用轨迹/调用记录，不用共享可变计数器**。
+4. **并行 flake 边界**：全量并行下既有 hooks 套件出现 1 例 flake（`hook-file-hooks` shutdown 分派），单独运行 2/2 全绿——与 Phase-3/4 记录的并行饿死问题一致（本机负载数据：并行聚合不可靠，单独运行是唯一可信门禁信号），非本轮引入。
+
+## Phase-11 后剩余项
+
+- **P0/P1/P2 路线全部收官**。后续切片按需：
+  - P2-2 接线：agent runtime 工具边界挂账本（hub 总线信封已有 requestId/sessionId 钩子点）；恢复期 replay-or-fork 接入 SessionVersioningService。
+  - P2-1 接线：A2A HTTP/SSE server 挂载；Agent Card 动态生成（skills 取 catalog.list）。
+  - P1 接线：middleware 接 agent runtime、P1-1 检索接 agentic search、P1-2 接 toolPolicies。
+  - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
