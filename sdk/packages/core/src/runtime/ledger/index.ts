@@ -16,6 +16,11 @@ export {
 	type IdempotencyMiddlewareOptions,
 } from "./idempotency-middleware";
 export {
+	type EffectReplayOutcome,
+	type ReplayEffectsIntoSessionInput,
+	replayEffectsIntoSession,
+} from "./recovery";
+export {
 	SqliteEffectLedger,
 	type SqliteEffectLedgerOptions,
 } from "./stores/sqlite-effect-ledger";
