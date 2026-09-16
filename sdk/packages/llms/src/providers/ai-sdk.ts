@@ -15,6 +15,7 @@ import {
 	parseJsonStream,
 	sanitizeSurrogates,
 } from "@cline/shared";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { type CallSettings, jsonSchema, NoSuchToolError, streamText } from "ai";
 import { nanoid } from "nanoid";
 import { extractErrorMessage } from "./format";
@@ -1154,150 +1155,192 @@ async function createProviderModule(
 	}
 }
 
+/** Module-level OTel tracer for the llms providers (no-op without a provider). */
+const llmTracer = trace.getTracer("cline.llms");
+
 function createAiSdkProvider(kind: ProviderModuleKind): GatewayProviderFactory {
 	return async (config) => ({
 		async *stream(request, context) {
-			const log = context.logger;
-			let stream: AiSdkStreamResult | undefined;
-			const capturedError: { current: string | undefined } = {
-				current: undefined,
-			};
+			// No-op span unless a TracerProvider is registered. Root of the
+			// provider-side trace, parented by the caller's active context
+			// (agent.run/agent.tool spans or cross-process TRACEPARENT).
+			const span = llmTracer.startSpan("llm.request", {
+				attributes: {
+					"llm.provider_id": request.providerId,
+					"llm.model_id": request.modelId,
+					"llm.provider_kind": kind,
+				},
+			});
 			try {
-				const provider = await createProviderModule(
-					kind,
-					{
-						...config,
-						fetch: wrapFetchForStickySession(
-							wrapFetchForProviderRequestCapture(config.fetch, request),
-							request,
-							context,
-						),
-					},
-					context,
-				);
-				const langfuse = await ensureGatewayLangfuseTelemetry(
-					config.providerId,
-				);
-				const tools = providerDisablesExternalToolExecution(context)
-					? undefined
-					: toAiSdkTools(request);
-				const systemPrompt = resolveAiSdkSystemPrompt(request);
-				const useSystemOption =
-					typeof systemPrompt === "string" && systemPrompt.trim().length > 0;
-				const messagesSystemPrompt = useSystemOption ? undefined : systemPrompt;
-				const messages = shouldApplyPromptCache(request, context)
-					? buildCachedAiSdkMessages(request, context, messagesSystemPrompt)
-					: toAiSdkMessages(request.messages, messagesSystemPrompt, {
-							includeReasoning: shouldIncludeReasoningHistory(request, context),
-						});
-				const providerOptions = composeAiSdkProviderOptions(
-					request,
-					context,
-					kind,
-				) as never;
-				const requestConfig = provider.buildStreamConfig
-					? provider.buildStreamConfig(request, context)
-					: buildAiSdkStreamConfig(request, context);
-				recordProviderRequestCapture({
-					stage: "ai_sdk_prompt",
-					request,
-					payload: {
-						messages,
+				const log = context.logger;
+				let stream: AiSdkStreamResult | undefined;
+				const capturedError: { current: string | undefined } = {
+					current: undefined,
+				};
+				try {
+					const provider = await createProviderModule(
+						kind,
+						{
+							...config,
+							fetch: wrapFetchForStickySession(
+								wrapFetchForProviderRequestCapture(config.fetch, request),
+								request,
+								context,
+							),
+						},
+						context,
+					);
+					const langfuse = await ensureGatewayLangfuseTelemetry(
+						config.providerId,
+					);
+					const tools = providerDisablesExternalToolExecution(context)
+						? undefined
+						: toAiSdkTools(request);
+					const systemPrompt = resolveAiSdkSystemPrompt(request);
+					const useSystemOption =
+						typeof systemPrompt === "string" && systemPrompt.trim().length > 0;
+					const messagesSystemPrompt = useSystemOption
+						? undefined
+						: systemPrompt;
+					const messages = shouldApplyPromptCache(request, context)
+						? buildCachedAiSdkMessages(request, context, messagesSystemPrompt)
+						: toAiSdkMessages(request.messages, messagesSystemPrompt, {
+								includeReasoning: shouldIncludeReasoningHistory(
+									request,
+									context,
+								),
+							});
+					const providerOptions = composeAiSdkProviderOptions(
+						request,
+						context,
+						kind,
+					) as never;
+					const requestConfig = provider.buildStreamConfig
+						? provider.buildStreamConfig(request, context)
+						: buildAiSdkStreamConfig(request, context);
+					recordProviderRequestCapture({
+						stage: "ai_sdk_prompt",
+						request,
+						payload: {
+							messages,
+							...(useSystemOption ? { system: systemPrompt } : {}),
+							tools,
+							providerOptions,
+							...requestConfig,
+						},
+					});
+					stream = streamText({
+						model: provider.model(context.model.id) as never,
+						messages: messages as never,
 						...(useSystemOption ? { system: systemPrompt } : {}),
-						tools,
+						tools: tools as never,
+						abortSignal: request.signal,
+						experimental_repairToolCall: repairMalformedToolCall as never,
+						experimental_telemetry: {
+							isEnabled: langfuse,
+						},
 						providerOptions,
 						...requestConfig,
-					},
-				});
-				stream = streamText({
-					model: provider.model(context.model.id) as never,
-					messages: messages as never,
-					...(useSystemOption ? { system: systemPrompt } : {}),
-					tools: tools as never,
-					abortSignal: request.signal,
-					experimental_repairToolCall: repairMalformedToolCall as never,
-					experimental_telemetry: {
-						isEnabled: langfuse,
-					},
-					providerOptions,
-					...requestConfig,
-					onError: ({ error: streamError }) => {
-						const msg = extractErrorMessage(streamError);
-						capturedError.current = msg;
-						if (log?.error) {
-							log.error("[ai-sdk] stream error", {
-								providerId: request.providerId,
+						onError: ({ error: streamError }) => {
+							const msg = extractErrorMessage(streamError);
+							capturedError.current = msg;
+							if (log?.error) {
+								log.error("[ai-sdk] stream error", {
+									providerId: request.providerId,
+									error: streamError,
+									severity: "error",
+								});
+							} else if (log) {
+								log.log(`[ai-sdk] stream error: ${msg}`, {
+									providerId: request.providerId,
+									severity: "error",
+								});
+							}
+							captureSdkError(context.telemetry, {
+								component: "llms",
+								operation: "provider.stream",
 								error: streamError,
 								severity: "error",
+								handled: true,
+								context: {
+									providerId: request.providerId,
+									modelId: request.modelId,
+									providerKind: kind,
+								},
 							});
-						} else if (log) {
-							log.log(`[ai-sdk] stream error: ${msg}`, {
-								providerId: request.providerId,
-								severity: "error",
-							});
+						},
+					}) as unknown as AiSdkStreamResult;
+
+					// Suppress dangling promise rejections (finishReason, totalUsage, steps, etc.)
+					// BEFORE iterating. The AI SDK rejects these DelayedPromises inside the stream's
+					// flush callback, which runs during iteration, so we must attach .catch() handlers
+					// upfront or Bun/Node will surface them as unhandled rejections.
+					suppressDanglingStreamPromises(stream);
+
+					// Observe stream events to capture the finish reason on the span
+					// (error finish → ERROR status), then pass them through.
+					for await (const event of emitAiSdkEvents(
+						stream,
+						request,
+						context,
+						context.model.metadata?.pricing,
+						capturedError,
+					)) {
+						if (event.type === "finish") {
+							const reason = (event as { reason?: unknown }).reason;
+							if (typeof reason === "string") {
+								span.setAttribute("llm.finish_reason", reason);
+								if (reason === "error") {
+									span.setStatus({
+										code: SpanStatusCode.ERROR,
+										message:
+											((event as { error?: unknown }).error as
+												| string
+												| undefined) ?? "stream error",
+									});
+								}
+							}
 						}
-						captureSdkError(context.telemetry, {
-							component: "llms",
-							operation: "provider.stream",
-							error: streamError,
+						yield event;
+					}
+				} catch (error) {
+					suppressDanglingStreamPromises(stream);
+					// Prefer the real provider error captured in onError over the generic
+					// NoOutputGeneratedError that the AI SDK throws when 0 steps are recorded.
+					const msg = capturedError.current ?? extractErrorMessage(error);
+					span.setStatus({ code: SpanStatusCode.ERROR, message: msg });
+					if (log?.error) {
+						log.error("[ai-sdk] provider error", {
+							providerId: request.providerId,
+							error,
 							severity: "error",
-							handled: true,
-							context: {
-								providerId: request.providerId,
-								modelId: request.modelId,
-								providerKind: kind,
-							},
 						});
-					},
-				}) as unknown as AiSdkStreamResult;
-
-				// Suppress dangling promise rejections (finishReason, totalUsage, steps, etc.)
-				// BEFORE iterating. The AI SDK rejects these DelayedPromises inside the stream's
-				// flush callback, which runs during iteration, so we must attach .catch() handlers
-				// upfront or Bun/Node will surface them as unhandled rejections.
-				suppressDanglingStreamPromises(stream);
-
-				yield* emitAiSdkEvents(
-					stream,
-					request,
-					context,
-					context.model.metadata?.pricing,
-					capturedError,
-				);
-			} catch (error) {
-				suppressDanglingStreamPromises(stream);
-				// Prefer the real provider error captured in onError over the generic
-				// NoOutputGeneratedError that the AI SDK throws when 0 steps are recorded.
-				const msg = capturedError.current ?? extractErrorMessage(error);
-				if (log?.error) {
-					log.error("[ai-sdk] provider error", {
-						providerId: request.providerId,
+					} else if (log) {
+						log.log(`[ai-sdk] provider error: ${msg}`, {
+							providerId: request.providerId,
+							severity: "error",
+						});
+					}
+					captureSdkError(context.telemetry, {
+						component: "llms",
+						operation: "provider.create_or_stream",
 						error,
 						severity: "error",
+						handled: true,
+						context: {
+							providerId: request.providerId,
+							modelId: request.modelId,
+							providerKind: kind,
+						},
 					});
-				} else if (log) {
-					log.log(`[ai-sdk] provider error: ${msg}`, {
-						providerId: request.providerId,
-						severity: "error",
-					});
+					yield {
+						type: "finish",
+						reason: "error",
+						error: msg,
+					};
 				}
-				captureSdkError(context.telemetry, {
-					component: "llms",
-					operation: "provider.create_or_stream",
-					error,
-					severity: "error",
-					handled: true,
-					context: {
-						providerId: request.providerId,
-						modelId: request.modelId,
-						providerKind: kind,
-					},
-				});
-				yield {
-					type: "finish",
-					reason: "error",
-					error: msg,
-				};
+			} finally {
+				span.end();
 			}
 		},
 	});
