@@ -413,3 +413,27 @@
 
 - P2-2 恢复期 replay-or-fork 接 SessionVersioningService；P1-1 检索接 agentic search 调用方；A2A SSE 流式（message/stream）。
 - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射对照当期规范逐条核验。
+
+---
+
+# 第十五阶段：P2-2 恢复期 replay-or-fork 接线（durable execution 闭环）
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量接线**（新 ledger/recovery.ts，零既有行为变更——SessionVersioningService 未改动，恢复助手先行）。
+
+## Phase-15 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P15-1 | `a1c20ba4c` | P2-2 接线 | feat | **跨会话恢复重放**（core `runtime/ledger/recovery.ts`）：`replayEffectsIntoSession(ledger, { fromSessionId, toSessionId, createdBefore? })` ——restore 产生新会话 id 后，把源会话 **succeeded** 副作用记录重键复制进恢复会话（键前缀替换 `<fromSessionId>:...` → `<toSessionId>:...`，确定性派生段不动），使幂等中间件在恢复会话中**重放**记录结果而非二次生效；**failed 记录跳过**（无记录副作用，重执行安全，fork 语义）；`createdBefore` 截止（checkpoint 切分）限定重放范围；操作幂等（已存在记录跳过）；端到端测试：恢复会话中间件重放记录结果且不重执行 | core test:unit 1500 pass / 7 平台跳过 / 0 fail；ledger 套件 18/18；tsc 干净；biome 干净 |
+| P15-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-15 取证结论
+
+1. **恢复语义 = 重键复制**：restore 新会话 id 使确定性键失配（fork）——恢复接线把源会话 succeeded 记录重键进新会话即恢复重放路径，SessionVersioningService 零改动（host 在 restore 后调用一次助手即可）；ACRFence exactly-once 叙事完整落地：工具边界防重放 + 恢复期防二次生效。
+2. **重放范围 = createdBefore 截止**：checkpoint 切分后，切分前的副作用属于"已发生不可重做"（重放），切分后的属于"恢复会话自然重做"（不复制）——时间性边界与语义边界对齐。
+3. **幂等重放操作**：replayEffectsIntoSession 本身幂等（已存在记录跳过）——恢复流程重试安全。
+
+## Phase-15 后剩余项
+
+- P1-1 检索接 agentic search 调用方；A2A SSE 流式（message/stream）。
+- 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射对照当期规范逐条核验。
