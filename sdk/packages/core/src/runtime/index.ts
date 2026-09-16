@@ -37,6 +37,10 @@ export {
 	SandboxUnavailableError,
 } from "./sandbox/sandbox-runtime";
 export {
+	createSandboxShellExecutor,
+	type SandboxShellExecutorOptions,
+} from "./sandbox/sandbox-shell-executor";
+export {
 	type SandboxCallOptions,
 	SubprocessSandbox,
 	type SubprocessSandboxOptions,

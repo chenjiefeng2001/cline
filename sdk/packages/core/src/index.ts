@@ -561,6 +561,10 @@ export {
 	SandboxUnavailableError,
 } from "./runtime/sandbox/sandbox-runtime";
 export {
+	createSandboxShellExecutor,
+	type SandboxShellExecutorOptions,
+} from "./runtime/sandbox/sandbox-shell-executor";
+export {
 	type SandboxCallOptions,
 	SubprocessSandbox,
 	type SubprocessSandboxOptions,
