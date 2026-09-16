@@ -389,3 +389,27 @@
 
 - 接线后续按需：P2-1 A2A HTTP/SSE server 挂载（JSON-RPC over HTTP + SSE）；P2-2 恢复期 replay-or-fork 接 SessionVersioningService；P1-1 检索接 agentic search 调用方。
 - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
+
+---
+
+# 第十四阶段：P2-1 A2A HTTP/SSE 接线（协议出口完成）
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量接线**（新 a2a-http/a2a-jsonrpc，零既有行为变更——hub server 未挂载，mountable handler 先行）。
+
+## Phase-14 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P14-1 | `593c50a93` | P2-1 接线 | feat | **A2A HTTP 端点挂载**（core `hub/a2a/a2a-jsonrpc.ts` + `a2a-http.ts`）：①JSON-RPC 2.0 调度器（纯函数、桩可测）——`message/send`/`tasks/get`/`tasks/cancel`/`tasks/list` 四方法分发至 A2AServer；类型化错误（-32001 task-not-found、-32601 method-not-found、-32602 invalid params、-32700 parse）；A2A message parts（kind:text）折叠为 prompt、taskId/contextId 路由至 hub 会话总线；②node:http 挂载（跟随 hub-websocket-server handler 模式）——GET `<basePath>/.well-known/agent.json` 服务 Agent Card、POST `<basePath>` 分发 JSON-RPC、未匹配路径 fall through（host 可链式挂载）；③HTTP 挂载集成测试跑真实 server（端口 0） | core test:unit 1496 pass / 7 平台跳过 / 0 fail；a2a 套件 23/23（含真实 server 集成）；tsc 干净；biome 干净 |
+| P14-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-14 取证结论
+
+1. **JSON-RPC 语义：错误在信封内，HTTP 200 承载**：解析错误初版返回 HTTP 400——JSON-RPC 规范是 HTTP 200 + 信封内 -32700（传输层失败也用信封应答）；测试先行暴露后修正。SSE 流式（message/stream）留后续增量——hub 已有 `stream.subscribe` + delta 事件词汇，映射面已冻结。
+2. **纯调度器 + 挂载分离**：JSON-RPC 分发是纯函数（请求对象进出），HTTP 挂载只是传输壳——测试桩、http 挂载、未来传输共享同一分发实现；集成测试用真实 server 验证端到端。
+3. **fall-through 挂载模式**：mountable handler 返回 boolean（true=已处理），host 在 http.createServer 里链式组合——与 hub-websocket-server 的 /health//status 模式一致，不抢占 host 的路由面。
+
+## Phase-14 后剩余项
+
+- P2-2 恢复期 replay-or-fork 接 SessionVersioningService；P1-1 检索接 agentic search 调用方；A2A SSE 流式（message/stream）。
+- 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射对照当期规范逐条核验。
