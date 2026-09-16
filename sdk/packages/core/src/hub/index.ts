@@ -21,6 +21,7 @@ export {
 	createConfiguredTelemetryHandle,
 	createConfiguredTelemetryService,
 } from "../services/telemetry/OpenTelemetryProvider";
+export * from "./a2a";
 export * from "./client";
 export * from "./client/connect";
 export * from "./client/session-client";
