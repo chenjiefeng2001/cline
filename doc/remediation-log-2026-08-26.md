@@ -484,3 +484,26 @@
 ## Phase-17 后剩余项
 
 - 可选增量：`test:extended` 并入 CI；A2A SSE 流式（message/stream）；A2A/AG-UI 映射对照当期规范逐条核验。
+
+---
+
+# 第十八阶段：desktop localStorage shim（Node 26 webstorage）+ test:extended 并入 CI
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为**存量失败修复 + CI 覆盖缺口收编**（Phase-4 认可的路径："可将 test:extended 并入 sdk-test.yml"）。
+
+## Phase-18 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P18-1 | `145fff97d` | R9/CI | fix+ci | **localStorage shim（Node 26 webstorage）**：desktop-app webview 测试（#12268 刷新于 P4-1 基线之后）用到 localStorage，在原生 Node ≥26 上必败——实验性 webstorage 全局对中 sessionStorage 原生可用而 **localStorage 缺 `--localstorage-file` 即不可用**，且该属性已存在于 globalThis，导致 vitest jsdom 环境跳过填充 jsdom 可用的 localStorage（populateGlobal 跳过 Node 已定义键）——探针取证：`window.localStorage: undefined` 而纯 jsdom 正常。修复：`vitest-setup.ts` 内存 Storage shim（不可达时提供），注册进 desktop-app vitest config。**test:extended 并入 CI**：sdk-test.yml 新增 extended-tests job（ubuntu，确定性串行链 webview-ui→desktop-app→multi-agent→rollout→examples/vscode），收编默认 `test` 聚合器外的套件——正是让 desktop 腐烂溜过 CI 的覆盖缺口；默认 `test` 语义零变更 | desktop-app 16 文件/59 用例全绿；test:extended 端到端全绿（48+16+multi-agent+36+2 文件，exit 0）；YAML 有效（3 jobs） |
+| P18-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-18 取证结论
+
+1. **Node 26 webstorage 半启用状态**：`sessionStorage` 原生可用、`localStorage` 需 `--localstorage-file`（缺失时访问得 undefined + 警告）——半对全局比全缺失更隐蔽：属性存在使 jsdom 填充被跳过。教训：**运行时新全局与测试环境（jsdom）的全局遮蔽关系要探针取证**（`typeof window.localStorage` + 纯 jsdom 对照）。
+2. **覆盖缺口的真实代价**：desktop 测试由 #12268 刷新后从未被任何门禁执行（test:extended 不在 CI）——localStorage 必败溜过两个阶段；extended-tests job 收编后即被抓。Phase-4 判断（"未被门禁执行的套件必然腐烂"）再次验证。
+3. **worktree 对照的构建产物陷阱**：旧提交 worktree 缺 `@cline/shared/browser` dist 导致 import 解析失败——对照存量行为需先构建产物，或改用"测试文件最后修改时间 + 失败形态取证"定位引入点。
+
+## Phase-18 后剩余项
+
+- 可选增量：A2A SSE 流式（message/stream）；A2A/AG-UI 映射对照当期规范逐条核验（需当期规范访问，登记待办）。
