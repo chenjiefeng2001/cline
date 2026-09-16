@@ -287,3 +287,28 @@
 - **P1 全线收官**（P1-1/P1-2/P1-3/P1-4 均有首批切片落地）；后续切片按需：middleware 接线 agent runtime（替换 beforeTool/afterTool 散点）、P1-1 检索接 agentic search、P1-2 接线 toolPolicies、P1-3 hub 命令注册 attach/detach 对外暴露。
 - P2 路线：P2-1 A2A server（依赖 P0-3，已收官）→ P2-2 工具副作用账本。
 - 可选增量不变：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
+
+---
+
+# 第十阶段：P2-1 A2A server 首批切片
+
+> 依据：架构差距分析路线图 P2-1（D3：协议面单向——只进不出），依赖 P0-3 词汇表冻结（已收官）。约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量**（新 hub/a2a 模块，零既有行为变更——HTTP/SSE 接线留后续切片）。
+
+## Phase-10 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P10-1 | `4c462b0b0` | P2-1 | feat | **A2A server 适配层**（core `hub/a2a/`，按 P0-3 冻结映射 §3）：①`a2a-types`——A2A 核心对象（Agent Card/Task 生命周期/Agent Skill）；②`a2a-mapping`——纯投影：hub session status → A2A task state（**pending approval 即 input-required，HITL 天然契合**；终态胜过 approval）、session 记录 → Task、Agent Card 构造（hub 派生能力 streaming=true/pushNotifications=true）；③`a2a-server`——结构化 hub 客户端之上的请求处理器：`message/send` → `session.create`（新任务）/`session.send_input`（既有任务）；`tasks/get` → `session.get`（含 pending-approval 检测）；`tasks/cancel` → `run.abort`；`tasks/list` → `session.list`；传输解耦（HTTP/SSE 接线后续切片，测试全桩）；导出经 hub 子路径与 core barrel 级联 | core test:unit 1459 pass / 7 平台跳过 / 0 fail；a2a 套件 12/12；hub 套件 182 pass；tsc 干净；biome 干净 |
+| P10-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-10 取证结论
+
+1. **冻结映射即设计图**：P0-3 冻结文档 §3 的方向性映射（message/send ≈ session.create+run.start / session.send_input；Task input-required ≈ approval.requested）直接可执行——**词汇表冻结的投资在 P2 动工时回收**，零漂移核验成本。
+2. **结构化投影 vs `Partial<SessionRecord>`**：mapper 输入若用 `Partial<SessionRecord>`，`source/status` 字段类型仍锁死为窄联合（SessionSource/SessionStatus），hub 宽载荷投影不兼容；改为 `A2ASessionProjectionInput`（status/source 均放宽为 string）——`SessionRecord` 结构上天然满足。与 P1-3 evaluator 的取舍同构：**结构化类型的锚点是消费字段，不是上游记录全量**。
+3. **终态胜过 approval**：状态机映射中 pending approval 只覆盖非终态（completed/failed/canceled 不回退 input-required）——审批挂起但会话已终止的边界语义显式化。
+
+## Phase-10 后剩余项
+
+- P2-1 后续切片：HTTP/SSE 接线（JSON-RPC over HTTP + SSE，挂载 hub server）；Agent Card 从 hub 能力面动态生成（skills 取 catalog.list）；pushNotifications 接 ui.notify 通道。
+- P2 路线不变：P2-2 工具副作用账本 + idempotency-key（恢复期 replay-or-fork 语义，**差异化反超点**）。
+- P1 后续切片按需：middleware 接线 agent runtime、P1-1 检索接 agentic search、P1-2 接线 toolPolicies。
