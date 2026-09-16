@@ -364,3 +364,28 @@
 
 - 接线后续按需：P1-2 沙箱接 toolPolicies（SandboxRuntime 挂 run_commands 执行器）；P1-1 检索接 agentic search 调用方；P2-1 A2A HTTP/SSE server 挂载；P2-2 恢复期 replay-or-fork 接 SessionVersioningService。
 - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
+
+---
+
+# 第十三阶段：P1-2 沙箱接线 run_commands 执行器面
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为 **opt-in 接线**（host 用沙箱执行器替换 stock 执行器，未替换保持原行为）+ 顺带样式收敛。
+
+## Phase-13 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P13-1 | `c88eef89a` | P1-2 接线 | feat | **沙箱 shell 执行器**（core `runtime/sandbox/sandbox-shell-executor.ts`）：`createSandboxShellExecutor({ sandbox, shell? })` 返回 ShellExecutor——host 传给 `createShellTool` 即可让每条命令跑进沙箱（Seatbelt/bubblewrap workspace-write）。结构化命令（`StructuredCommandInput`：executable+argv）argv 原样透传；纯字符串命令包装为 `<shell> -c <command>`（默认 sh，shell 语法保留）；非零退出抛 stderr（与 `executeShellCommands` 的 CommandExitError 失败语义兼容）；**fail-closed 契约**：SandboxUnavailableError 原样传播，包装器绝不静默降级到无沙箱执行——沙箱即执行器（替换，不是降级链） | core test:unit 1485 pass / 7 平台跳过 / 0 fail；sandbox 套件 17/17（全平台桩运行时）；tsc 干净；biome 干净 |
+| P13-2 | `64301036c` | 样式 | style | 4 个 runtime 既有文件的 biome import 排序与换行（P1-2 接线时 biome check 扫出，无行为变更；涉及套件单独运行全绿） | tsc 干净；受影响套件 7/7 |
+| P13-3 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-13 取证结论
+
+1. **沙箱即执行器（替换语义）**：包装器不接受原 executor 作降级链——那会静默恢复无沙箱执行，违背 fail-closed 契约；host 显式选择沙箱执行器即显式承诺后端可用性。
+2. **StructuredCommandInput 与沙箱天然同构**：`{ command: executable, args?: argv }` 即沙箱 `exec({ command, args })` 的形状——argv 原样透传零重解析；纯字符串命令（shell 语法）走 `<shell> -c` 包装。
+3. **超时语义**：执行器无 timeout 参数，外层 `executeShellCommands` 的 withTimeout 管控等待；沙箱 exec 的 timeoutMs 留空（子进程随命令结束），后续如需进程级硬杀再接 sandbox 超时。
+
+## Phase-13 后剩余项
+
+- 接线后续按需：P2-1 A2A HTTP/SSE server 挂载（JSON-RPC over HTTP + SSE）；P2-2 恢复期 replay-or-fork 接 SessionVersioningService；P1-1 检索接 agentic search 调用方。
+- 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
