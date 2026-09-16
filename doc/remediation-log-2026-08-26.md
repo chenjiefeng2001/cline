@@ -437,3 +437,27 @@
 
 - P1-1 检索接 agentic search 调用方；A2A SSE 流式（message/stream）。
 - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射对照当期规范逐条核验。
+
+---
+
+# 第十六阶段：P1-1 记忆检索接线（agentic search 面）+ 确定性排序修复
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量接线**（新 memory/recall-tool.ts + 一处排序修复）。
+
+## Phase-16 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P16-1 | `b306e4ae2` | P1-1 接线 | feat | **recall_memory 工具**（core `memory/recall-tool.ts`）：agent 经工具检索记忆（agentic search 优先，替代"记忆塞 system prompt"反模式）——按 kind/subtype/subject/keyword/tags/limit 过滤 + 可选 workspace 解析器（固定值或按调用上下文）；superseded 事实默认排除（activeOnly），每个 subject 只见当前事实；input schema 经 zod→JSON Schema 导出 | core test:unit 1505 pass / 7 平台跳过 / 0 fail；memory 套件 11/11（×2 稳定）；tsc 干净；biome 干净 |
+| P16-2 | `b306e4ae2` | 修复 | fix | **确定性排序修复**（sqlite-memory-store 查询）：同毫秒 created_at 打平时 tiebreaker 是 `id DESC`（随机 UUID，非确定）→ 改为隐式 `rowid DESC`（插入单调递增）；同时消除 store supersession 测试的潜在顺序 flake | 同上（memory 套件 ×2 稳定） |
+| P16-3 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-16 取证结论
+
+1. **测试用全局默认 dbPath 读到残留记录**：recall-tool 测试初版用 `new SqliteMemoryStore()`（默认全局 memory.db），读到此前调试/测试的残留记录——与 sqlite-memory-store.test.ts 显式 dbPath 的约定不一致。教训：**store 测试永远显式临时 dbPath**，全局默认路径只留给生产。
+2. **非确定 tiebreaker**：同毫秒时间戳打平 + `id DESC`（随机 UUID）使顺序不确定——测试随机红。修复用隐式 rowid（插入单调）作最终 tiebreaker。教训：**时间戳排序必须配单调 tiebreaker**，随机 id 不是序。
+3. **测试种子顺序与断言对齐**：supersession 断言期望最新 append 的结果——种子顺序换过但断言没跟着换导致假红。store 行为正确，测试修正。
+
+## Phase-16 后剩余项
+
+- 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A SSE 流式（message/stream）；A2A/AG-UI 映射对照当期规范逐条核验。
