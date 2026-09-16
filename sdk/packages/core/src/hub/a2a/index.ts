@@ -13,6 +13,7 @@ export {
 	type A2AJsonRpcError,
 	type A2AJsonRpcRequest,
 	type A2AJsonRpcResponse,
+	type A2AJsonRpcStreamResult,
 	createA2AJsonRpcHandler,
 	extractA2ARequestPrompt,
 	extractA2ARequestSessionId,
@@ -26,10 +27,21 @@ export {
 } from "./a2a-mapping";
 export {
 	type A2AHubCommandClient,
+	type A2AHubEventClient,
 	type A2ASendMessageInput,
 	A2AServer,
 	type A2AServerOptions,
+	type A2AStreamOptions,
 } from "./a2a-server";
+export {
+	A2A_SSE_CONTENT_TYPE,
+	type A2AStreamEvent,
+	type A2ATaskStatusUpdateEvent,
+	buildStatusUpdateEvent,
+	formatA2ASseFrame,
+	isTerminalA2ATaskState,
+	mapHubEventToTaskState,
+} from "./a2a-sse";
 export type {
 	A2AAgentCard,
 	A2AAgentSkill,

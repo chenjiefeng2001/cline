@@ -94,6 +94,41 @@ export function mountA2AHttpHandler(
 				return true;
 			}
 			const response = await dispatch(request);
+			if ("stream" in response && response.stream === true) {
+				// `message/stream`: SSE per the A2A spec — headers, an initial
+				// comment (keeps proxies from buffering), then framed events until
+				// the source closes (final status-update or client disconnect).
+				res.statusCode = 200;
+				res.setHeader("content-type", response.contentType);
+				res.setHeader("cache-control", "no-cache");
+				res.setHeader("connection", "keep-alive");
+				let closed = false;
+				let cancel = (): void => {};
+				const close = (): void => {
+					if (!closed) {
+						closed = true;
+						cancel();
+					}
+				};
+				res.on("close", close);
+				req.on("aborted", close);
+				cancel = response.subscribe(
+					(frame) => {
+						if (closed) {
+							return;
+						}
+						res.write(frame);
+					},
+					() => {
+						if (closed) {
+							return;
+						}
+						closed = true;
+						res.end();
+					},
+				);
+				return true;
+			}
 			sendJson(res, 200, response);
 			return true;
 		}

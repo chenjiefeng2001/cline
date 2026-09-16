@@ -12,17 +12,19 @@
  * tests run against stubs.
  */
 
+import type { HubEventEnvelope } from "@cline/shared";
 import {
 	buildAgentCard,
 	type MapSessionToTaskOptions,
 	mapSessionToTask,
 } from "./a2a-mapping";
-import type {
-	A2AAgentCard,
-	A2AAgentSkill,
-	A2ATask,
-	A2ATaskState,
-} from "./a2a-types";
+import {
+	type A2AStreamEvent,
+	buildStatusUpdateEvent,
+	isTerminalA2ATaskState,
+	mapHubEventToTaskState,
+} from "./a2a-sse";
+import type { A2AAgentCard, A2AAgentSkill, A2ATask } from "./a2a-types";
 
 export interface A2AHubCommandClient {
 	command(
@@ -37,15 +39,21 @@ export interface A2AHubCommandClient {
 	): Promise<unknown>;
 }
 
-export interface A2AServerOptions {
-	/** Agent Card identity; hub-derived capabilities are always set. */
-	agentCard: {
-		name: string;
-		description?: string;
-		url?: string;
-		version: string;
-		skills?: A2AAgentSkill[];
-	};
+/**
+ * Event subscription surface the hub client satisfies (`NodeHubClient` and
+ * `HubServerTransport` are both structural matches): a listener on the
+ * `HubEventEnvelope` stream scoped to a session.
+ */
+export interface A2AHubEventClient {
+	subscribe(
+		listener: (event: HubEventEnvelope) => void,
+		options?: { sessionId?: string },
+	): () => void;
+}
+
+export interface A2AStreamOptions {
+	/** Terminal A2A states end the stream; idle streams close after a timeout. */
+	idleTimeoutMs?: number;
 }
 
 export interface A2ASendMessageInput {
@@ -57,6 +65,17 @@ export interface A2ASendMessageInput {
 	config?: Record<string, unknown>;
 	/** Source marker for the created session metadata. */
 	source?: string;
+}
+
+export interface A2AServerOptions {
+	/** Agent Card identity; hub-derived capabilities are always set. */
+	agentCard: {
+		name: string;
+		description?: string;
+		url?: string;
+		version: string;
+		skills?: A2AAgentSkill[];
+	};
 }
 
 /** Loose hub session projection used by the handlers. */
@@ -109,10 +128,16 @@ function extractSessionProjection(
 
 export class A2AServer {
 	private readonly client: A2AHubCommandClient;
+	private readonly events?: A2AHubEventClient;
 	private readonly card: A2AAgentCard;
 
-	constructor(client: A2AHubCommandClient, options: A2AServerOptions) {
+	constructor(
+		client: A2AHubCommandClient,
+		options: A2AServerOptions,
+		events?: A2AHubEventClient,
+	) {
 		this.client = client;
+		this.events = events;
 		this.card = buildAgentCard(options.agentCard);
 	}
 
@@ -196,6 +221,110 @@ export class A2AServer {
 		}
 		return tasks;
 	}
+
+	/**
+	 * A2A `message/stream` [P2-1 SSE]: sends the message exactly like
+	 * `sendMessage`, then yields the session's hub event stream projected
+	 * onto the A2A Task lifecycle (per the freeze mapping §3): the initial
+	 * task snapshot first, then `TaskStatusUpdateEvent`s for every mapped hub
+	 * event, ending after the first terminal state. The returned unsubscribe
+	 * detaches the listener and stops the idle timer.
+	 */
+	async streamMessage(
+		input: A2ASendMessageInput,
+		onEvent: (event: A2AStreamEvent) => void,
+		options: A2AStreamOptions = {},
+	): Promise<() => void> {
+		const task = await this.sendMessage(input);
+		const sessionId = task?.id;
+		if (!sessionId || !this.events) {
+			return () => {};
+		}
+		return this.streamTask(sessionId, task, onEvent, options);
+	}
+
+	/** Whether an event source was bound at construction (SSE capability). */
+	supportsStreaming(): boolean {
+		return this.events !== undefined;
+	}
+
+	/**
+	 * Streams an existing task: subscribes to the session's hub events and
+	 * yields the initial task snapshot plus status updates until a terminal
+	 * A2A state. Returns the unsubscribe function.
+	 */
+	streamTask(
+		sessionId: string,
+		task: A2ATask,
+		onEvent: (event: A2AStreamEvent) => void,
+		options: A2AStreamOptions = {},
+	): () => void {
+		if (!this.events) {
+			return () => {};
+		}
+		let closed = false;
+		let unsubscribe = () => {};
+		let idleTimer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (): void => {
+			if (closed) {
+				return;
+			}
+			closed = true;
+			clearTimeout(idleTimer);
+			unsubscribe();
+		};
+		const emit = (event: A2AStreamEvent, final: boolean): void => {
+			if (closed) {
+				return;
+			}
+			onEvent(event);
+			if (final) {
+				finish();
+			}
+		};
+		// Initial snapshot: the task as it stands when the stream opens.
+		emit(task, isTerminalA2ATaskState(task.status.state));
+		if (closed) {
+			return () => {};
+		}
+		const armIdleTimer = (): void => {
+			if (options.idleTimeoutMs === undefined) {
+				return;
+			}
+			clearTimeout(idleTimer);
+			idleTimer = setTimeout(() => finish(), options.idleTimeoutMs);
+		};
+		armIdleTimer();
+		unsubscribe = this.events.subscribe(
+			(event) => {
+				armIdleTimer();
+				const state = mapHubEventToTaskState(event.event);
+				if (!state) {
+					return;
+				}
+				emit(
+					buildStatusUpdateEvent(
+						sessionId,
+						state,
+						isTerminalA2ATaskState(state),
+						event.sessionId,
+					),
+					isTerminalA2ATaskState(state),
+				);
+			},
+			{ sessionId },
+		);
+		return finish;
+	}
 }
 
-export type { A2AAgentCard, A2AAgentSkill, A2ATask, A2ATaskState };
+export type {
+	A2AStreamEvent,
+	A2ATaskStatusUpdateEvent,
+} from "./a2a-sse";
+export type {
+	A2AAgentCard,
+	A2AAgentSkill,
+	A2ATask,
+	A2ATaskState,
+} from "./a2a-types";

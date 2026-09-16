@@ -9,6 +9,7 @@
  */
 
 import type { A2AServer } from "./a2a-server";
+import { A2A_SSE_CONTENT_TYPE, formatA2ASseFrame } from "./a2a-sse";
 
 export interface A2AJsonRpcRequest {
 	jsonrpc?: "2.0";
@@ -37,6 +38,22 @@ export const A2A_JSONRPC_INVALID_PARAMS = -32602;
 export const A2A_JSONRPC_INTERNAL_ERROR = -32603;
 /** A2A application error: task not found. */
 export const A2A_TASK_NOT_FOUND = -32001;
+
+/**
+ * Result marker for `message/stream`: the dispatch recognised a streaming
+ * request and the transport must answer with an SSE response, not a JSON-RPC
+ * envelope. Carries the subscription canceler and the framed event source.
+ */
+export interface A2AJsonRpcStreamResult {
+	/** Marker property distinguishing a streaming result. */
+	stream: true;
+	contentType: typeof A2A_SSE_CONTENT_TYPE;
+	/** Writes `data: <json>\n\n` per event until the source closes. */
+	subscribe(
+		onFrame: (frame: string) => void,
+		onClose: (error?: Error) => void,
+	): () => void;
+}
 
 /** Extracts the text of a request message (A2A text parts collapsed). */
 export function extractA2ARequestPrompt(
@@ -91,7 +108,9 @@ function asError(value: unknown): string {
  */
 export function createA2AJsonRpcHandler(
 	server: A2AServer,
-): (request: A2AJsonRpcRequest) => Promise<A2AJsonRpcResponse> {
+): (
+	request: A2AJsonRpcRequest,
+) => Promise<A2AJsonRpcResponse | A2AJsonRpcStreamResult> {
 	return async (request) => {
 		const respond = (
 			response: Omit<A2AJsonRpcResponse, "jsonrpc">,
@@ -108,6 +127,80 @@ export function createA2AJsonRpcHandler(
 		const params = request.params ?? {};
 		try {
 			switch (request.method) {
+				case "message/stream": {
+					const prompt = extractA2ARequestPrompt(params);
+					if (!prompt) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INVALID_PARAMS,
+								message: "message/stream requires message.parts text",
+							},
+						});
+					}
+					if (!server.supportsStreaming()) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INTERNAL_ERROR,
+								message: "message/stream unavailable: no event source bound",
+							},
+						});
+					}
+					const streamId = request.id ?? null;
+					void streamId;
+					return {
+						stream: true,
+						contentType: A2A_SSE_CONTENT_TYPE,
+						subscribe(onFrame, onClose) {
+							let done = false;
+							const finish = (error?: Error): void => {
+								if (done) {
+									return;
+								}
+								done = true;
+								cancel?.();
+								onClose?.(error);
+							};
+							let cancel: (() => void) | undefined;
+							void server
+								.streamMessage(
+									{
+										prompt,
+										sessionId: extractA2ARequestSessionId(params),
+										source: "a2a",
+									},
+									(event) => {
+										if (done) {
+											return;
+										}
+										try {
+											onFrame(formatA2ASseFrame(event));
+										} catch (error) {
+											finish(
+												error instanceof Error
+													? error
+													: new Error(String(error)),
+											);
+										}
+									},
+								)
+								.then((unsubscribe) => {
+									if (done) {
+										unsubscribe();
+										return;
+									}
+									cancel = unsubscribe;
+								})
+								.catch((error: unknown) => {
+									finish(
+										error instanceof Error ? error : new Error(String(error)),
+									);
+								});
+							return () => finish();
+						},
+					};
+				}
 				case "message/send": {
 					const prompt = extractA2ARequestPrompt(params);
 					if (!prompt) {
