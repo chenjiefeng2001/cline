@@ -2,8 +2,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+	appendMessagesToJsonl,
+	ensureJsonlHeader,
+} from "../../services/session-messages-jsonl";
 import { readPersistedMessagesFile } from "./runtime-host-support";
-import { appendMessagesToJsonl, ensureJsonlHeader } from "../../services/session-messages-jsonl";
 
 const tempDirs: string[] = [];
 
@@ -69,7 +72,10 @@ describe("readPersistedMessagesFile", () => {
 		const dir = await mkdtemp(join(tmpdir(), "runtime-host-support-"));
 		tempDirs.push(dir);
 		const messagesPath = join(dir, "messages.jsonl");
-		ensureJsonlHeader(messagesPath, { updatedAt: "2026-01-01T00:00:00.000Z", context: { sessionId: "s1", agent: "lead" } });
+		ensureJsonlHeader(messagesPath, {
+			updatedAt: "2026-01-01T00:00:00.000Z",
+			context: { sessionId: "s1", agent: "lead" },
+		});
 		appendMessagesToJsonl(
 			messagesPath,
 			Array.from({ length: 120 }, (_, i) => ({
@@ -91,7 +97,10 @@ describe("readPersistedMessagesFile", () => {
 		const dir = await mkdtemp(join(tmpdir(), "runtime-host-support-"));
 		tempDirs.push(dir);
 		const messagesPath = join(dir, "messages.jsonl");
-		ensureJsonlHeader(messagesPath, { updatedAt: "2026-01-01T00:00:00.000Z", context: { sessionId: "s1", agent: "lead" } });
+		ensureJsonlHeader(messagesPath, {
+			updatedAt: "2026-01-01T00:00:00.000Z",
+			context: { sessionId: "s1", agent: "lead" },
+		});
 		appendMessagesToJsonl(
 			messagesPath,
 			Array.from({ length: 60 }, (_, i) => ({
@@ -101,7 +110,9 @@ describe("readPersistedMessagesFile", () => {
 			})),
 		);
 
-		const messages = await readPersistedMessagesFile(messagesPath, { limit: 3 });
+		const messages = await readPersistedMessagesFile(messagesPath, {
+			limit: 3,
+		});
 
 		expect(messages).toHaveLength(3);
 		// Most recent rows (tail), oldest-first within the window.

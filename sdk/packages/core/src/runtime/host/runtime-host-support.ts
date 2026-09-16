@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { readSessionMessagesFile } from "../../services/session-messages-jsonl";
 import type * as LlmsProviders from "@cline/llms";
 import type { HookEventPayload } from "../../hooks";
+import { readSessionMessagesFile } from "../../services/session-messages-jsonl";
 import type { CoreSessionEvent } from "../../types/events";
 import type {
 	RuntimeHostSubscribeOptions,
@@ -73,7 +73,9 @@ export async function readPersistedMessagesFile(
 	//   - compaction must summarize the whole transcript, not just the tail.
 	// Callers that genuinely only need recent rows pass an explicit limit.
 	const messages = await readSessionMessagesFile(path, {
-		...(options?.limit !== undefined ? { limit: options.limit } : { startFromEnd: false }),
+		...(options?.limit !== undefined
+			? { limit: options.limit }
+			: { startFromEnd: false }),
 	});
 	return messages as unknown as LlmsProviders.Message[];
 }
