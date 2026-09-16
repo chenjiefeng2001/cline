@@ -9,6 +9,9 @@ export default defineConfig({
 	},
 	test: {
 		environment: "node",
+		// Node ≥26's experimental localStorage global shadows jsdom's working
+		// one (see vitest-setup.ts) — shim before tests run.
+		setupFiles: ["./vitest-setup.ts"],
 		// Heavy webview/React import graph; the 5s default produces false
 		// timeouts when several workspace suites run in parallel.
 		testTimeout: 30_000,
