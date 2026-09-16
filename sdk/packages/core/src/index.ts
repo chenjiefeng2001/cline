@@ -448,6 +448,10 @@ export {
 	type ToolMiddlewareContext,
 } from "./middleware/tool-middleware";
 export {
+	type WrapToolsWithMiddlewareOptions,
+	wrapToolsWithMiddleware,
+} from "./middleware/wrap-tools";
+export {
 	buildRemoteConfigSessionBlobUploadMetadata,
 	createRemoteConfigSessionMessagesArtifactUploader,
 	type PreparedRemoteConfigCoreIntegration,

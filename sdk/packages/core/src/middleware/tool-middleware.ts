@@ -14,9 +14,9 @@
 
 export interface ToolMiddlewareContext {
 	toolName: string;
-	toolCallId: string;
 	/** Loop iteration that produced the call. */
 	iteration: number;
+	toolCallId?: string;
 	sessionId?: string;
 	agentId?: string;
 	conversationId?: string;

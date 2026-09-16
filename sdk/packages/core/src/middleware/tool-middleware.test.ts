@@ -214,7 +214,7 @@ describe("createApprovalMiddleware", () => {
 			agentId: ctx.agentId ?? "",
 			conversationId: ctx.conversationId ?? "",
 			iteration: ctx.iteration,
-			toolCallId: ctx.toolCallId,
+			toolCallId: ctx.toolCallId ?? "",
 			toolName: ctx.toolName,
 			input: ctx.input,
 			policy: { enabled: true, autoApprove: false },
@@ -260,7 +260,7 @@ describe("full chain composition", () => {
 		const tracer: ToolMiddleware = {
 			name: "tracer",
 			async wrap(execute, ctx) {
-				calls.push(ctx.toolCallId);
+				calls.push(ctx.toolCallId ?? "");
 				return execute();
 			},
 		};
