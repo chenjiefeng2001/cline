@@ -461,3 +461,26 @@
 ## Phase-16 后剩余项
 
 - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A SSE 流式（message/stream）；A2A/AG-UI 映射对照当期规范逐条核验。
+
+---
+
+# 第十七阶段：P0-1 收官增量 —— llms providers 请求层 span
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为**纯增量**（span 无 provider 时 no-op，零行为变更）。至此 **P0-1 三层 OTel 对齐全部完成**（agent.run/agent.tool + hub.command/hub.dispatch + 跨进程 TRACEPARENT + llm.request）。
+
+## Phase-17 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P17-1 | `5c7f02035` | P0-1 | feat | **llm.request span**（llms `providers/ai-sdk.ts`）：包裹全部 13 个 gateway provider 的 stream 生成器（createAiSdkProvider 单点）——`llm.provider_id/model_id/provider_kind` 属性；无注册 TracerProvider 时 no-op、由调用方活动 context 挂接（agent.run/agent.tool span 或跨进程 TRACEPARENT）；从流事件捕获 finish reason（`llm.finish_reason`），error finish 或 provider 失败 → ERROR 状态；span 随生成器退出结束（成功/错误 finish/抛出三路径全覆盖）；模块级 tracer `cline.llms`（对齐 P5-2 的 `cline.agents`） | llms test 414 pass / 4 平台跳过 / 0 fail；core test:unit 1505 pass / 0 fail；tsc 干净（llms+core）；biome 干净 |
+| P17-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-17 取证结论
+
+1. **生成器 span 包装的括号平衡**：stream 是 async generator——span try 包裹整个既有 try/catch 体时，finally 应附在 span try 上；初版误附内层 try 导致语法错误（结构诊断：tsc 报 "'catch' or 'finally' expected" 指向 span finally 行即上方失衡）。教训：**生成器包裹既有 try/catch 时，外层 finally 的归属要显式核对括号链**。
+2. **finish reason 从流事件捕获**：`yield*` 改为显式 for-await 循环——透传事件同时观察 finish part（reason → span 属性，error → ERROR 状态），零事件语义变更。
+3. **单点包装复用**：13 个 provider 全部经 createAiSdkProvider 工厂创建——span 一处包裹全覆盖，与 P5-2 的 agents 单点包装同构。
+
+## Phase-17 后剩余项
+
+- 可选增量：`test:extended` 并入 CI；A2A SSE 流式（message/stream）；A2A/AG-UI 映射对照当期规范逐条核验。
