@@ -340,3 +340,27 @@
   - P2-1 接线：A2A HTTP/SSE server 挂载；Agent Card 动态生成（skills 取 catalog.list）。
   - P1 接线：middleware 接 agent runtime、P1-1 检索接 agentic search、P1-2 接 toolPolicies。
   - 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
+
+---
+
+# 第十二阶段：middleware 链接线 agent 工具面（P1-4+P2-2 wiring）
+
+> 约束不变：小提交、可单独回退、每步验证门。本轮为 **opt-in 接线**（host 按需包装工具集，未包装工具保持原行为——默认零行为变更）。
+
+## Phase-12 提交清单
+
+| # | Commit | 项 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P12-1 | `7c04ae173` | P1-4+P2-2 接线 | feat | **工具中间件链接线**（core `middleware/wrap-tools.ts`）：`wrapToolsWithMiddleware(tools, { chain, sessionId })` 返回新工具对象（identity 字段保留、原对象不变、链边界类型擦除透传），其 `execute` 以中间件链环绕原执行器。**接线点选择**：agents 包不能依赖 core（成环），故接线在工具集——host 构建 runtime 前包装工具集；完整洋葱语义（retry 可表达）且 P1-4 四中间件与 P2-2 幂等账本同链复用；opt-in 默认关闭。连带修正：`ToolMiddlewareContext.toolCallId` 放宽为可选（AgentToolContext 本就可选）、链边界类型修正（executor unknown→Promise.resolve、tool.execute 边界转换） | core test:unit 1480 pass / 7 平台跳过 / 0 fail；middleware+ledger 套件 36/36；tsc 干净；biome 干净 |
+| P12-2 | （本提交） | R6 | docs | 本节 | — |
+
+## Phase-12 取证结论
+
+1. **接线点 = 工具集，不是 runtime 内部**：洋葱式链需要 executor 可达；agents→core 单向依赖使 runtime 内接线必须新增反向依赖（成环）。包装工具集（`wrapToolsWithMiddleware`）在 core 导出、host 按需应用——零侵入、opt-in、可单测。
+2. **泛型边界两处类型擦除**：链是 unknown 类型边界——`tool.execute` 需边界转换（TInput 未解析时 unknown 不可赋值）、executor 返回值需 `Promise.resolve` 包装（`=> unknown` 不满足 `=> Promise<unknown>`）。教训：**泛型工具类型与 unknown 链的接缝处，双侧都要显式边界转换**。
+3. **hook bag 无法表达完整洋葱**：beforeTool/afterTool 两相钩子可表达 approval/budget/redaction，但 retry 的"环绕执行"无法在钩子里表达——工具包装是唯一能保留全部四个中间件语义的接线点。
+
+## Phase-12 后剩余项
+
+- 接线后续按需：P1-2 沙箱接 toolPolicies（SandboxRuntime 挂 run_commands 执行器）；P1-1 检索接 agentic search 调用方；P2-1 A2A HTTP/SSE server 挂载；P2-2 恢复期 replay-or-fork 接 SessionVersioningService。
+- 可选增量：llms providers 请求层 span；`test:extended` 并入 CI；A2A/AG-UI 映射动工前逐条核验。
