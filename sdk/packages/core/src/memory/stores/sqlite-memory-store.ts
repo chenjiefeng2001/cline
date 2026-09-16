@@ -340,7 +340,10 @@ export class SqliteMemoryStore implements MemoryStore {
 		}
 		const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 		const rows = this.selectRows(
-			`SELECT * FROM memory_records ${where} ORDER BY created_at DESC, id DESC`,
+			// rowid (implicit, monotonic for inserts) breaks same-millisecond
+			// created_at ties deterministically; id is a random UUID and must
+			// not be an ordering tiebreaker.
+			`SELECT * FROM memory_records ${where} ORDER BY created_at DESC, rowid DESC`,
 			params,
 		);
 		const records: MemoryRecord[] = [];
