@@ -108,14 +108,25 @@ let mockFetch: FetchFunction | undefined
 
 // ─── Timeout presets by category ───────────────────────────────────────────
 // These match typical latency profiles for each request type.
+// Default is generous (5 min) so that LLM API requests are not prematurely
+// killed by a fixed timer.  Activity-based timeouts (see createFetch) ensure
+// stale connections are still detected.
 const DEFAULT_TIMEOUTS: Record<string, number> = {
-	default: 30_000,       // Most API requests (Anthropic, OpenAI, etc.)
+	default: 300_000,      // Most API requests (Anthropic, OpenAI, etc.) – 5 min
 	local: 180_000,        // Local models (Ollama, LM Studio, etc.)
-	thinking: 300_000,     // Deep-thinking models (DeepSeek-R1, o1, etc.)
+	thinking: 600_000,     // Deep-thinking models (DeepSeek-R1, o1, etc.) – 10 min
 	mcp_sse: 45_000,       // MCP SSE connection / heartbeats
 	market: 10_000,        // Marketplace download
 	oauth: 60_000,         // OAuth callback
 } as const
+
+/**
+ * Inactivity timeout for streaming responses.  If no bytes arrive within this
+ * window the request is considered stalled and aborted.  This covers cases
+ * where the connection is open but the provider stops sending data (e.g.
+ * server-side error, proxy stall, rate-limit queue).
+ */
+const STREAM_INACTIVITY_TIMEOUT_MS = 60_000
 
 /**
  * Merges multiple AbortSignals into one. Returns a signal that is aborted
@@ -157,41 +168,61 @@ function buildBaseFetch(): typeof globalThis.fetch {
 const baseFetch = buildBaseFetch()
 
 /**
- * Create a proxy-aware fetch wrapper with a per-category timeout.
+ * Create a proxy-aware fetch wrapper with per-category timeout and
+ * multi-dimensional activity-based timeout for streaming responses.
  *
- * @param category - Request category used to select timeout threshold.
- *   Defaults to `"default"` (30s). Use `"local"` (180s) for Ollama/LM Studio,
- *   `"thinking"` (300s) for deep-reasoning models, `"mcp_sse"` (45s) for
- *   MCP SSE connections, or `"market"` (10s) for quick marketplace fetches.
+ * ## Timeout Strategy
+ *
+ * 1. **Total timeout** (time-to-headers) – covers connection setup, TLS handshake,
+ *    proxy negotiation, and waiting for response headers. Defaults vary by
+ *    category (see {@link DEFAULT_TIMEOUTS}). Once headers arrive the total
+ *    timer is cleared so legitimately long LLM streams are not killed mid-body.
+ * 2. **Inactivity timeout** – active only when the response body is a
+ *    `ReadableStream`.  Resets every time bytes arrive.  If no bytes arrive
+ *    within {@link STREAM_INACTIVITY_TIMEOUT_MS} the request is aborted,
+ *    even if the total timeout has not been reached.  This catches stalled
+ *    streams where the connection is open but no data flows.
+ *
+ * @param category  Request category used to select the default total timeout.
+ * @param options   Optional overrides.
+ * @param options.customTimeoutMs  Override the total timeout (ms).  Useful
+ *   when the caller knows the expected latency (e.g. local models, user-
+ *   configured timeout).
  * @returns A fetch-compatible function with timeout protection.
- *
- * The timeout is implemented via an internal AbortController + setTimeout.
- * If the caller also passes a `signal` in `init`, both signals are merged so
- * that the request is aborted when EITHER fires.
  *
  * @example
  * ```typescript
- * import { createFetch } from '@/shared/net'
- *
- * // Standard 30s API call
+ * // Standard 5-min API call
  * const response = await fetch(url)
  *
- * // Local model — allow up to 3 minutes
+ * // Local model – keep the category default (180 s)
  * const localFetch = createFetch('local')
  * const response = await localFetch(url)
+ *
+ * // User-configured 10-min timeout
+ * const customFetch = createFetch('default', { customTimeoutMs: 600_000 })
+ * const response = await customFetch(url)
  * ```
  */
-export function createFetch(category: keyof typeof DEFAULT_TIMEOUTS = "default"): typeof globalThis.fetch {
-	const timeoutMs = DEFAULT_TIMEOUTS[category] ?? DEFAULT_TIMEOUTS.default
+export function createFetch(
+	category: keyof typeof DEFAULT_TIMEOUTS = "default",
+	options?: { customTimeoutMs?: number },
+): typeof globalThis.fetch {
+	const totalTimeoutMs = options?.customTimeoutMs ?? DEFAULT_TIMEOUTS[category] ?? DEFAULT_TIMEOUTS.default
 
 	const timeoutFetch = async function timeoutFetch(
 		input: string | URL | Request,
 		init?: RequestInit,
 	): Promise<Response> {
 		const controller = new AbortController()
-		const timeoutId = setTimeout(() => {
-			controller.abort(new DOMException(`Request timed out after ${timeoutMs}ms (category: ${category})`, "TIMEOUT"))
-		}, timeoutMs)
+		const totalTimer = setTimeout(() => {
+			controller.abort(
+				new DOMException(
+					`Request timed out after ${totalTimeoutMs}ms (category: ${category})`,
+					"TIMEOUT",
+				),
+			)
+		}, totalTimeoutMs)
 
 		try {
 			const response = await (mockFetch || baseFetch)(input, {
@@ -200,9 +231,64 @@ export function createFetch(category: keyof typeof DEFAULT_TIMEOUTS = "default")
 					? anySignal(init.signal, controller.signal)
 					: controller.signal,
 			})
+
+			// ── Activity-based timeout for streaming bodies ──────────────
+			// Wrap the ReadableStream so that each chunk resets an inactivity
+			// timer.  When the timer fires (no bytes for STREAM_INACTIVITY_TIMEOUT_MS)
+			// we cancel the reader, which propagates to the underlying connection.
+			const body = response.body
+			if (body) {
+				let inactivityTimer: ReturnType<typeof setTimeout> | undefined
+				const reader = body.getReader()
+
+				const resetInactivityTimer = () => {
+					clearTimeout(inactivityTimer)
+					inactivityTimer = setTimeout(() => {
+						reader.cancel(
+							new DOMException(
+								`Stream stalled – no bytes for ${STREAM_INACTIVITY_TIMEOUT_MS}ms (category: ${category})`,
+								"TIMEOUT",
+							),
+						)
+					}, STREAM_INACTIVITY_TIMEOUT_MS)
+				}
+
+				// Kick off the first inactivity window
+				resetInactivityTimer()
+
+				const teedReadable = new ReadableStream({
+					async pull(controller) {
+						try {
+							const { done, value } = await reader.read()
+							if (done) {
+								clearTimeout(inactivityTimer)
+								controller.close()
+							} else {
+								resetInactivityTimer()
+								controller.enqueue(value)
+							}
+						} catch (err) {
+							clearTimeout(inactivityTimer)
+							controller.error(err)
+						}
+					},
+					cancel(reason) {
+						clearTimeout(inactivityTimer)
+						return reader.cancel(reason)
+					},
+				})
+
+				return new Response(teedReadable, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers,
+				})
+			}
+
+			// Non-streaming response – the total timeout is sufficient.
 			return response
 		} finally {
-			clearTimeout(timeoutId)
+			clearTimeout(totalTimer)
 		}
 	}
 
@@ -216,8 +302,9 @@ export function createFetch(category: keyof typeof DEFAULT_TIMEOUTS = "default")
 /**
  * Platform-configured fetch that respects proxy settings.
  *
- * Default timeout: **30 seconds**. Use `createFetch(category)` for
- * custom timeouts (e.g. local models, deep-thinking, MCP SSE).
+ * Default timeout: **5 minutes** (with 60s inactivity detection for streaming).
+ * Use `createFetch(category, { customTimeoutMs })` for custom timeouts
+ * (e.g. local models, deep-thinking, MCP SSE).
  *
  * Use this instead of global fetch to ensure proper proxy configuration.
  *

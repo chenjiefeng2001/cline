@@ -39,4 +39,21 @@ describe("TurnStateTracker", () => {
 		tracker.set("completed")
 		expect(tracker.get().seq).toBeGreaterThan(a)
 	})
+
+	it("tracks connection status and retry counters for auto-retry UI", () => {
+		const tracker = new TurnStateTracker(new MessageIdMinter())
+		expect(tracker.get().connectionStatus).toBe("idle")
+
+		tracker.setConnectionStatus("reconnecting", 1, 3)
+		expect(tracker.get()).toMatchObject({ connectionStatus: "reconnecting", retryAttempt: 1, retryMax: 3 })
+
+		// streaming resets retry counters and marks connected
+		tracker.set("streaming")
+		expect(tracker.get()).toMatchObject({ connectionStatus: "connected" })
+		expect(tracker.get().retryAttempt).toBeUndefined()
+		expect(tracker.get().retryMax).toBeUndefined()
+
+		tracker.set("error")
+		expect(tracker.get().connectionStatus).toBe("error")
+	})
 })

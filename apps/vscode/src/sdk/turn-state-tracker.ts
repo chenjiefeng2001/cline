@@ -1,4 +1,4 @@
-import type { TurnPhase, TurnState } from "@shared/ExtensionMessage"
+import type { ConnectionStatus, TurnPhase, TurnState } from "@shared/ExtensionMessage"
 import type { MessageIdMinter } from "./message-id-minter"
 
 // Authoritative UI-mode tracker for the current agent turn.
@@ -16,6 +16,9 @@ export class TurnStateTracker {
 	private phase: TurnPhase = "idle"
 	private anchorTs: number | undefined
 	private seq: number
+	private connectionStatus: ConnectionStatus = "idle"
+	private retryAttempt = 0
+	private retryMax = 0
 
 	constructor(private readonly minter: MessageIdMinter) {
 		this.seq = minter.nextSeq()
@@ -26,11 +29,34 @@ export class TurnStateTracker {
 		this.phase = phase
 		this.anchorTs = anchorTs
 		this.seq = this.minter.nextSeq()
+		// Reset retry counters on phase transitions that are not retries
+		if (phase === "streaming" || phase === "completed" || phase === "idle") {
+			this.retryAttempt = 0
+			this.retryMax = 0
+			this.connectionStatus = phase === "streaming" ? "connected" : "idle"
+		} else if (phase === "error") {
+			this.connectionStatus = "error"
+		}
+	}
+
+	/** Update connection status (e.g. "reconnecting" during auto-retry). */
+	setConnectionStatus(status: ConnectionStatus, attempt?: number, maxRetries?: number): void {
+		this.connectionStatus = status
+		if (attempt !== undefined) this.retryAttempt = attempt
+		if (maxRetries !== undefined) this.retryMax = maxRetries
+		this.seq = this.minter.nextSeq()
 	}
 
 	/** Current immutable snapshot for inclusion in the state payload. */
 	get(): TurnState {
-		return { phase: this.phase, anchorTs: this.anchorTs, seq: this.seq }
+		return {
+			phase: this.phase,
+			anchorTs: this.anchorTs,
+			seq: this.seq,
+			connectionStatus: this.connectionStatus,
+			retryAttempt: this.retryAttempt || undefined,
+			retryMax: this.retryMax || undefined,
+		}
 	}
 
 	get currentPhase(): TurnPhase {

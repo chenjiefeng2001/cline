@@ -181,6 +181,23 @@ export async function handleGrpcRequestCancel(postMessageToWebview: PostMessageT
 // Registry to track active gRPC requests and their cleanup functions
 const requestRegistry = new GrpcRequestRegistry()
 
+// Periodically clean up stale gRPC requests that were never cancelled or
+// completed (e.g. webview reloaded while a streaming subscription was active).
+// 5-minute interval with a 10-minute max age prevents unbounded memory growth
+// without being aggressive enough to evict legitimate long-lived subscriptions.
+const STALE_REQUEST_MAX_AGE_MS = 10 * 60 * 1000
+const staleRequestSweeper = setInterval(
+	() => {
+		const cleaned = requestRegistry.cleanupStaleRequests(STALE_REQUEST_MAX_AGE_MS)
+		if (cleaned > 0) {
+			Logger.log(`[GrpcHandler] Cleaned up ${cleaned} stale gRPC requests`)
+		}
+	},
+	5 * 60 * 1000,
+)
+// Don't keep test workers / the extension host alive just for the sweeper.
+staleRequestSweeper.unref?.()
+
 /**
  * Get the request registry instance
  * This allows other parts of the code to access the registry

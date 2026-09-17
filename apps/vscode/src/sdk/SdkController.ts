@@ -49,6 +49,46 @@ import { ExtensionRegistryInfo } from "@/registry"
 import { OcaAuthService } from "@/services/auth/oca/OcaAuthService"
 import { UrlContentFetcher } from "@/services/browser/UrlContentFetcher"
 import { ClineError } from "@/services/error/ClineError"
+
+/**
+ * Extract a human-readable error message from any error value.
+ * Handles Error objects, serialized JSON strings, and unknown types.
+ * Never returns raw JSON — always produces a display-friendly string.
+ */
+function formatErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		// ClineError carries structured details
+		if (error instanceof ClineError) {
+			const parts: string[] = []
+			if (error.providerId) parts.push(`[${error.providerId}]`)
+			if (error._error?.code) parts.push(error._error.code)
+			parts.push(error.message)
+			if (error._error?.request_id) parts.push(`(request: ${error._error.request_id})`)
+			return parts.join(" ")
+		}
+		return error.message || error.name || "Unknown error"
+	}
+	if (typeof error === "string") {
+		// Try to parse as JSON and extract message
+		try {
+			const parsed = JSON.parse(error)
+			if (parsed.message) return String(parsed.message)
+			if (parsed.error?.message) return String(parsed.error.message)
+			if (parsed.error) return String(parsed.error)
+			// Don't return raw JSON — summarize it
+			return `Provider error (${Object.keys(parsed).join(", ")})`
+		} catch {
+			// Not JSON, return as-is
+			return error
+		}
+	}
+	if (typeof error === "object" && error !== null) {
+		const obj = error as Record<string, unknown>
+		if (obj.message) return String(obj.message)
+		if (obj.error) return formatErrorMessage(obj.error)
+	}
+	return String(error)
+}
 import { McpHub } from "@/services/mcp/McpHub"
 import { telemetryService } from "@/services/telemetry"
 import type { ClineExtensionContext } from "@/shared/cline"
@@ -389,6 +429,7 @@ export class Controller {
 			},
 			onSendStart: () => {
 				this.beginProviderFailureTelemetryTurn()
+				this.turnStateTracker.setConnectionStatus("connected")
 			},
 			// this.mode is assigned later in this constructor; the closure only
 			// runs at send time, long after construction completes.
@@ -396,6 +437,7 @@ export class Controller {
 			onSendComplete: async () => {
 				// Normal flows close their diff sessions inline; anything left here is orphaned.
 				void this.diffEdits.discardAllPreviews("turn complete")
+				this.turnStateTracker.setConnectionStatus("idle")
 
 				this.postStateToWebview().catch((err) => {
 					Logger.error("[SdkController] Failed to post state after turn:", err)
@@ -405,7 +447,7 @@ export class Controller {
 				// A turn failed — the UI shows error recovery (Retry / Sign In / Add Credits).
 				void this.diffEdits.discardAllPreviews("turn error")
 				this.turnStateTracker.set("error")
-				const errorMessage = error instanceof Error ? error.message : String(error)
+				const errorMessage = formatErrorMessage(error)
 				const providerId = this.getSessionProviderId(sessionId) ?? this.getActiveProviderId()
 				const isClineAuthError =
 					isClineManagedProvider(providerId) &&
@@ -452,6 +494,26 @@ export class Controller {
 						{ type: "status", payload: { sessionId, status: "error" } },
 					)
 				}
+				this.postStateToWebview().catch(() => {})
+			},
+			onRetryAttempt: (attempt, maxRetries, delayMs, error) => {
+				const errorMsg = error instanceof Error ? error.message : String(error)
+				Logger.log(
+					`[SdkController] Auto-retry ${attempt}/${maxRetries} in ${delayMs}ms: ${errorMsg}`,
+				)
+				this.turnStateTracker.setConnectionStatus("reconnecting", attempt, maxRetries)
+				this.messages.emitSessionEvents(
+					[
+						{
+							ts: Date.now(),
+							type: "say",
+							say: "error",
+							text: `Connection lost, retrying (${attempt}/${maxRetries})...`,
+							partial: false,
+						},
+					],
+					{ type: "status", payload: { sessionId: "", status: "retrying" } },
+				)
 				this.postStateToWebview().catch(() => {})
 			},
 		})

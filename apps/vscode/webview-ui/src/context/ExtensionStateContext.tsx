@@ -21,6 +21,7 @@ import {
 } from "../../../src/shared/api"
 import { Environment } from "../../../src/shared/config-types"
 import type { McpServer, McpViewTab } from "../../../src/shared/mcp"
+import { PLATFORM_CONFIG } from "../config/platform.config"
 import {
 	createReplicaState,
 	type ReplicaState,
@@ -1127,6 +1128,11 @@ export const ExtensionStateContextProvider: React.FC<{
 			},
 			onComplete: () => {},
 		})
+
+		// Signal to the extension host that the webview is ready to receive state.
+		// This replaces the 2-second fallback timeout in VscodeWebviewProvider and
+		// ensures state is pushed only after subscriptions are wired up.
+		PLATFORM_CONFIG.postMessage({ type: "webview_ready" })
 
 		// Clean up subscriptions when component unmounts
 		return () => {

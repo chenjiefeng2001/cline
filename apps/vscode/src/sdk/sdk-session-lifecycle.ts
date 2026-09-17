@@ -17,6 +17,36 @@ import { buildToolPolicies } from "./sdk-tool-policies"
 import type { SdkSessionHost } from "./session-host"
 import { VscodeSessionHost } from "./vscode-session-host"
 
+// ─── Auto-retry configuration ────────────────────────────────────────────
+const MAX_AUTO_RETRIES = 3
+const RETRY_BASE_DELAY_MS = 2_000
+const RETRY_MAX_DELAY_MS = 30_000
+
+/**
+ * Determine whether an error is transient and worth retrying automatically.
+ * Permanent errors (auth, billing, bad request) should NOT be retried.
+ */
+export function isRetryableError(error: unknown): boolean {
+	if (error instanceof DOMException && error.name === "TIMEOUT") return true
+	if (error instanceof Error) {
+		if (error.name === "TIMEOUT") return true
+		const msg = error.message.toLowerCase()
+		// Network / transport errors
+		if (msg.includes("econnreset") || msg.includes("econnrefused") || msg.includes("enotfound")) return true
+		if (msg.includes("network") || msg.includes("socket hang up")) return true
+		// Server-side transient errors
+		if (msg.includes("502") || msg.includes("503") || msg.includes("504")) return true
+		if (msg.includes("bad gateway") || msg.includes("service unavailable") || msg.includes("gateway timeout")) return true
+		// Rate limiting (transient — backoff helps)
+		if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) return true
+		// Model overloaded / capacity errors
+		if (msg.includes("overloaded") || msg.includes("capacity") || msg.includes("load")) return true
+		// Streaming stalls
+		if (msg.includes("stream") && (msg.includes("stall") || msg.includes("reset") || msg.includes("broken"))) return true
+	}
+	return false
+}
+
 type RequestToolApprovalHandler = NonNullable<Parameters<typeof VscodeSessionHost.create>[0]["requestToolApproval"]>
 type AskQuestionHandler = NonNullable<Parameters<typeof VscodeSessionHost.create>[0]["askQuestion"]>
 type EditorExecutorHandler = NonNullable<Parameters<typeof VscodeSessionHost.create>[0]["editorExecutor"]>
@@ -42,6 +72,8 @@ export interface SdkSessionLifecycleOptions {
 	onSendStart?: (sessionId: string) => void
 	onSendComplete: (sessionId: string) => Promise<void> | void
 	onSendError: (error: unknown, sessionId: string) => Promise<void> | void
+	/** Called when a send is about to auto-retry after a transient error. */
+	onRetryAttempt?: (attempt: number, maxRetries: number, delayMs: number, error: unknown) => void
 	/**
 	 * Returns (and clears) a pending user-initiated plan/act switch recorded by
 	 * SdkModeCoordinator for this session, so fireAndForgetSend — the single
@@ -373,42 +405,71 @@ export class SdkSessionLifecycle {
 		const notice = this.options.consumeModeSwitchNotice?.(sessionId)
 		const noticedPrompt = notice ? `${formatModeSwitchNotice(notice.from, notice.to)}\n${prompt}` : prompt
 		this.options.onSendStart?.(sessionId)
-		sdkHost
-			.send({
-				sessionId,
-				prompt: noticedPrompt,
-				userImages: images,
-				userFiles: files,
-				delivery,
-			})
-			.then(async () => {
-				if (delivery === "queue" || delivery === "steer") {
-					Logger.log(`[SdkController] Message queued for session: ${sessionId}`)
-					return
-				}
-				if (isSuperseded("completion")) {
-					return
-				}
-				Logger.log(`[SdkController] Agent turn completed for session: ${sessionId}`)
-				this.setRunning(false)
-				await this.options.onSendComplete(sessionId)
-			})
-			.catch(async (error: unknown) => {
-				if (isAbortError(error)) {
-					Logger.debug(`[SdkController] Agent turn aborted (expected): ${sessionId}`)
-					return
-				}
-				if (isSuperseded("failure")) {
-					return
-				}
-				Logger.error("[SdkController] Agent turn failed:", error)
-				this.setRunning(false)
-				await this.options.onSendError(error, sessionId)
-			})
+
+		const attemptSend = (attempt: number): void => {
+			sdkHost
+				.send({
+					sessionId,
+					prompt: noticedPrompt,
+					userImages: images,
+					userFiles: files,
+					delivery,
+				})
+				.then(async () => {
+					if (delivery === "queue" || delivery === "steer") {
+						Logger.log(`[SdkController] Message queued for session: ${sessionId}`)
+						return
+					}
+					if (isSuperseded("completion")) {
+						return
+					}
+					Logger.log(`[SdkController] Agent turn completed for session: ${sessionId}`)
+					this.setRunning(false)
+					await this.options.onSendComplete(sessionId)
+				})
+				.catch(async (error: unknown) => {
+					if (isAbortError(error)) {
+						Logger.debug(`[SdkController] Agent turn aborted (expected): ${sessionId}`)
+						return
+					}
+					if (isSuperseded("failure")) {
+						return
+					}
+
+					// ── Auto-retry for transient errors ─────────────────────
+					if (attempt < MAX_AUTO_RETRIES && isRetryableError(error)) {
+						const delay = Math.min(RETRY_BASE_DELAY_MS * 2 ** attempt, RETRY_MAX_DELAY_MS)
+						const jitter = delay * 0.2 * Math.random()
+						const totalDelay = Math.round(delay + jitter)
+						const errorMsg = error instanceof Error ? error.message : String(error)
+						Logger.warn(
+							`[SdkController] Turn failed (attempt ${attempt + 1}/${MAX_AUTO_RETRIES + 1}), retrying in ${totalDelay}ms: ${errorMsg}`,
+						)
+						this.options.onRetryAttempt?.(attempt + 1, MAX_AUTO_RETRIES, totalDelay, error)
+						setTimeout(() => attemptSend(attempt + 1), totalDelay)
+						return
+					}
+
+					// ── Non-retryable or exhausted retries ──────────────────
+					Logger.error("[SdkController] Agent turn failed:", error)
+					this.setRunning(false)
+					await this.options.onSendError(error, sessionId)
+				})
+		}
+
+		attemptSend(0)
 	}
 }
 
 export function isAbortError(error: unknown): boolean {
+	// NOTE: TIMEOUT is intentionally NOT treated as abort. Timeout errors
+	// from net.ts (name === "TIMEOUT") are transient and must flow through
+	// to the auto-retry path in fireAndForgetSend. Classifying them as
+	// abort would silently swallow them: no retry, no setRunning(false),
+	// leaving the UI stuck in a thinking state.
+	if (error instanceof DOMException) {
+		return error.name === "AbortError"
+	}
 	if (error instanceof Error) {
 		return error.name === "AbortError" || error.message.toLowerCase().includes("aborted")
 	}

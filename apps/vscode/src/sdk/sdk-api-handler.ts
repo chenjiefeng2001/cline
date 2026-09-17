@@ -30,18 +30,29 @@ export interface BuildApiHandlerOptions {
  * Map a provider id (+ optional model id) to a fetch timeout category.
  *
  * Local inference providers need generous timeouts; deep-thinking model ids
- * get the "thinking" bucket.
+ * get the "thinking" bucket.  When the user has set `requestTimeoutMs` via
+ * the VS Code setting, that value overrides the category default so that the
+ * same knob works for every provider (not just Ollama).
  */
 const THINKING_MODEL_PATTERNS = /deepseek.*r[1-9]|o[1-9]|thinking|reasoner/i
 
-function pickFetchCategory(providerId: string, modelId?: string): ReturnType<typeof createFetch> {
-	if (providerId === "ollama" || providerId === "lmstudio") {
-		return createFetch("local")
-	}
-	if (modelId && THINKING_MODEL_PATTERNS.test(modelId)) {
-		return createFetch("thinking")
-	}
-	return createFetch("default")
+function pickFetchCategory(
+	providerId: string,
+	modelId?: string,
+	requestTimeoutMs?: number,
+): ReturnType<typeof createFetch> {
+	const category =
+		providerId === "ollama" || providerId === "lmstudio"
+			? ("local" as const)
+			: modelId && THINKING_MODEL_PATTERNS.test(modelId)
+				? ("thinking" as const)
+				: ("default" as const)
+
+	// Respect the user-supplied timeout for all providers when set (value > 0).
+	const customTimeoutMs =
+		typeof requestTimeoutMs === "number" && requestTimeoutMs > 0 ? requestTimeoutMs : undefined
+
+	return createFetch(category, customTimeoutMs !== undefined ? { customTimeoutMs } : undefined)
 }
 
 /**
@@ -75,8 +86,11 @@ export function buildSdkProviderConfig(
 
 	const vertexProviderConfig = providerId === "vertex" ? resolveVertexProviderConfig(configuration) : undefined
 
-	// Pick timeout category based on provider type and model id
-	const providerFetch = pickFetchCategory(providerId, modelId)
+	// Pick timeout category based on provider type and model id.
+	// The user's requestTimeoutMs setting is respected for ALL providers (not
+	// just Ollama) so that the 30 s default can be overridden globally.
+	const requestTimeoutMs = configuration.requestTimeoutMs
+	const providerFetch = pickFetchCategory(providerId, modelId, requestTimeoutMs)
 
 	const base: ProviderConfig = {
 		providerId: toSdkProviderId(providerId),

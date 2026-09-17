@@ -20,6 +20,12 @@ const STATE_SIZE_HARD_LIMIT = 1024 * 1024
 const MAX_MESSAGES_IN_TRUNCATED_STATE = 100
 
 /**
+ * Aggressive truncation limit: when the state STILL exceeds the hard limit
+ * after the first truncation pass, reduce to this many messages.
+ */
+const AGGRESSIVE_MAX_MESSAGES = 20
+
+/**
  * Instance-level subscription manager for state updates.
  * Replaces the global Set with per-instance tracking to prevent
  * subscription leaks and improve cleanup reliability.
@@ -91,20 +97,20 @@ export const stateSubscriptionManager = StateSubscriptionManager.getInstance()
  * This preserves the most recent messages while discarding older ones.
  *
  * @param state The original extension state
+ * @param maxMessages Maximum messages to keep (default: MAX_MESSAGES_IN_TRUNCATED_STATE)
  * @returns Truncated state with reduced message history
  */
-function truncateStateForIpc(state: ExtensionState): ExtensionState {
+function truncateStateForIpc(state: ExtensionState, maxMessages?: number): ExtensionState {
+	const limit = maxMessages ?? MAX_MESSAGES_IN_TRUNCATED_STATE
 	// If no messages or already within limits, return as-is
-	if (!state.clineMessages || state.clineMessages.length <= MAX_MESSAGES_IN_TRUNCATED_STATE) {
+	if (!state.clineMessages || state.clineMessages.length <= limit) {
 		return state
 	}
 
-	Logger.warn(
-		`[subscribeToState] Truncating state: ${state.clineMessages.length} messages → ${MAX_MESSAGES_IN_TRUNCATED_STATE}`,
-	)
+	Logger.warn(`[subscribeToState] Truncating state: ${state.clineMessages.length} messages → ${limit}`)
 
 	// Keep the most recent messages
-	const truncatedMessages = state.clineMessages.slice(-MAX_MESSAGES_IN_TRUNCATED_STATE)
+	const truncatedMessages = state.clineMessages.slice(-limit)
 
 	return {
 		...state,
@@ -135,16 +141,33 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 		const truncatedJson = JSON.stringify(truncatedState)
 		const truncatedSize = Buffer.byteLength(truncatedJson, "utf8")
 
-		// Log if truncation helped but still large
-		if (truncatedSize > STATE_SIZE_WARNING_THRESHOLD) {
-			Logger.warn(`[subscribeToState] Truncated state still large: ${(truncatedSize / 1024).toFixed(1)}KB`)
-		}
-
-		// Hard limit warning - state may be dropped by IPC
+		// If still over the hard limit, apply aggressive truncation
 		if (truncatedSize > STATE_SIZE_HARD_LIMIT) {
-			Logger.error(
-				`[subscribeToState] CRITICAL: State size ${(truncatedSize / 1024).toFixed(1)}KB exceeds hard limit! May be dropped by IPC.`,
+			Logger.warn(
+				`[subscribeToState] Truncated state still large: ${(truncatedSize / 1024).toFixed(1)}KB, applying aggressive truncation`,
 			)
+			const aggressiveState = truncateStateForIpc(state, AGGRESSIVE_MAX_MESSAGES)
+			const aggressiveJson = JSON.stringify(aggressiveState)
+			const aggressiveSize = Buffer.byteLength(aggressiveJson, "utf8")
+
+			if (aggressiveSize > STATE_SIZE_HARD_LIMIT) {
+				// Last resort: strip message bodies entirely, keep only metadata
+				Logger.error(
+					`[subscribeToState] CRITICAL: State size ${(aggressiveSize / 1024).toFixed(1)}KB exceeds hard limit even after aggressive truncation. Sending minimal state.`,
+				)
+				const minimalState = {
+					...aggressiveState,
+					clineMessages: (aggressiveState.clineMessages ?? []).map((msg: any) => ({
+						...msg,
+						text: msg.text ? `[truncated ${msg.text.length} chars]` : undefined,
+						toolResults: undefined,
+						toolInvocations: undefined,
+					})),
+				}
+				return { stateJson: JSON.stringify(minimalState), wasTruncated: true }
+			}
+
+			return { stateJson: aggressiveJson, wasTruncated: true }
 		}
 
 		return { stateJson: truncatedJson, wasTruncated: true }

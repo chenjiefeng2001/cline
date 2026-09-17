@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { isAbortError, SdkSessionLifecycle } from "./sdk-session-lifecycle"
+import { isAbortError, isRetryableError, SdkSessionLifecycle } from "./sdk-session-lifecycle"
 
 type StartInput = Parameters<SdkSessionLifecycle["startNewSession"]>[0]
 type SendHost = Parameters<SdkSessionLifecycle["fireAndForgetSend"]>[0]
@@ -560,6 +560,31 @@ describe("SdkSessionLifecycle", () => {
 		expect(isAbortError(error)).toBe(true)
 	})
 
+	it("does NOT classify TIMEOUT as abort so it can reach the retry path", () => {
+		const domTimeout = new DOMException("Request timed out after 300000ms", "TIMEOUT")
+		expect(isAbortError(domTimeout)).toBe(false)
+		expect(isRetryableError(domTimeout)).toBe(true)
+
+		const errTimeout = new Error("Stream stalled")
+		errTimeout.name = "TIMEOUT"
+		expect(isAbortError(errTimeout)).toBe(false)
+		expect(isRetryableError(errTimeout)).toBe(true)
+	})
+
+	it("still detects DOM AbortError as abort", () => {
+		expect(isAbortError(new DOMException("aborted", "AbortError"))).toBe(true)
+		expect(isRetryableError(new DOMException("aborted", "AbortError"))).toBe(false)
+	})
+
+	it("classifies transient failures as retryable and permanent ones as not", () => {
+		expect(isRetryableError(new Error("socket hang up"))).toBe(true)
+		expect(isRetryableError(new Error("503 Service Unavailable"))).toBe(true)
+		expect(isRetryableError(new Error("429 rate limit exceeded"))).toBe(true)
+		expect(isRetryableError(new Error("model overloaded, try again"))).toBe(true)
+		expect(isRetryableError(new Error("invalid api key"))).toBe(false)
+		expect(isRetryableError(new Error("boom"))).toBe(false)
+	})
+
 	it("stamps a pending mode-switch notice onto the outbound prompt", async () => {
 		const send = vi.fn().mockResolvedValue(undefined)
 		const sdkHost = makeSdkHost({ send })
@@ -610,6 +635,58 @@ describe("SdkSessionLifecycle", () => {
 		await vi.waitFor(() => expect(send).toHaveBeenCalled())
 
 		expect(send).toHaveBeenCalledWith(expect.objectContaining({ prompt: "hello" }))
+	})
+
+	it("auto-retries a TIMEOUT failure instead of surfacing an error", async () => {
+		vi.useFakeTimers()
+		try {
+			const onRetryAttempt = vi.fn()
+			const onSendComplete = vi.fn()
+			const onSendError = vi.fn()
+			const send = vi
+				.fn()
+				.mockRejectedValueOnce(new DOMException("Request timed out", "TIMEOUT"))
+				.mockResolvedValueOnce(undefined)
+			const sdkHost = makeSdkHost({ send })
+			mockCreateSessionHost.mockResolvedValueOnce(sdkHost)
+			const lifecycle = makeLifecycle({ onRetryAttempt, onSendComplete, onSendError })
+			// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+			await lifecycle.startNewSession({} as any)
+
+			// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+			lifecycle.fireAndForgetSend(sdkHost as any, "session-123", "hello")
+			await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1))
+
+			// First attempt fails with TIMEOUT → retry scheduled (base 2s + jitter).
+			await vi.waitFor(() => expect(onRetryAttempt).toHaveBeenCalled())
+			expect(onSendError).not.toHaveBeenCalled()
+			expect(onRetryAttempt).toHaveBeenCalledWith(1, 3, expect.any(Number), expect.anything())
+
+			// Firing the backoff timer runs the second attempt, which succeeds.
+			await vi.advanceTimersByTimeAsync(30_000)
+			await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2))
+			await vi.waitFor(() => expect(onSendComplete).toHaveBeenCalledWith("session-123"))
+			expect(onSendError).not.toHaveBeenCalled()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("surfaces non-retryable errors without retrying", async () => {
+		const onRetryAttempt = vi.fn()
+		const onSendError = vi.fn()
+		const error = new Error("invalid api key")
+		const sdkHost = makeSdkHost({ send: vi.fn().mockRejectedValue(error) })
+		mockCreateSessionHost.mockResolvedValueOnce(sdkHost)
+		const lifecycle = makeLifecycle({ onRetryAttempt, onSendError })
+		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+		await lifecycle.startNewSession({} as any)
+
+		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+		lifecycle.fireAndForgetSend(sdkHost as any, "session-123", "hello")
+		await vi.waitFor(() => expect(onSendError).toHaveBeenCalledWith(error, "session-123"))
+
+		expect(onRetryAttempt).not.toHaveBeenCalled()
 	})
 })
 

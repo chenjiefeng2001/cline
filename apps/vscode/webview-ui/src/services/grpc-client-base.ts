@@ -14,6 +14,13 @@ export interface Callbacks<TResponse> {
 	onComplete: () => void
 }
 
+/**
+ * Default timeout for unary gRPC requests (ms).  If the extension host does
+ * not respond within this window the promise rejects instead of hanging
+ * forever, which would leave the webview stuck in a loading state.
+ */
+const UNARY_REQUEST_TIMEOUT_MS = 30_000
+
 export abstract class ProtoBusClient {
 	static serviceName: string
 
@@ -25,13 +32,18 @@ export abstract class ProtoBusClient {
 	): Promise<TResponse> {
 		return new Promise((resolve, reject) => {
 			const requestId = uuidv4()
+			let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+
+			const cleanup = () => {
+				clearTimeout(timeoutHandle)
+				window.removeEventListener("message", handleResponse)
+			}
 
 			// Set up one-time listener for this specific request
 			const handleResponse = (event: MessageEvent) => {
 				const message = event.data
 				if (message.type === "grpc_response" && message.grpc_response?.request_id === requestId) {
-					// Remove listener once we get our response
-					window.removeEventListener("message", handleResponse)
+					cleanup()
 					if (message.grpc_response.message) {
 						const response = PLATFORM_CONFIG.decodeMessage(message.grpc_response.message, decodeResponse)
 						resolve(response)
@@ -44,6 +56,17 @@ export abstract class ProtoBusClient {
 			}
 
 			window.addEventListener("message", handleResponse)
+
+			// Guard against a hanging promise when the extension host is unresponsive
+			timeoutHandle = setTimeout(() => {
+				cleanup()
+				reject(
+					new Error(
+						`gRPC unary request timed out after ${UNARY_REQUEST_TIMEOUT_MS}ms: ${this.serviceName}/${methodName}`,
+					),
+				)
+			}, UNARY_REQUEST_TIMEOUT_MS)
+
 			PLATFORM_CONFIG.postMessage({
 				type: "grpc_request",
 				grpc_request: {

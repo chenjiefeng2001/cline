@@ -39,7 +39,7 @@ import { HostProvider } from "@/hosts/host-provider"
 import { ExtensionRegistryInfo } from "@/registry"
 import { getFeatureFlagsService } from "@/services/feature-flags"
 import { getDistinctId } from "@/services/logging/distinctId"
-import { fetch } from "@/shared/net"
+import { createFetch, fetch } from "@/shared/net"
 import { FeatureFlag } from "@/shared/services/feature-flags/feature-flags"
 import { type BedrockProviderConfig, buildBedrockProviderConfig } from "./bedrock-config"
 import { buildAgentHooks } from "./hooks-adapter"
@@ -856,6 +856,16 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	// additionally need structured options (region/project/auth/SAP OAuth), which core
 	// reads from providerConfig in createAgentModelFromConfig.
 	const cloudProviderConfig = bedrockProviderConfig ?? vertexProviderConfig ?? sapProviderConfig ?? ollamaProviderConfig
+
+	// Apply the user's requestTimeoutMs setting to ALL providers, not just Ollama.
+	// When set (> 0), create a category-aware fetch with the custom timeout so the
+	// 300 s default can be shortened or lengthened per user preference.
+	const requestTimeoutMs = apiConfig?.requestTimeoutMs
+	const sessionFetch =
+		typeof requestTimeoutMs === "number" && requestTimeoutMs > 0
+			? createFetch("default", { customTimeoutMs: requestTimeoutMs })
+			: fetch
+
 	// Spread the cloud config first so the explicit fields below — notably the
 	// proxy/CA-aware fetch — can never be clobbered if those types gain matching keys.
 	const providerConfig = {
@@ -865,7 +875,7 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		...(apiKey ? { apiKey } : {}),
 		...(baseUrl !== undefined ? { baseUrl } : {}),
 		...(knownModels && Object.keys(knownModels).length > 0 ? { knownModels } : {}),
-		fetch,
+		fetch: sessionFetch,
 	}
 
 	const config: CoreSessionConfig = {

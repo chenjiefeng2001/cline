@@ -159,12 +159,25 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 	// This prevents the data array reference from changing during streaming,
 	// which avoids Virtuoso rebuilding its DOM on every chunk.
 	const showThinkingLoader = isWaitingForResponse
+	const connectionStatus = turnState?.connectionStatus
+	const retryAttempt = turnState?.retryAttempt
+	const retryMax = turnState?.retryMax
 	const ThinkingLoaderFooter = useCallback(() => {
+		if (connectionStatus === "reconnecting") {
+			return (
+				<div className="flex items-center justify-center py-4 text-muted-foreground text-sm gap-2">
+					<span className="animate-pulse">Reconnecting</span>
+					<span className="text-xs opacity-60">
+						({retryAttempt}/{retryMax})
+					</span>
+				</div>
+			)
+		}
 		if (!showThinkingLoader) {
 			return <div className="min-h-1" />
 		}
 		return <div className="flex items-center justify-center py-4 text-muted-foreground text-sm">Thinking...</div>
-	}, [showThinkingLoader])
+	}, [showThinkingLoader, connectionStatus, retryAttempt, retryMax])
 
 	const virtuosoComponents = useMemo(
 		() => ({

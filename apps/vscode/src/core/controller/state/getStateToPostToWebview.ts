@@ -88,13 +88,14 @@ export async function getStateToPostToWebview(controller: {
 		? rawTaskHistory.find((item: any) => item.id === controller.task?.taskId)
 		: undefined
 
-	// Get all messages, then truncate for webview performance.
-	// Only the last N messages are sent; the rest can be loaded on-demand.
+	// Get messages for the webview.  Send the most recent window so the IPC
+	// payload stays small, and set messageTruncated so the webview can load
+	// older messages on demand via loadHistoryBatch (infinite scroll).
 	const allMessages = [...(controller.task?.messageStateHandler?.getClineMessages?.() || [])]
-	const MESSAGE_TRUNCATION_LIMIT = 50
-	const isTruncated = allMessages.length > MESSAGE_TRUNCATION_LIMIT
+	const INITIAL_MESSAGE_WINDOW = 200
+	const isTruncated = allMessages.length > INITIAL_MESSAGE_WINDOW
 	const totalMessageCount = allMessages.length
-	const clineMessages = isTruncated ? allMessages.slice(-MESSAGE_TRUNCATION_LIMIT) : allMessages
+	const clineMessages = isTruncated ? allMessages.slice(-INITIAL_MESSAGE_WINDOW) : allMessages
 
 	const checkpointRestoreInput = controller.checkpointRestoreInput
 

@@ -165,12 +165,28 @@ export type TurnPhase =
 	| "error" // api_req_failed / fatal; Retry / recovery
 	| "resumable" // task cancelled / interrupted; Resume Task
 
+/**
+ * Connection status visible in the webview footer/header so the user can
+ * see at a glance whether the LLM provider is reachable.
+ */
+export type ConnectionStatus =
+	| "connected" // provider is responsive, streaming
+	| "reconnecting" // auto-retry in progress
+	| "error" // non-retryable error, needs manual action
+	| "idle" // no active request
+
 export interface TurnState {
 	phase: TurnPhase
 	/** ts of the ClineMessage this phase is "about" (e.g. the pending approval/ask). */
 	anchorTs?: number
 	/** Monotonic; the webview keeps the highest-seq TurnState and ignores older ones. */
 	seq: number
+	/** Current connection status for UI display. */
+	connectionStatus?: ConnectionStatus
+	/** Auto-retry attempt counter (resets on success/error). */
+	retryAttempt?: number
+	/** Max auto-retries allowed for the current error. */
+	retryMax?: number
 }
 
 export interface QueuedPrompt {
