@@ -530,3 +530,27 @@
 ## Phase-19 后剩余项
 
 - 可选增量：A2A/AG-UI 映射对照当期规范逐条核验（需当期规范访问，登记待办）；A2A HTTP 挂载进 hub server 正式入口（当前 mountable，host 显式挂载）。
+
+---
+
+# 第二十阶段：A2A HTTP 挂载进 hub server + VSCode 连接稳定性
+
+> 约束条件：小提交、独立可验证。SDK 侧为 **P2-1 挂载收尾**（Phase-19 剩余项第 2 条落地）；VSCode 侧为连接稳定性修复（超时/重试/截断/gRPC），与 V21 历史分页工作正交。
+
+## Phase-20 提交清单
+
+| # | Commit | 域 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P20-1 | `10787c2a7` | P2-1 挂载 | feat | **A2A HTTP 挂载进 hub server**：`startHubWebSocketServer` 在 `a2a.enabled` 时以 live `HubServerTransport` 构造 `A2AServer`（`a2a_<uuid>` 专用 client id），同端口暴露 Agent Card + JSON-RPC POST，复用 hub bearer-token 鉴权（401 前置）；请求体 1 MiB 上限（含 chunked，超限 413）；SSE 心跳 15s（`: ping`，不计 idle）+ idle 120s；`assistant.delta` 以稳定 output id 作 artifact 流（append/final-chunk），reasoning 不外露；终端/idle/断开释放订阅并结束响应；`close()` 先销毁在途 SSE 再 drain；daemon `--a2a` opt-in；非法请求体返回 invalid-request 信封；`ARCHITECTURE.md` 登记 `a2a/` 分层与挂载契约 | core a2a+server+daemon 72 pass / tsc / biome 8 文件干净 |
+| P20-2 | `1ec4ce60c` | 稳定性 | fix | **VSCode 连接稳定性**：`net.ts` 默认超时 30s→5min（thinking 10min）+ 60s 流失活检测（+ `requestTimeoutMs` 用户设置全 provider 生效）；`sdk-session-lifecycle` 瞬时错误 3 次指数退避自动重试（`onRetryAttempt`→webview reconnecting 状态）；`TurnState` 新增 connectionStatus/retry 计数；state 三级截断（100→20→去正文）+ 初始窗口 50→200；gRPC 陈旧请求清扫（unref）+ 一元调用 30s 超时 + `webview_ready` 替代 2s 兜底；本轮另修 3 处：TIMEOUT 误判 abort（重试被吞）、total 超时文档与实现不符、失活 timer 完成路径泄漏 | vscode+webview tsc / lifecycle+tracker 36 pass |
+| P20-3 | 待提交 | R6 | docs | 本记录 | — |
+
+## Phase-20 取证
+
+1. **TIMEOUT 不得归入 abort**：`isAbortError` 曾把 `name === "TIMEOUT"` 视为用户取消，导致 `fireAndForgetSend` 的 catch 在重试分支之前直接静默返回——无重试、无 `setRunning(false)`、UI 卡 thinking。修复：abort 仅判 `AbortError`/aborted（含 DOMException 分支），TIMEOUT 走 `isRetryableError`→退避重试，耗尽后才进 `onSendError`。回归测试固化 TIMEOUT 可重试 + 重试成功链路。教训：**错误分类的"静默桶"（abort/cancel）必须最小化，超时/取消语义不同桶**。
+2. **Total 超时语义 = time-to-headers**：`finally { clearTimeout(totalTimer) }` 在响应头到达即清 timer，文档却写"覆盖整个 body"。实现行为实际合理（长 LLM 流不应被固定上限掐断），错的是文档；已按实现修正文档并补 done/error 路径的失活 timer 清理。教训：**双维度超时要写明各管哪段（TTFB vs 段间失活），否则后人会"修复"掉正确行为**。
+3. **SSE 关闭时序三保险**：hub 侧 `close()` 销毁在途响应 + HTTP 挂载 `close` 幂等（清心跳/解监听/cancel 后再 end）+ JSON-RPC 分发 `onClose→finish`，三层各管一程，`closes promptly with an active SSE` 测试锁定。
+
+## Phase-20 后剩余项
+
+- 可选增量：A2A/AG-UI 映射对照当期规范逐条核验（仍需规范访问，登记待办）。
