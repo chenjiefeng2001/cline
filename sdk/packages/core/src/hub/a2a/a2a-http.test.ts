@@ -19,10 +19,13 @@ import {
 import type { A2AJsonRpcResponse } from "./a2a-jsonrpc";
 import * as jsonrpc from "./a2a-jsonrpc";
 import {
-	A2A_JSONRPC_INTERNAL_ERROR,
+	A2A_EXTENDED_AGENT_CARD_NOT_CONFIGURED,
 	A2A_JSONRPC_INVALID_PARAMS,
 	A2A_JSONRPC_METHOD_NOT_FOUND,
+	A2A_PUSH_NOTIFICATION_NOT_SUPPORTED,
+	A2A_TASK_NOT_CANCELABLE,
 	A2A_TASK_NOT_FOUND,
+	A2A_UNSUPPORTED_OPERATION,
 	createA2AJsonRpcHandler,
 	extractA2ARequestPrompt,
 	extractA2ARequestSessionId,
@@ -92,10 +95,12 @@ const makeHttpExchange = () => {
 const streamRequestBody = JSON.stringify({
 	jsonrpc: "2.0",
 	id: 31,
-	method: "message/stream",
+	method: "SendStreamingMessage",
 	params: textMessage("quiet stream"),
 });
 
+// v1.0 §9.4.2: every SSE frame is a JSON-RPC envelope; unwrap `result` so
+// stream assertions read the carried Task / status / artifact event.
 const createSseReader = (reader: ReadableStreamDefaultReader<Uint8Array>) => {
 	const decoder = new TextDecoder();
 	let buffer = "";
@@ -111,7 +116,10 @@ const createSseReader = (reader: ReadableStreamDefaultReader<Uint8Array>) => {
 					.filter((line) => line.startsWith("data:"))
 					.map((line) => line.slice(5).replace(/^ /, ""));
 				if (data.length > 0) {
-					return JSON.parse(data.join("\n")) as A2AStreamEvent;
+					const envelope = JSON.parse(data.join("\n")) as {
+						result?: A2AStreamEvent;
+					};
+					return envelope.result;
 				}
 				continue;
 			}
@@ -153,6 +161,17 @@ describe("extractA2ARequestPrompt", () => {
 		expect(extractA2ARequestPrompt(undefined)).toBeUndefined();
 	});
 
+	it("accepts v1 oneOf text parts and rejects non-text discriminators", () => {
+		expect(
+			extractA2ARequestPrompt({ message: { parts: [{ text: "v1 part" }] } }),
+		).toBe("v1 part");
+		expect(
+			extractA2ARequestPrompt({
+				message: { parts: [{ kind: "file", text: "not text" }] },
+			}),
+		).toBeUndefined();
+	});
+
 	it("extracts taskId/contextId/sessionId", () => {
 		expect(extractA2ARequestSessionId(textMessage("x", { taskId: "t1" }))).toBe(
 			"t1",
@@ -168,7 +187,7 @@ describe("extractA2ARequestPrompt", () => {
 });
 
 describe("createA2AJsonRpcHandler", () => {
-	it("dispatches message/send for a new prompt", async () => {
+	it("dispatches SendMessage for a new prompt", async () => {
 		const { client, calls, replies } = makeClient();
 		replies.set("session.create", {
 			ok: true,
@@ -179,32 +198,32 @@ describe("createA2AJsonRpcHandler", () => {
 			await handler({
 				jsonrpc: "2.0",
 				id: 1,
-				method: "message/send",
+				method: "SendMessage",
 				params: textMessage("review the diff"),
 			}),
 		);
 		expect(calls[0]?.command).toBe("session.create");
-		expect(response.result).toMatchObject({ id: "new-1" });
+		expect(response.result).toMatchObject({ task: { id: "new-1" } });
 		expect(response.error).toBeUndefined();
 	});
 
-	it("dispatches message/send with a taskId to session.send_input", async () => {
+	it("dispatches SendMessage with a taskId to session.send_input", async () => {
 		const { client, calls } = makeClient();
 		const handler = createA2AJsonRpcHandler(makeServer(client));
 		const response = asJsonRpc(
 			await handler({
 				jsonrpc: "2.0",
 				id: 2,
-				method: "message/send",
+				method: "SendMessage",
 				params: textMessage("continue", { taskId: "s1" }),
 			}),
 		);
 		expect(calls[0]?.command).toBe("session.send_input");
 		expect(calls[0]?.sessionId).toBe("s1");
-		expect(response.result).toMatchObject({ id: "s1" });
+		expect(response.result).toMatchObject({ task: { id: "s1" } });
 	});
 
-	it("dispatches tasks/get, tasks/cancel, and tasks/list", async () => {
+	it("dispatches GetTask, CancelTask, and ListTasks", async () => {
 		const { client, calls, replies } = makeClient();
 		replies.set("session.get", {
 			ok: true,
@@ -220,46 +239,168 @@ describe("createA2AJsonRpcHandler", () => {
 			await handler({
 				jsonrpc: "2.0",
 				id: 3,
-				method: "tasks/get",
+				method: "GetTask",
 				params: { id: "s1" },
 			}),
 		);
 		expect(got.result).toMatchObject({
 			id: "s1",
-			status: { state: "working" },
+			status: { state: "TASK_STATE_WORKING" },
 		});
 
 		const canceled = asJsonRpc(
 			await handler({
 				jsonrpc: "2.0",
 				id: 4,
-				method: "tasks/cancel",
+				method: "CancelTask",
 				params: { id: "s1" },
 			}),
 		);
 		expect(calls.find((call) => call.command === "run.abort")?.sessionId).toBe(
 			"s1",
 		);
-		expect(canceled.result).toEqual({ canceled: true });
+		expect(canceled.result).toMatchObject({ id: "s1" });
 
 		const listed = asJsonRpc(
 			await handler({
 				jsonrpc: "2.0",
 				id: 5,
-				method: "tasks/list",
-				params: { limit: 10 },
+				method: "ListTasks",
+				params: { pageSize: 10 },
 			}),
 		);
-		expect(Array.isArray(listed.result)).toBe(true);
+		expect(listed.result).toMatchObject({
+			tasks: [{ id: "s1" }],
+			nextPageToken: "",
+			pageSize: 10,
+			totalSize: 1,
+		});
 	});
 
-	it("returns -32001 for a tasks/get miss", async () => {
+	it("returns v1 application errors for missing/terminal tasks and unsupported surface", async () => {
+		const missingHandler = createA2AJsonRpcHandler(
+			makeServer(makeClient().client),
+		);
+		const missingCancel = asJsonRpc(
+			await missingHandler({
+				jsonrpc: "2.0",
+				id: 41,
+				method: "CancelTask",
+				params: { id: "missing" },
+			}),
+		);
+		expect(missingCancel.error?.code).toBe(A2A_TASK_NOT_FOUND);
+
+		const { client, replies } = makeClient();
+		replies.set("session.get", {
+			ok: true,
+			payload: { session: { sessionId: "done-1", status: "completed" } },
+		});
+		const handler = createA2AJsonRpcHandler(makeServer(client));
+
+		const terminalCancel = asJsonRpc(
+			await handler({
+				jsonrpc: "2.0",
+				id: 42,
+				method: "CancelTask",
+				params: { id: "done-1" },
+			}),
+		);
+		expect(terminalCancel.error?.code).toBe(A2A_TASK_NOT_CANCELABLE);
+
+		const paged = asJsonRpc(
+			await handler({
+				jsonrpc: "2.0",
+				id: 43,
+				method: "ListTasks",
+				params: { pageToken: "cursor" },
+			}),
+		);
+		expect(paged.error?.code).toBe(A2A_JSONRPC_INVALID_PARAMS);
+
+		for (const method of [
+			"CreateTaskPushNotificationConfig",
+			"GetTaskPushNotificationConfig",
+			"ListTaskPushNotificationConfigs",
+			"DeleteTaskPushNotificationConfig",
+		]) {
+			const push = asJsonRpc(
+				await handler({ jsonrpc: "2.0", id: 44, method, params: {} }),
+			);
+			expect(push.error?.code).toBe(A2A_PUSH_NOTIFICATION_NOT_SUPPORTED);
+		}
+
+		const extended = asJsonRpc(
+			await handler({
+				jsonrpc: "2.0",
+				id: 45,
+				method: "GetExtendedAgentCard",
+			}),
+		);
+		expect(extended.error?.code).toBe(A2A_EXTENDED_AGENT_CARD_NOT_CONFIGURED);
+	});
+
+	it("dispatches SubscribeToTask for a live task and rejects misses/terminals", async () => {
+		const statuses = new Map([
+			["live-1", "running"],
+			["done-1", "completed"],
+		]);
+		const sessionClient: A2AHubCommandClient = {
+			command: vi.fn(async (command, _payload, sessionId) => {
+				if (command !== "session.get") {
+					return { ok: true, payload: {} };
+				}
+				const status = sessionId ? statuses.get(sessionId) : undefined;
+				return {
+					ok: true,
+					payload: status ? { session: { sessionId, status } } : {},
+				};
+			}),
+		};
+		const events = { subscribe: () => () => {} };
+		const server = new A2AServer(
+			sessionClient,
+			{ agentCard: { name: "cline-hub", version: "1.0.0" } },
+			events,
+		);
+		const handler = createA2AJsonRpcHandler(server);
+
+		const stream = await handler({
+			jsonrpc: "2.0",
+			id: 46,
+			method: "SubscribeToTask",
+			params: { id: "live-1" },
+		});
+		expect((stream as { stream?: boolean }).stream).toBe(true);
+
+		const missing = asJsonRpc(
+			await handler({
+				jsonrpc: "2.0",
+				id: 47,
+				method: "SubscribeToTask",
+				params: { id: "missing" },
+			}),
+		);
+		expect(missing.error?.code).toBe(A2A_TASK_NOT_FOUND);
+
+		const terminal = asJsonRpc(
+			await handler({
+				jsonrpc: "2.0",
+				id: 48,
+				method: "SubscribeToTask",
+				params: { id: "done-1" },
+			}),
+		);
+		expect(terminal.error?.code).toBe(A2A_UNSUPPORTED_OPERATION);
+	});
+
+	it("returns -32001 for a GetTask miss", async () => {
 		const handler = createA2AJsonRpcHandler(makeServer(makeClient().client));
 		const response = asJsonRpc(
 			await handler({
 				jsonrpc: "2.0",
 				id: 6,
-				method: "tasks/get",
+				method: "GetTask",
 				params: { id: "missing" },
 			}),
 		);
@@ -280,7 +421,7 @@ describe("createA2AJsonRpcHandler", () => {
 			await handler({
 				jsonrpc: "2.0",
 				id: 8,
-				method: "message/send",
+				method: "SendMessage",
 				params: { message: { parts: [] } },
 			}),
 		);
@@ -289,7 +430,7 @@ describe("createA2AJsonRpcHandler", () => {
 			await handler({
 				jsonrpc: "2.0",
 				id: 9,
-				method: "tasks/get",
+				method: "GetTask",
 			}),
 		);
 		expect(noId.error?.code).toBe(A2A_JSONRPC_INVALID_PARAMS);
@@ -394,7 +535,7 @@ describe("mountA2AHttpHandler — body buffering", () => {
 			JSON.stringify({
 				jsonrpc: "2.0",
 				id: 1,
-				method: "message/send",
+				method: "SendMessage",
 				params: textMessage(text),
 			}),
 		);
@@ -417,7 +558,7 @@ describe("mountA2AHttpHandler — body buffering", () => {
 	it("counts Unicode bytes rather than characters for chunked requests", async () => {
 		const { client } = makeClient();
 		const body = JSON.stringify({
-			method: "tasks/get",
+			method: "GetTask",
 			params: { id: "漢字" },
 		});
 		const { req, res } = makeHttpExchange();
@@ -584,7 +725,7 @@ describe("mountA2AHttpHandler", () => {
 		expect(card.name).toBe("cline-hub");
 		expect(card.capabilities).toMatchObject({
 			streaming: true,
-			pushNotifications: true,
+			pushNotifications: false,
 		});
 	});
 
@@ -595,7 +736,7 @@ describe("mountA2AHttpHandler", () => {
 			body: JSON.stringify({
 				jsonrpc: "2.0",
 				id: 11,
-				method: "tasks/get",
+				method: "GetTask",
 				params: { id: "s1" },
 			}),
 		});
@@ -604,7 +745,7 @@ describe("mountA2AHttpHandler", () => {
 			result?: { id?: string; status?: { state?: string } };
 		};
 		expect(body.result?.id).toBe("s1");
-		expect(body.result?.status?.state).toBe("completed");
+		expect(body.result?.status?.state).toBe("TASK_STATE_COMPLETED");
 	});
 
 	it("responds with a parse error for malformed bodies", async () => {
@@ -707,7 +848,7 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 			body: JSON.stringify({
 				jsonrpc: "2.0",
 				id: 21,
-				method: "message/stream",
+				method: "SendStreamingMessage",
 				params: textMessage("stream this"),
 			}),
 		});
@@ -722,10 +863,10 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 		const readFrame = createSseReader(reader);
 		expect(await readFrame()).toMatchObject({
 			id: "stream-1",
-			status: { state: "working" },
+			status: { state: "TASK_STATE_WORKING" },
 		});
 
-		// Progress → working; terminal → final status-update and stream end.
+		// Progress → working; terminal → stream end after the final update.
 		publish({
 			version: "v1",
 			event: "run.started",
@@ -735,8 +876,8 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 			payload: {},
 		});
 		expect(await readFrame()).toMatchObject({
-			kind: "status-update",
-			status: { state: "working" },
+			taskId: "stream-1",
+			status: { state: "TASK_STATE_WORKING" },
 		});
 
 		publish({
@@ -749,10 +890,8 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 		});
 		const finalFrame = (await readFrame()) as {
 			status?: { state?: string };
-			final?: boolean;
 		};
-		expect(finalFrame.status?.state).toBe("completed");
-		expect(finalFrame.final).toBe(true);
+		expect(finalFrame.status?.state).toBe("TASK_STATE_COMPLETED");
 
 		// The server closes the response after the final event.
 		expect(await reader.read()).toEqual({ done: true, value: undefined });
@@ -798,7 +937,7 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 			received.push(event);
 		}
 		const artifacts = received.filter(
-			(event) => "kind" in event && event.kind === "artifact-update",
+			(event) => "artifact" in event && "taskId" in event,
 		);
 		expect(artifacts).toMatchObject([
 			{
@@ -821,8 +960,8 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 			},
 		]);
 		expect(received.at(-1)).toMatchObject({
-			kind: "status-update",
-			final: true,
+			taskId: "stream-1",
+			status: { state: "TASK_STATE_COMPLETED" },
 		});
 		expect(unsubscribe).toHaveBeenCalledTimes(1);
 	});
@@ -850,14 +989,14 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 				body: JSON.stringify({
 					jsonrpc: "2.0",
 					id: 22,
-					method: "message/stream",
+					method: "SendStreamingMessage",
 					params: textMessage("no events bound"),
 				}),
 			});
 			const body = (await response.json()) as {
 				error?: { code?: number };
 			};
-			expect(body.error?.code).toBe(A2A_JSONRPC_INTERNAL_ERROR);
+			expect(body.error?.code).toBe(A2A_UNSUPPORTED_OPERATION);
 		} finally {
 			await new Promise<void>((resolve) => {
 				standalone.close(() => resolve());

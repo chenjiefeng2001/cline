@@ -197,20 +197,42 @@ export class A2AServer {
 		});
 	}
 
-	/** A2A `tasks/cancel`: aborts the hub run (`run.abort`). */
-	async cancelTask(sessionId: string): Promise<{ canceled: boolean }> {
+	/**
+	 * A2A `CancelTask`: aborts the hub run (`run.abort`). Returns the task
+	 * after the abort; a missing task yields `undefined` (→ TaskNotFound)
+	 * and an already-terminal task yields `{ canceled: false }` (→
+	 * TaskNotCancelable per v1.0 §3.1.5).
+	 */
+	async cancelTask(
+		sessionId: string,
+	): Promise<{ canceled: boolean; task?: A2ATask }> {
+		const before = await this.getTask(sessionId);
+		if (!before) {
+			return { canceled: false };
+		}
+		if (isTerminalA2ATaskState(before.status.state)) {
+			return { canceled: false, task: before };
+		}
 		await this.client.command("run.abort", { sessionId }, sessionId);
-		return { canceled: true };
+		return { canceled: true, task: (await this.getTask(sessionId)) ?? before };
 	}
 
-	/** A2A `tasks/list`: all hub sessions projected onto tasks. */
+	/**
+	 * A2A `ListTasks`: hub sessions projected onto tasks. `pageSize` bounds
+	 * the hub fetch; `contextId`/`status` filter the projected tasks. Hub
+	 * sessions carry no cursor pagination, so `totalSize` is the filtered
+	 * count and callers must leave `pageToken` empty (the dispatcher rejects
+	 * it with InvalidParams).
+	 */
 	async listTasks(
 		options?: {
-			limit?: number;
+			pageSize?: number;
+			contextId?: string;
+			status?: string;
 		} & MapSessionToTaskOptions,
 	): Promise<A2ATask[]> {
 		const reply = await this.client.command("session.list", {
-			limit: options?.limit ?? 200,
+			limit: options?.pageSize ?? 200,
 		});
 		const sessions = Array.isArray(
 			(reply as { payload?: { sessions?: unknown[] } }).payload?.sessions,
@@ -222,9 +244,16 @@ export class A2AServer {
 		for (const session of sessions) {
 			const projection = extractSessionProjection({ session });
 			const task = mapSessionToTask(projection, options);
-			if (task) {
-				tasks.push(task);
+			if (!task) {
+				continue;
 			}
+			if (options?.contextId && task.contextId !== options.contextId) {
+				continue;
+			}
+			if (options?.status && task.status.state !== options.status) {
+				continue;
+			}
+			tasks.push(task);
 		}
 		return tasks;
 	}
@@ -356,10 +385,7 @@ export class A2AServer {
 					if (final && sawArtifactText) {
 						emitArtifact("", true);
 					}
-					emit(
-						buildStatusUpdateEvent(sessionId, state, final, contextId),
-						final,
-					);
+					emit(buildStatusUpdateEvent(sessionId, state, contextId), final);
 				},
 				{ sessionId },
 			);

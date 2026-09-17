@@ -12,7 +12,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { type A2AJsonRpcRequest, createA2AJsonRpcHandler } from "./a2a-jsonrpc";
 import type { A2AServer } from "./a2a-server";
 
-export const A2A_AGENT_CARD_WELL_KNOWN_PATH = ".well-known/agent.json";
+export const A2A_AGENT_CARD_WELL_KNOWN_PATH = ".well-known/agent-card.json";
 
 export interface A2AHttpMountOptions {
 	server: A2AServer;

@@ -13,18 +13,22 @@
  * the server handlers, the HTTP mount, and tests share one implementation.
  */
 
-import type { A2ATask, A2ATaskState } from "./a2a-types";
+import {
+	A2A_TERMINAL_TASK_STATES,
+	type A2AArtifact,
+	type A2ATask,
+	type A2ATaskState,
+} from "./a2a-types";
 
-/** SSE content type for streaming responses (`message/stream`). */
+/** SSE content type for streaming responses (`SendStreamingMessage`). */
 export const A2A_SSE_CONTENT_TYPE = "text/event-stream";
 
 /**
- * A2A TaskStatusUpdateEvent: a streamed status transition for a task
- * (`kind: "status-update"` per the A2A spec). Terminal states carry
- * `final: true`; the stream closes after the final event.
+ * A2A TaskStatusUpdateEvent v1.0 §4.2.1. Note v1 carries neither `kind` nor
+ * `final` (Appendix A.2.1 removed the kind discriminator; the stream simply
+ * closes after a terminal state).
  */
 export interface A2ATaskStatusUpdateEvent {
-	kind: "status-update";
 	taskId: string;
 	/** Correlates tasks of one conversation; hub session id. */
 	contextId: string;
@@ -32,26 +36,23 @@ export interface A2ATaskStatusUpdateEvent {
 		state: A2ATaskState;
 		timestamp?: string;
 	};
-	final: boolean;
+	metadata?: Record<string, unknown>;
 }
 
-/** Streamed event payloads: the initial task snapshot or a status update. */
+/** Streamed event payloads: the initial task snapshot or a stream event. */
 export type A2AStreamEvent =
 	| A2ATask
 	| A2ATaskStatusUpdateEvent
 	| A2AArtifactUpdateEvent;
 
+/** A2A TaskArtifactUpdateEvent v1.0 §4.2.2 (no `kind` per Appendix A.2.1). */
 export interface A2AArtifactUpdateEvent {
-	kind: "artifact-update";
 	taskId: string;
 	contextId: string;
-	artifact: {
-		artifactId: string;
-		name?: string;
-		parts: Array<{ kind: "text"; text: string }>;
-	};
-	append: boolean;
-	lastChunk: boolean;
+	artifact: A2AArtifact;
+	append?: boolean;
+	lastChunk?: boolean;
+	metadata?: Record<string, unknown>;
 }
 
 /**
@@ -75,23 +76,23 @@ export function mapHubEventToTaskState(
 		case "tool.updated":
 		case "tool.finished":
 		case "approval.resolved":
-			return "working";
+			return "TASK_STATE_WORKING";
 		case "approval.requested":
-			return "input-required";
+			return "TASK_STATE_INPUT_REQUIRED";
 		case "run.completed":
-			return "completed";
+			return "TASK_STATE_COMPLETED";
 		case "run.failed":
-			return "failed";
+			return "TASK_STATE_FAILED";
 		case "run.aborted":
-			return "canceled";
+			return "TASK_STATE_CANCELED";
 		default:
 			return undefined;
 	}
 }
 
-/** Whether a task state ends the stream (A2A terminal states). */
+/** Whether a task state ends the stream (v1.0 §4.1.3 terminal states). */
 export function isTerminalA2ATaskState(state: A2ATaskState): boolean {
-	return state === "completed" || state === "failed" || state === "canceled";
+	return (A2A_TERMINAL_TASK_STATES as readonly string[]).includes(state);
 }
 
 /**
@@ -101,18 +102,15 @@ export function isTerminalA2ATaskState(state: A2ATaskState): boolean {
 export function buildStatusUpdateEvent(
 	taskId: string,
 	state: A2ATaskState,
-	final: boolean,
 	contextId?: string,
 ): A2ATaskStatusUpdateEvent {
 	return {
-		kind: "status-update",
 		taskId,
 		contextId: contextId ?? taskId,
 		status: {
 			state,
 			timestamp: new Date().toISOString(),
 		},
-		final,
 	};
 }
 
@@ -122,13 +120,12 @@ export function buildArtifactUpdateEvent(
 	options?: { append?: boolean; lastChunk?: boolean; contextId?: string },
 ): A2AArtifactUpdateEvent {
 	return {
-		kind: "artifact-update",
 		taskId,
 		contextId: options?.contextId ?? taskId,
 		artifact: {
 			artifactId: `${taskId}:output`,
 			name: "output",
-			parts: [{ kind: "text", text }],
+			parts: [{ text }],
 		},
 		append: options?.append ?? false,
 		lastChunk: options?.lastChunk ?? false,

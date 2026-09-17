@@ -9,6 +9,7 @@
 
 import type {
 	A2AAgentCard,
+	A2AAgentInterface,
 	A2AAgentSkill,
 	A2ATask,
 	A2ATaskState,
@@ -38,17 +39,21 @@ export function mapSessionStatusToTaskState(
 ): A2ATaskState {
 	switch (status) {
 		case "completed":
-			return "completed";
+			return "TASK_STATE_COMPLETED";
 		case "failed":
-			return "failed";
+			return "TASK_STATE_FAILED";
 		case "cancelled":
-			return "canceled";
+			return "TASK_STATE_CANCELED";
 		case "running":
 		case "pending":
-			return options.hasPendingApproval ? "input-required" : "working";
+			return options.hasPendingApproval
+				? "TASK_STATE_INPUT_REQUIRED"
+				: "TASK_STATE_WORKING";
 		// "idle" and unknown statuses: accepted but not started → submitted.
 		default:
-			return options.hasPendingApproval ? "input-required" : "submitted";
+			return options.hasPendingApproval
+				? "TASK_STATE_INPUT_REQUIRED"
+				: "TASK_STATE_SUBMITTED";
 	}
 }
 
@@ -86,9 +91,11 @@ export function mapSessionToTask(
 }
 
 /**
- * Builds the A2A Agent Card from hub-derived capabilities. The capability
- * matrix per the freeze doc: streaming=true (SSE-style event stream) and
- * pushNotifications=true (ui.notify broadcast + connector channels).
+ * Builds the A2A Agent Card (v1.0 §4.4.1) from hub-derived capabilities.
+ * The endpoint is declared in `supportedInterfaces` (v1 has no top-level
+ * `url`). `pushNotifications` stays false: the hub mount implements no push
+ * delivery or push-config storage, and advertising an unimplemented
+ * capability would be non-conformant (the P0-3 draft's `true` is amended).
  */
 export function buildAgentCard(input: {
 	name: string;
@@ -99,14 +106,17 @@ export function buildAgentCard(input: {
 	/** Reflects whether an event source is actually bound (SSE capability). */
 	streaming?: boolean;
 }): A2AAgentCard {
+	const interfaces: A2AAgentInterface[] = input.url
+		? [{ url: input.url, protocolBinding: "JSONRPC" }]
+		: [];
 	return {
 		name: input.name,
-		description: input.description,
-		url: input.url,
+		description: input.description ?? "",
+		supportedInterfaces: interfaces,
 		version: input.version,
 		capabilities: {
 			streaming: input.streaming ?? true,
-			pushNotifications: true,
+			pushNotifications: false,
 		},
 		defaultInputModes: ["text"],
 		defaultOutputModes: ["text"],

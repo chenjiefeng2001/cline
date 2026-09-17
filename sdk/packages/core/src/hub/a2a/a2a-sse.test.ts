@@ -4,7 +4,9 @@ import type { A2AHubCommandClient } from "./a2a-server";
 import { A2AServer } from "./a2a-server";
 import {
 	A2A_SSE_CONTENT_TYPE,
+	type A2AArtifactUpdateEvent,
 	type A2AStreamEvent,
+	type A2ATaskStatusUpdateEvent,
 	buildArtifactUpdateEvent,
 	buildStatusUpdateEvent,
 	formatA2ASseFrame,
@@ -26,18 +28,22 @@ describe("mapHubEventToTaskState", () => {
 			"tool.finished",
 			"approval.resolved",
 		]) {
-			expect(mapHubEventToTaskState(event)).toBe("working");
+			expect(mapHubEventToTaskState(event)).toBe("TASK_STATE_WORKING");
 		}
 	});
 
 	it("maps approval.requested to input-required", () => {
-		expect(mapHubEventToTaskState("approval.requested")).toBe("input-required");
+		expect(mapHubEventToTaskState("approval.requested")).toBe(
+			"TASK_STATE_INPUT_REQUIRED",
+		);
 	});
 
 	it("maps run terminals to A2A terminal states", () => {
-		expect(mapHubEventToTaskState("run.completed")).toBe("completed");
-		expect(mapHubEventToTaskState("run.failed")).toBe("failed");
-		expect(mapHubEventToTaskState("run.aborted")).toBe("canceled");
+		expect(mapHubEventToTaskState("run.completed")).toBe(
+			"TASK_STATE_COMPLETED",
+		);
+		expect(mapHubEventToTaskState("run.failed")).toBe("TASK_STATE_FAILED");
+		expect(mapHubEventToTaskState("run.aborted")).toBe("TASK_STATE_CANCELED");
 	});
 
 	it("returns undefined for unmapped events", () => {
@@ -47,33 +53,35 @@ describe("mapHubEventToTaskState", () => {
 });
 
 describe("isTerminalA2ATaskState", () => {
-	it("accepts completed/failed/canceled and rejects the rest", () => {
-		expect(isTerminalA2ATaskState("completed")).toBe(true);
-		expect(isTerminalA2ATaskState("failed")).toBe(true);
-		expect(isTerminalA2ATaskState("canceled")).toBe(true);
-		expect(isTerminalA2ATaskState("working")).toBe(false);
-		expect(isTerminalA2ATaskState("input-required")).toBe(false);
-		expect(isTerminalA2ATaskState("submitted")).toBe(false);
+	it("accepts completed/failed/canceled/rejected and rejects the rest", () => {
+		expect(isTerminalA2ATaskState("TASK_STATE_COMPLETED")).toBe(true);
+		expect(isTerminalA2ATaskState("TASK_STATE_FAILED")).toBe(true);
+		expect(isTerminalA2ATaskState("TASK_STATE_CANCELED")).toBe(true);
+		expect(isTerminalA2ATaskState("TASK_STATE_REJECTED")).toBe(true);
+		expect(isTerminalA2ATaskState("TASK_STATE_WORKING")).toBe(false);
+		expect(isTerminalA2ATaskState("TASK_STATE_INPUT_REQUIRED")).toBe(false);
+		expect(isTerminalA2ATaskState("TASK_STATE_SUBMITTED")).toBe(false);
+		expect(isTerminalA2ATaskState("TASK_STATE_AUTH_REQUIRED")).toBe(false);
 	});
 });
 
 describe("buildStatusUpdateEvent", () => {
-	it("builds a status-update with taskId as default contextId", () => {
-		const event = buildStatusUpdateEvent("t1", "working", false);
+	it("builds a status update with taskId as default contextId", () => {
+		const event = buildStatusUpdateEvent("t1", "TASK_STATE_WORKING");
 		expect(event).toMatchObject({
-			kind: "status-update",
 			taskId: "t1",
 			contextId: "t1",
-			status: { state: "working" },
-			final: false,
+			status: { state: "TASK_STATE_WORKING" },
 		});
 		expect(event.status.timestamp).toBeTruthy();
+		// v1.0 carries neither kind nor final (Appendix A.2.1).
+		expect(event).not.toHaveProperty("kind");
+		expect(event).not.toHaveProperty("final");
 	});
 
-	it("honors an explicit contextId and final flag", () => {
-		const event = buildStatusUpdateEvent("t1", "completed", true, "c1");
+	it("honors an explicit contextId", () => {
+		const event = buildStatusUpdateEvent("t1", "TASK_STATE_COMPLETED", "c1");
 		expect(event.contextId).toBe("c1");
-		expect(event.final).toBe(true);
 	});
 });
 
@@ -81,7 +89,7 @@ describe("artifact mapping", () => {
 	it("maps only the producer's assistant text payload", () => {
 		expect(
 			mapHubEventToStreamDelta("assistant.delta", { text: "Hello\n " }),
-		).toEqual({ statusState: "working", artifactText: "Hello\n " });
+		).toEqual({ statusState: "TASK_STATE_WORKING", artifactText: "Hello\n " });
 		for (const payload of [
 			undefined,
 			{},
@@ -90,7 +98,7 @@ describe("artifact mapping", () => {
 			{ delta: "guessed" },
 		]) {
 			expect(mapHubEventToStreamDelta("assistant.delta", payload)).toEqual({
-				statusState: "working",
+				statusState: "TASK_STATE_WORKING",
 			});
 		}
 		for (const event of [
@@ -116,13 +124,12 @@ describe("artifact mapping", () => {
 			lastChunk: true,
 		});
 		expect(first).toEqual({
-			kind: "artifact-update",
 			taskId: "t1",
 			contextId: "c1",
 			artifact: {
 				artifactId: "t1:output",
 				name: "output",
-				parts: [{ kind: "text", text: "Hello" }],
+				parts: [{ text: "Hello" }],
 			},
 			append: false,
 			lastChunk: false,
@@ -138,7 +145,7 @@ describe("formatA2ASseFrame", () => {
 		const payload: A2ATask = {
 			id: "t1",
 			contextId: "t1",
-			status: { state: "working" },
+			status: { state: "TASK_STATE_WORKING" },
 		};
 		const frame = formatA2ASseFrame(payload);
 		expect(frame).toBe(`data: ${JSON.stringify(payload)}\n\n`);
@@ -206,7 +213,7 @@ describe("A2AServer.streamMessage", () => {
 		expect(received).toHaveLength(1);
 		expect(received[0]).toMatchObject({
 			id: "new-1",
-			status: { state: "submitted" },
+			status: { state: "TASK_STATE_SUBMITTED" },
 		});
 
 		const listener = listeners[0];
@@ -215,15 +222,11 @@ describe("A2AServer.streamMessage", () => {
 		listener(hubEvent("run.completed", "new-1"));
 		expect(received).toHaveLength(3);
 		expect(received[1]).toMatchObject({
-			kind: "status-update",
 			taskId: "new-1",
-			status: { state: "working" },
-			final: false,
+			status: { state: "TASK_STATE_WORKING" },
 		});
 		expect(received[2]).toMatchObject({
-			kind: "status-update",
-			status: { state: "completed" },
-			final: true,
+			status: { state: "TASK_STATE_COMPLETED" },
 		});
 
 		expect(listeners).toHaveLength(0);
@@ -241,17 +244,13 @@ describe("A2AServer.streamMessage", () => {
 		listeners[0]?.(hubEvent("approval.requested", "new-1"));
 		expect(received).toHaveLength(2);
 		expect(received[1]).toMatchObject({
-			kind: "status-update",
-			status: { state: "input-required" },
-			final: false,
+			status: { state: "TASK_STATE_INPUT_REQUIRED" },
 		});
 		expect(listeners).toHaveLength(1);
 		listeners[0]?.(hubEvent("approval.resolved", "new-1"));
 		expect(received).toHaveLength(3);
 		expect(received[2]).toMatchObject({
-			kind: "status-update",
-			status: { state: "working" },
-			final: false,
+			status: { state: "TASK_STATE_WORKING" },
 		});
 		expect(listeners).toHaveLength(1);
 		unsubscribe();
@@ -304,7 +303,10 @@ describe("A2AServer.streamMessage", () => {
 			expect(received.length).toBeGreaterThanOrEqual(2);
 			listeners[0]?.(hubEvent("assistant.delta", "new-1"));
 			expect(
-				received.filter((event) => "final" in (event as object)),
+				received.filter(
+					(event) =>
+						"taskId" in (event as object) && "status" in (event as object),
+				),
 			).toHaveLength(1);
 			unsubscribe();
 		} finally {
@@ -421,14 +423,10 @@ describe("A2AServer.streamMessage", () => {
 		listeners[0]?.(reasoningEnvelope);
 		expect(received).toHaveLength(2);
 		expect(received[1]).toMatchObject({
-			kind: "status-update",
-			status: { state: "working" },
-			final: false,
+			status: { state: "TASK_STATE_WORKING" },
 		});
 		expect(
-			received.filter(
-				(event) => "kind" in event && event.kind === "artifact-update",
-			),
+			received.filter((event) => "artifact" in event && "taskId" in event),
 		).toHaveLength(0);
 		const assistantEnvelope = hubEvent("assistant.delta", "new-1");
 		assistantEnvelope.payload = {
@@ -438,19 +436,18 @@ describe("A2AServer.streamMessage", () => {
 		};
 		listeners[0]?.(assistantEnvelope);
 		const artifacts = received.filter(
-			(event): event is Extract<A2AStreamEvent, { kind: "artifact-update" }> =>
-				"kind" in event && event.kind === "artifact-update",
+			(event): event is A2AArtifactUpdateEvent =>
+				"artifact" in event && "taskId" in event,
 		);
 		expect(received).toHaveLength(4);
 		expect(artifacts).toEqual([
 			{
-				kind: "artifact-update",
 				taskId: "new-1",
 				contextId: "new-1",
 				artifact: {
 					artifactId: "new-1:output",
 					name: "output",
-					parts: [{ kind: "text", text: "public" }],
+					parts: [{ text: "public" }],
 				},
 				append: false,
 				lastChunk: false,
@@ -480,37 +477,34 @@ describe("A2AServer.streamMessage", () => {
 		expect(onClose).not.toHaveBeenCalled();
 		listener(hubEvent("run.completed", "new-1"));
 		expect(received).toMatchObject([
-			{ id: "new-1", status: { state: "submitted" } },
+			{ id: "new-1", status: { state: "TASK_STATE_SUBMITTED" } },
 			{
-				kind: "artifact-update",
 				artifact: {
 					artifactId: "new-1:output",
-					parts: [{ kind: "text", text: "Hello" }],
+					parts: [{ text: "Hello" }],
 				},
 				append: false,
 				lastChunk: false,
 			},
-			{ kind: "status-update", status: { state: "working" }, final: false },
+			{ status: { state: "TASK_STATE_WORKING" } },
 			{
-				kind: "artifact-update",
 				artifact: {
 					artifactId: "new-1:output",
-					parts: [{ kind: "text", text: " world\n" }],
+					parts: [{ text: " world\n" }],
 				},
 				append: true,
 				lastChunk: false,
 			},
-			{ kind: "status-update", status: { state: "working" }, final: false },
+			{ status: { state: "TASK_STATE_WORKING" } },
 			{
-				kind: "artifact-update",
 				artifact: {
 					artifactId: "new-1:output",
-					parts: [{ kind: "text", text: "" }],
+					parts: [{ text: "" }],
 				},
 				append: true,
 				lastChunk: true,
 			},
-			{ kind: "status-update", status: { state: "completed" }, final: true },
+			{ status: { state: "TASK_STATE_COMPLETED" } },
 		]);
 		expect(listeners).toHaveLength(0);
 		listener(hubEvent("run.completed", "new-1"));
@@ -525,15 +519,15 @@ describe("A2AServer.streamMessage", () => {
 		const snapshot: A2ATask = {
 			id: "task-9",
 			contextId: "conversation-77",
-			status: { state: "submitted" },
+			status: { state: "TASK_STATE_SUBMITTED" },
 		};
 		const unsubscribe = server.streamTask("task-9", snapshot, (event) =>
 			received.push(event),
 		);
 		listeners[0]?.(hubEvent("run.started", "task-9"));
 		const update = received.find(
-			(event): event is Extract<A2AStreamEvent, { kind: "status-update" }> =>
-				"kind" in event && event.kind === "status-update",
+			(event): event is A2ATaskStatusUpdateEvent =>
+				"taskId" in event && "status" in event,
 		);
 		expect(update?.contextId).toBe("conversation-77");
 		unsubscribe();
@@ -557,9 +551,7 @@ describe("A2AServer.streamMessage", () => {
 		);
 		expect(received).toHaveLength(2);
 		expect(received[1]).toMatchObject({
-			kind: "status-update",
-			status: { state: "completed" },
-			final: true,
+			status: { state: "TASK_STATE_COMPLETED" },
 		});
 		expect(cleanup).toHaveBeenCalledTimes(1);
 		expect(onClose).toHaveBeenCalledTimes(1);
@@ -581,9 +573,7 @@ describe("A2AServer.streamMessage", () => {
 		listeners[0]?.(hubEvent("run.completed", "new-1"));
 		expect(received).toHaveLength(2);
 		expect(received[1]).toMatchObject({
-			kind: "status-update",
-			status: { state: "completed" },
-			final: true,
+			status: { state: "TASK_STATE_COMPLETED" },
 		});
 	});
 

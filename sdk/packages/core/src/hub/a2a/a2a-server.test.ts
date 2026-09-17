@@ -8,26 +8,30 @@ import { type A2AHubCommandClient, A2AServer } from "./a2a-server";
 
 describe("mapSessionStatusToTaskState", () => {
 	it("maps hub session statuses onto the A2A state machine", () => {
-		expect(mapSessionStatusToTaskState("idle")).toBe("submitted");
-		expect(mapSessionStatusToTaskState("running")).toBe("working");
-		expect(mapSessionStatusToTaskState("pending")).toBe("working");
-		expect(mapSessionStatusToTaskState("completed")).toBe("completed");
-		expect(mapSessionStatusToTaskState("failed")).toBe("failed");
-		expect(mapSessionStatusToTaskState("cancelled")).toBe("canceled");
-		expect(mapSessionStatusToTaskState("unknown")).toBe("submitted");
+		expect(mapSessionStatusToTaskState("idle")).toBe("TASK_STATE_SUBMITTED");
+		expect(mapSessionStatusToTaskState("running")).toBe("TASK_STATE_WORKING");
+		expect(mapSessionStatusToTaskState("pending")).toBe("TASK_STATE_WORKING");
+		expect(mapSessionStatusToTaskState("completed")).toBe(
+			"TASK_STATE_COMPLETED",
+		);
+		expect(mapSessionStatusToTaskState("failed")).toBe("TASK_STATE_FAILED");
+		expect(mapSessionStatusToTaskState("cancelled")).toBe(
+			"TASK_STATE_CANCELED",
+		);
+		expect(mapSessionStatusToTaskState("unknown")).toBe("TASK_STATE_SUBMITTED");
 	});
 
 	it("maps pending approval to input-required (HITL fit)", () => {
 		expect(
 			mapSessionStatusToTaskState("running", { hasPendingApproval: true }),
-		).toBe("input-required");
+		).toBe("TASK_STATE_INPUT_REQUIRED");
 		expect(
 			mapSessionStatusToTaskState("idle", { hasPendingApproval: true }),
-		).toBe("input-required");
+		).toBe("TASK_STATE_INPUT_REQUIRED");
 		// Terminal states win over pending approval.
 		expect(
 			mapSessionStatusToTaskState("completed", { hasPendingApproval: true }),
-		).toBe("completed");
+		).toBe("TASK_STATE_COMPLETED");
 	});
 });
 
@@ -44,7 +48,7 @@ describe("mapSessionToTask", () => {
 		);
 		expect(task?.id).toBe("s1");
 		expect(task?.contextId).toBe("c1");
-		expect(task?.status.state).toBe("working");
+		expect(task?.status.state).toBe("TASK_STATE_WORKING");
 		expect(task?.metadata?.sessionId).toBe("s1");
 		expect(task?.metadata?.source).toBe("cli");
 	});
@@ -58,17 +62,30 @@ describe("mapSessionToTask", () => {
 });
 
 describe("buildAgentCard", () => {
-	it("declares hub-derived capabilities (streaming + push)", () => {
+	it("declares hub-derived capabilities and v1 discovery shape", () => {
 		const card = buildAgentCard({
 			name: "cline-hub",
 			description: "Cline hub agent",
 			url: "https://hub.example/a2a",
 			version: "1.0.0",
-			skills: [{ id: "sessions", name: "Session management" }],
+			skills: [
+				{
+					id: "sessions",
+					name: "Session management",
+					description: "Manage sessions",
+					tags: ["sessions"],
+				},
+			],
 		});
 		expect(card.name).toBe("cline-hub");
+		expect(card.description).toBe("Cline hub agent");
+		expect(card.supportedInterfaces).toEqual([
+			{ url: "https://hub.example/a2a", protocolBinding: "JSONRPC" },
+		]);
+		expect(card).not.toHaveProperty("url");
 		expect(card.capabilities.streaming).toBe(true);
-		expect(card.capabilities.pushNotifications).toBe(true);
+		// No push delivery exists, so the card must not claim it (v1.0 §4.4.3).
+		expect(card.capabilities.pushNotifications).toBe(false);
 		expect(card.defaultInputModes).toEqual(["text"]);
 		expect(card.skills).toHaveLength(1);
 	});
@@ -80,7 +97,7 @@ describe("buildAgentCard", () => {
 			streaming: false,
 		});
 		expect(card.capabilities.streaming).toBe(false);
-		expect(card.capabilities.pushNotifications).toBe(true);
+		expect(card.capabilities.pushNotifications).toBe(false);
 	});
 });
 
@@ -141,7 +158,7 @@ describe("A2AServer", () => {
 			metadata: { source: "a2a", prompt: "review the diff" },
 		});
 		expect(task?.id).toBe("new-1");
-		expect(task?.status.state).toBe("submitted");
+		expect(task?.status.state).toBe("TASK_STATE_SUBMITTED");
 		expect(task?.metadata?.source).toBe("a2a");
 	});
 
@@ -156,7 +173,7 @@ describe("A2AServer", () => {
 		expect(calls[0]?.payload).toMatchObject({ prompt: "continue" });
 		expect(calls[0]?.sessionId).toBe("s1");
 		expect(task?.id).toBe("s1");
-		expect(task?.status.state).toBe("working");
+		expect(task?.status.state).toBe("TASK_STATE_WORKING");
 	});
 
 	it("maps tasks/get to session.get with pending-approval detection", async () => {
@@ -172,7 +189,7 @@ describe("A2AServer", () => {
 		const task = await server.getTask("s2");
 		expect(calls[0]?.command).toBe("session.get");
 		expect(calls[0]?.sessionId).toBe("s2");
-		expect(task?.status.state).toBe("input-required");
+		expect(task?.status.state).toBe("TASK_STATE_INPUT_REQUIRED");
 		expect(task?.metadata?.pendingApproval).toBe(true);
 	});
 
@@ -183,13 +200,43 @@ describe("A2AServer", () => {
 		expect(task).toBeUndefined();
 	});
 
-	it("maps tasks/cancel to run.abort", async () => {
-		const { client, calls } = makeClient();
+	it("maps CancelTask to run.abort and returns the task", async () => {
+		const { client, calls, replies } = makeClient();
+		replies.set("session.get", {
+			ok: true,
+			payload: { session: { sessionId: "s3", status: "running" } },
+		});
 		const server = makeServer(client);
 		const outcome = await server.cancelTask("s3");
-		expect(outcome).toEqual({ canceled: true });
-		expect(calls[0]?.command).toBe("run.abort");
-		expect(calls[0]?.sessionId).toBe("s3");
+		expect(outcome.canceled).toBe(true);
+		expect(outcome.task?.id).toBe("s3");
+		expect(calls.map((call) => call.command)).toEqual([
+			"session.get",
+			"run.abort",
+			"session.get",
+		]);
+		expect(calls[1]?.sessionId).toBe("s3");
+	});
+
+	it("reports a missing task as not canceled (→ TaskNotFound)", async () => {
+		const { client, calls } = makeClient();
+		const server = makeServer(client);
+		const outcome = await server.cancelTask("missing");
+		expect(outcome).toEqual({ canceled: false });
+		expect(calls.map((call) => call.command)).toEqual(["session.get"]);
+	});
+
+	it("refuses to cancel an already-terminal task (→ TaskNotCancelable)", async () => {
+		const { client, calls, replies } = makeClient();
+		replies.set("session.get", {
+			ok: true,
+			payload: { session: { sessionId: "s3", status: "completed" } },
+		});
+		const server = makeServer(client);
+		const outcome = await server.cancelTask("s3");
+		expect(outcome.canceled).toBe(false);
+		expect(outcome.task?.status.state).toBe("TASK_STATE_COMPLETED");
+		expect(calls.map((call) => call.command)).toEqual(["session.get"]);
 	});
 
 	it("maps tasks/list to session.list projections", async () => {
@@ -205,13 +252,41 @@ describe("A2AServer", () => {
 			},
 		});
 		const server = makeServer(client);
-		const tasks = await server.listTasks({ limit: 10 });
+		const tasks = await server.listTasks({ pageSize: 10 });
 		expect(calls[0]?.command).toBe("session.list");
 		expect(calls[0]?.payload).toMatchObject({ limit: 10 });
 		expect(tasks.map((task) => task.status.state)).toEqual([
-			"working",
-			"completed",
-			"failed",
+			"TASK_STATE_WORKING",
+			"TASK_STATE_COMPLETED",
+			"TASK_STATE_FAILED",
 		]);
+	});
+
+	it("filters ListTasks by contextId and status", async () => {
+		const { client, replies } = makeClient();
+		replies.set("session.list", {
+			ok: true,
+			payload: {
+				sessions: [
+					{
+						sessionId: "s1",
+						status: "running",
+						metadata: { conversationId: "c1" },
+					},
+					{
+						sessionId: "s2",
+						status: "running",
+						metadata: { conversationId: "c2" },
+					},
+				],
+			},
+		});
+		const server = makeServer(client);
+		const byContext = await server.listTasks({ contextId: "c2" });
+		expect(byContext.map((task) => task.id)).toEqual(["s2"]);
+		const byStatus = await server.listTasks({
+			status: "TASK_STATE_COMPLETED",
+		});
+		expect(byStatus).toEqual([]);
 	});
 });

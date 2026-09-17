@@ -369,7 +369,7 @@ describe("hub server A2A opt-in mount", () => {
 	});
 
 	function a2aCardUrl(server: HubWebSocketServer): string {
-		return `http://${server.host}:${server.port}/a2a/.well-known/agent.json`;
+		return `http://${server.host}:${server.port}/a2a/.well-known/agent-card.json`;
 	}
 
 	it("keeps A2A endpoints disabled by default", async () => {
@@ -408,7 +408,7 @@ describe("hub server A2A opt-in mount", () => {
 			body: JSON.stringify({
 				jsonrpc: "2.0",
 				id: 1,
-				method: "tasks/list",
+				method: "ListTasks",
 			}),
 		});
 		expect(rpc.status).toBe(401);
@@ -443,12 +443,15 @@ describe("hub server A2A opt-in mount", () => {
 			body: JSON.stringify({
 				jsonrpc: "2.0",
 				id: 1,
-				method: "tasks/list",
+				method: "ListTasks",
 			}),
 		});
 		expect(rpc.status).toBe(200);
-		const rpcBody = (await rpc.json()) as { result?: unknown[] };
-		expect(Array.isArray(rpcBody.result)).toBe(true);
+		const rpcBody = (await rpc.json()) as {
+			result?: { tasks?: unknown[]; nextPageToken?: string };
+		};
+		expect(Array.isArray(rpcBody.result?.tasks)).toBe(true);
+		expect(rpcBody.result?.nextPageToken).toBe("");
 	});
 
 	it("closes promptly with an active A2A SSE response", async () => {
@@ -468,7 +471,7 @@ describe("hub server A2A opt-in mount", () => {
 			.mockResolvedValue({
 				id: "shutdown-stream",
 				contextId: "shutdown-stream",
-				status: { state: "working" },
+				status: { state: "TASK_STATE_WORKING" },
 			});
 		try {
 			const response = await fetch(`http://${server.host}:${server.port}/a2a`, {
@@ -477,7 +480,7 @@ describe("hub server A2A opt-in mount", () => {
 				body: JSON.stringify({
 					jsonrpc: "2.0",
 					id: 1,
-					method: "message/stream",
+					method: "SendStreamingMessage",
 					params: { message: { parts: [{ kind: "text", text: "wait" }] } },
 				}),
 				signal: AbortSignal.timeout(3000),

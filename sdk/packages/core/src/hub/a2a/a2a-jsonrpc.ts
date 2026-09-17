@@ -1,15 +1,23 @@
 /**
- * A2A JSON-RPC 2.0 dispatcher over the A2A server [P2-1 wiring, roadmap].
+ * A2A JSON-RPC 2.0 dispatcher over the A2A server (v1.0 §9 binding).
  *
- * The A2A protocol surface is JSON-RPC over HTTP: `message/send`,
- * `tasks/get`, `tasks/cancel`, `tasks/list`. This module owns the dispatch
- * (pure, testable against stub servers); the node:http mount lives in
- * `a2a-http.ts`. Per the A2A spec: task-not-found is a typed application
- * error (-32001), unknown methods are -32601, malformed params -32602.
+ * Canonical v1.0 method names are PascalCase (`SendMessage`,
+ * `SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`,
+ * `SubscribeToTask`); push-notification and extended-card methods answer
+ * with the v1 application errors because the hub mount implements neither.
+ * Task-not-found is -32001, not-cancelable -32002, unsupported operation
+ * -32004; unknown methods are -32601, malformed params -32602. This module
+ * owns the dispatch (pure, testable against stub servers); the node:http
+ * mount lives in `a2a-http.ts`.
  */
 
 import type { A2AServer } from "./a2a-server";
-import { A2A_SSE_CONTENT_TYPE, formatA2ASseFrame } from "./a2a-sse";
+import {
+	A2A_SSE_CONTENT_TYPE,
+	formatA2ASseFrame,
+	isTerminalA2ATaskState,
+} from "./a2a-sse";
+import type { A2ATask } from "./a2a-types";
 
 export interface A2AJsonRpcRequest {
 	jsonrpc?: "2.0";
@@ -36,8 +44,16 @@ export const A2A_JSONRPC_INVALID_REQUEST = -32600;
 export const A2A_JSONRPC_METHOD_NOT_FOUND = -32601;
 export const A2A_JSONRPC_INVALID_PARAMS = -32602;
 export const A2A_JSONRPC_INTERNAL_ERROR = -32603;
-/** A2A application error: task not found. */
+/** A2A application error: task not found (v1.0 §5.4). */
 export const A2A_TASK_NOT_FOUND = -32001;
+/** A2A application error: task not cancelable (v1.0 §5.4). */
+export const A2A_TASK_NOT_CANCELABLE = -32002;
+/** A2A application error: push notifications unsupported (v1.0 §5.4). */
+export const A2A_PUSH_NOTIFICATION_NOT_SUPPORTED = -32003;
+/** A2A application error: unsupported operation (v1.0 §5.4). */
+export const A2A_UNSUPPORTED_OPERATION = -32004;
+/** A2A application error: no extended agent card (v1.0 §5.4). */
+export const A2A_EXTENDED_AGENT_CARD_NOT_CONFIGURED = -32007;
 
 /**
  * Result marker for `message/stream`: the dispatch recognised a streaming
@@ -55,7 +71,12 @@ export interface A2AJsonRpcStreamResult {
 	): () => void;
 }
 
-/** Extracts the text of a request message (A2A text parts collapsed). */
+/**
+ * Extracts the text of a request message (A2A parts collapsed). Accepts v1.0
+ * oneOf parts (`{ text }`) as well as the pre-v1 `kind`/`type` discriminated
+ * text parts, so older clients keep working against the v1 wire values we
+ * emit.
+ */
 export function extractA2ARequestPrompt(
 	params: Record<string, unknown> | undefined,
 ): string | undefined {
@@ -66,14 +87,20 @@ export function extractA2ARequestPrompt(
 	const parts = Array.isArray(message?.parts) ? message.parts : [];
 	const texts: string[] = [];
 	for (const part of parts) {
+		if (!part || typeof part !== "object") {
+			continue;
+		}
+		const text = (part as { text?: unknown }).text;
+		if (typeof text !== "string") {
+			continue;
+		}
+		const kind = (part as { kind?: unknown }).kind;
+		const type = (part as { type?: unknown }).type;
 		if (
-			part &&
-			typeof part === "object" &&
-			((part as { kind?: unknown }).kind === "text" ||
-				(part as { type?: unknown }).type === "text") &&
-			typeof (part as { text?: unknown }).text === "string"
+			(kind === undefined || kind === "text") &&
+			(type === undefined || type === "text")
 		) {
-			texts.push((part as { text: string }).text);
+			texts.push(text);
 		}
 	}
 	const prompt = texts.join("\n").trim();
@@ -135,94 +162,110 @@ export function createA2AJsonRpcHandler(
 			});
 		}
 		const params = request.params ?? {};
+		const stringParam = (key: string): string | undefined => {
+			const value = (params as Record<string, unknown>)[key];
+			return typeof value === "string" && value.trim() ? value : undefined;
+		};
+		// v1.0 §9.4.2: every SSE frame is a full JSON-RPC envelope carrying
+		// the stream event as `result`, so generic clients can reuse their
+		// response path for streamed events.
+		const frameStreamEvent = (event: unknown): string =>
+			formatA2ASseFrame({
+				jsonrpc: "2.0",
+				id: request.id ?? null,
+				result: event,
+			});
 		try {
 			switch (request.method) {
-				case "message/stream": {
-					const prompt = extractA2ARequestPrompt(params);
-					if (!prompt) {
-						return respond({
-							id: request.id ?? null,
-							error: {
-								code: A2A_JSONRPC_INVALID_PARAMS,
-								message: "message/stream requires message.parts text",
-							},
-						});
-					}
+				case "SendStreamingMessage":
+				case "SubscribeToTask": {
+					const isSubscribe = request.method === "SubscribeToTask";
 					if (!server.supportsStreaming()) {
 						return respond({
 							id: request.id ?? null,
 							error: {
-								code: A2A_JSONRPC_INTERNAL_ERROR,
-								message: "message/stream unavailable: no event source bound",
+								code: A2A_UNSUPPORTED_OPERATION,
+								message: "streaming unavailable: no event source bound",
 							},
 						});
 					}
-					const streamId = request.id ?? null;
-					void streamId;
-					return {
-						stream: true,
-						contentType: A2A_SSE_CONTENT_TYPE,
-						subscribe(onFrame, onClose) {
-							let done = false;
-							const finish = (error?: Error): void => {
-								if (done) {
-									return;
-								}
-								done = true;
-								cancel?.();
-								onClose?.(error);
-							};
-							let cancel: (() => void) | undefined;
-							void server
-								.streamMessage(
-									{
-										prompt,
-										sessionId: extractA2ARequestSessionId(params),
-										source: "a2a",
-									},
-									(event) => {
-										if (done) {
-											return;
-										}
-										try {
-											onFrame(formatA2ASseFrame(event));
-										} catch (error) {
-											finish(
-												error instanceof Error
-													? error
-													: new Error(String(error)),
-											);
-										}
-									},
-									{
-										idleTimeoutMs: options.idleTimeoutMs,
-										onClose: () => finish(),
-									},
-								)
-								.then((unsubscribe) => {
-									if (done) {
-										unsubscribe();
-										return;
-									}
-									cancel = unsubscribe;
-								})
-								.catch((error: unknown) => {
-									finish(
-										error instanceof Error ? error : new Error(String(error)),
-									);
-								});
-							return () => finish();
-						},
-					};
-				}
-				case "message/send": {
+					if (isSubscribe) {
+						const taskId = stringParam("id");
+						if (!taskId) {
+							return respond({
+								id: request.id ?? null,
+								error: {
+									code: A2A_JSONRPC_INVALID_PARAMS,
+									message: "SubscribeToTask requires params.id",
+								},
+							});
+						}
+						const existing = await server.getTask(taskId);
+						if (!existing) {
+							return respond({
+								id: request.id ?? null,
+								error: {
+									code: A2A_TASK_NOT_FOUND,
+									message: `task not found: ${taskId}`,
+								},
+							});
+						}
+						if (isTerminalA2ATaskState(existing.status.state)) {
+							return respond({
+								id: request.id ?? null,
+								error: {
+									code: A2A_UNSUPPORTED_OPERATION,
+									message: `task is in a terminal state: ${existing.status.state}`,
+								},
+							});
+						}
+						return openTaskStream(existing.id, existing);
+					}
 					const prompt = extractA2ARequestPrompt(params);
 					if (!prompt) {
 						return respond({
 							id: request.id ?? null,
 							error: {
 								code: A2A_JSONRPC_INVALID_PARAMS,
-								message: "message/send requires message.parts text",
+								message: "SendStreamingMessage requires message.parts text",
+							},
+						});
+					}
+					let task: A2ATask | undefined;
+					try {
+						task = await server.sendMessage({
+							prompt,
+							sessionId: extractA2ARequestSessionId(params),
+							source: "a2a",
+						});
+					} catch (error) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INTERNAL_ERROR,
+								message: asError(error),
+							},
+						});
+					}
+					if (!task) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INTERNAL_ERROR,
+								message: "failed to create task",
+							},
+						});
+					}
+					return openTaskStream(task.id, task);
+				}
+				case "SendMessage": {
+					const prompt = extractA2ARequestPrompt(params);
+					if (!prompt) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INVALID_PARAMS,
+								message: "SendMessage requires message.parts text",
 							},
 						});
 					}
@@ -231,19 +274,25 @@ export function createA2AJsonRpcHandler(
 						sessionId: extractA2ARequestSessionId(params),
 						source: "a2a",
 					});
-					return respond({ id: request.id ?? null, result: task });
+					if (!task) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INTERNAL_ERROR,
+								message: "failed to create task",
+							},
+						});
+					}
+					return respond({ id: request.id ?? null, result: { task } });
 				}
-				case "tasks/get": {
-					const taskId =
-						typeof params.id === "string" && params.id.trim()
-							? params.id
-							: undefined;
+				case "GetTask": {
+					const taskId = stringParam("id");
 					if (!taskId) {
 						return respond({
 							id: request.id ?? null,
 							error: {
 								code: A2A_JSONRPC_INVALID_PARAMS,
-								message: "tasks/get requires params.id",
+								message: "GetTask requires params.id",
 							},
 						});
 					}
@@ -259,33 +308,91 @@ export function createA2AJsonRpcHandler(
 					}
 					return respond({ id: request.id ?? null, result: task });
 				}
-				case "tasks/cancel": {
-					const taskId =
-						typeof params.id === "string" && params.id.trim()
-							? params.id
-							: undefined;
+				case "CancelTask": {
+					const taskId = stringParam("id");
 					if (!taskId) {
 						return respond({
 							id: request.id ?? null,
 							error: {
 								code: A2A_JSONRPC_INVALID_PARAMS,
-								message: "tasks/cancel requires params.id",
+								message: "CancelTask requires params.id",
 							},
 						});
 					}
 					const outcome = await server.cancelTask(taskId);
-					return respond({ id: request.id ?? null, result: outcome });
+					if (!outcome.task) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_TASK_NOT_FOUND,
+								message: `task not found: ${taskId}`,
+							},
+						});
+					}
+					if (!outcome.canceled) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_TASK_NOT_CANCELABLE,
+								message: `task is not cancelable: ${outcome.task.status.state}`,
+							},
+						});
+					}
+					return respond({ id: request.id ?? null, result: outcome.task });
 				}
-				case "tasks/list": {
-					const limit =
-						typeof params.limit === "number" && Number.isFinite(params.limit)
-							? params.limit
+				case "ListTasks": {
+					// The hub bus has no cursor pagination: pageSize bounds the
+					// fetch and nextPageToken is always empty. A non-empty
+					// pageToken is rejected instead of silently ignored.
+					const pageToken = stringParam("pageToken");
+					if (pageToken) {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INVALID_PARAMS,
+								message: "ListTasks pagination (pageToken) is not supported",
+							},
+						});
+					}
+					const pageSize =
+						typeof params.pageSize === "number" &&
+						Number.isFinite(params.pageSize)
+							? params.pageSize
 							: undefined;
-					const tasks = await server.listTasks(
-						limit === undefined ? undefined : { limit },
-					);
-					return respond({ id: request.id ?? null, result: tasks });
+					const tasks = await server.listTasks({
+						pageSize,
+						contextId: stringParam("contextId"),
+						status: stringParam("status"),
+					});
+					return respond({
+						id: request.id ?? null,
+						result: {
+							tasks,
+							nextPageToken: "",
+							pageSize: pageSize ?? 200,
+							totalSize: tasks.length,
+						},
+					});
 				}
+				case "CreateTaskPushNotificationConfig":
+				case "GetTaskPushNotificationConfig":
+				case "ListTaskPushNotificationConfigs":
+				case "DeleteTaskPushNotificationConfig":
+					return respond({
+						id: request.id ?? null,
+						error: {
+							code: A2A_PUSH_NOTIFICATION_NOT_SUPPORTED,
+							message: "push notifications are not supported",
+						},
+					});
+				case "GetExtendedAgentCard":
+					return respond({
+						id: request.id ?? null,
+						error: {
+							code: A2A_EXTENDED_AGENT_CARD_NOT_CONFIGURED,
+							message: "no extended agent card is configured",
+						},
+					});
 				default:
 					return respond({
 						id: request.id ?? null,
@@ -303,6 +410,56 @@ export function createA2AJsonRpcHandler(
 					message: asError(error),
 				},
 			});
+		}
+
+		function openTaskStream(
+			sessionId: string,
+			task: A2ATask,
+		): A2AJsonRpcStreamResult {
+			return {
+				stream: true,
+				contentType: A2A_SSE_CONTENT_TYPE,
+				subscribe(onFrame, onClose) {
+					let done = false;
+					const finish = (error?: Error): void => {
+						if (done) {
+							return;
+						}
+						done = true;
+						cancel?.();
+						onClose?.(error);
+					};
+					let cancel: (() => void) | undefined;
+					try {
+						cancel = server.streamTask(
+							sessionId,
+							task,
+							(event) => {
+								if (done) {
+									return;
+								}
+								try {
+									onFrame(frameStreamEvent(event));
+								} catch (error) {
+									finish(
+										error instanceof Error ? error : new Error(String(error)),
+									);
+								}
+							},
+							{
+								idleTimeoutMs: options.idleTimeoutMs,
+								onClose: () => finish(),
+							},
+						);
+						if (done) {
+							cancel();
+						}
+					} catch (error) {
+						finish(error instanceof Error ? error : new Error(String(error)));
+					}
+					return () => finish();
+				},
+			};
 		}
 	};
 }

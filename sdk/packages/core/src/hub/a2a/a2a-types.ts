@@ -13,40 +13,74 @@
  * with mapping-table registration, renames/deletes require v2.
  */
 
-/** A2A Task lifecycle states (subset mapped from hub session/run state). */
+/**
+ * A2A Task lifecycle states, serialized per A2A v1.0 §5.5 (ProtoJSON):
+ * SCREAMING_SNAKE_CASE enum names on the wire. The hub projection never
+ * produces UNSPECIFIED/AUTH_REQUIRED (no hub signal maps to them) but the
+ * type accepts every non-unspecified state so stored/foreign tasks round-trip.
+ */
 export type A2ATaskState =
-	| "submitted"
-	| "working"
-	| "input-required"
-	| "completed"
-	| "failed"
-	| "canceled";
+	| "TASK_STATE_SUBMITTED"
+	| "TASK_STATE_WORKING"
+	| "TASK_STATE_INPUT_REQUIRED"
+	| "TASK_STATE_COMPLETED"
+	| "TASK_STATE_FAILED"
+	| "TASK_STATE_CANCELED"
+	| "TASK_STATE_REJECTED"
+	| "TASK_STATE_AUTH_REQUIRED";
+
+/** Terminal states per v1.0 §4.1.3 (streams close on these). */
+export const A2A_TERMINAL_TASK_STATES: readonly A2ATaskState[] = [
+	"TASK_STATE_COMPLETED",
+	"TASK_STATE_FAILED",
+	"TASK_STATE_CANCELED",
+	"TASK_STATE_REJECTED",
+];
 
 /**
- * A2A Agent Card: the discovery document declaring capabilities and skills.
- * Hub-derived capabilities: streaming=true (SSE-style event stream) and
- * pushNotifications=true (ui.notify broadcast + connector channels).
+ * A2A Agent Card v1.0 §4.4.1 (JSON-RPC/HTTP surface subset). The endpoint
+ * lives in `supportedInterfaces` (there is no top-level `url` in v1); the
+ * hub mount serves this card at `/.well-known/agent-card.json`.
  */
+export interface A2AAgentInterface {
+	url: string;
+	protocolBinding: "JSONRPC" | "GRPC" | "HTTP+JSON";
+}
+
 export interface A2AAgentCard {
 	name: string;
-	description?: string;
-	/** A2A endpoint url; HTTP/SSE wiring is a later slice. */
-	url?: string;
+	description: string;
+	supportedInterfaces: A2AAgentInterface[];
 	version: string;
 	capabilities: {
-		streaming: boolean;
-		pushNotifications: boolean;
+		streaming?: boolean;
+		pushNotifications?: boolean;
+		extendedAgentCard?: boolean;
 	};
-	defaultInputModes?: string[];
-	defaultOutputModes?: string[];
+	defaultInputModes: string[];
+	defaultOutputModes: string[];
 	skills: A2AAgentSkill[];
 }
 
 export interface A2AAgentSkill {
 	id: string;
 	name: string;
+	description: string;
+	tags: string[];
+}
+
+/** v1.0 §4.1.6 text part (oneOf members carry no `kind` discriminator). */
+export interface A2ATextPart {
+	text: string;
+	metadata?: Record<string, unknown>;
+}
+
+/** v1.0 §4.1.7 artifact. */
+export interface A2AArtifact {
+	artifactId: string;
+	name?: string;
 	description?: string;
-	tags?: string[];
+	parts: A2ATextPart[];
 }
 
 /** A2A Task: the hub session projected onto the A2A lifecycle. */

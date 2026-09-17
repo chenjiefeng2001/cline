@@ -4,12 +4,16 @@ export {
 	mountA2AHttpHandler,
 } from "./a2a-http";
 export {
+	A2A_EXTENDED_AGENT_CARD_NOT_CONFIGURED,
 	A2A_JSONRPC_INTERNAL_ERROR,
 	A2A_JSONRPC_INVALID_PARAMS,
 	A2A_JSONRPC_INVALID_REQUEST,
 	A2A_JSONRPC_METHOD_NOT_FOUND,
 	A2A_JSONRPC_PARSE_ERROR,
+	A2A_PUSH_NOTIFICATION_NOT_SUPPORTED,
+	A2A_TASK_NOT_CANCELABLE,
 	A2A_TASK_NOT_FOUND,
+	A2A_UNSUPPORTED_OPERATION,
 	type A2AJsonRpcError,
 	type A2AJsonRpcRequest,
 	type A2AJsonRpcResponse,
@@ -46,7 +50,11 @@ export {
 } from "./a2a-sse";
 export type {
 	A2AAgentCard,
+	A2AAgentInterface,
 	A2AAgentSkill,
+	A2AArtifact,
 	A2ATask,
 	A2ATaskState,
+	A2ATextPart,
 } from "./a2a-types";
+export { A2A_TERMINAL_TASK_STATES } from "./a2a-types";
