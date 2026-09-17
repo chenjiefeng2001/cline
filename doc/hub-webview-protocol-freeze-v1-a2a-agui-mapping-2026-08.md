@@ -119,3 +119,40 @@ AG-UI 核心事件集：生命周期（RUN_*）、文本消息（TEXT_MESSAGE_*�
 | AgentEvent（runtime 层） | `sdk/packages/shared/src/agents/types.ts` |
 | CoreSessionEvent（core 层） | `sdk/packages/core/src/types/events.ts` |
 | Webview protobus | `apps/vscode/proto/cline/*.proto`（16 服务） |
+
+---
+
+## 7. v1.0 核验补记（2026-09-17，P2 落地前置核验完成）
+
+> 依据 §5.4"新增必须同步登记映射"与"P2 实现前置核验"。对照 A2A v1.0.0 官方规范（`a2a-protocol.org` + `spec/a2a.proto` 语义）与 AG-UI 上游事件表逐条核验，结论如下。冻结表（§2–§4）不动，本节为增补登记。
+
+### 7.1 词汇表漂移检查：无漂移
+
+- `HubCommandName` 实测 **63** 个、`HubEventName` 实测 **49** 个，名单与 §2.1/§2.2 表格逐项一致；§1/§2 标题中的"70/48"为成文时约数，不作为冻结口径（冻结口径以名单为准）。
+- 自冻结提交（`1909e83e6`）起无新增命令/事件，§3/§4 映射表无需补登记。
+
+### 7.2 A2A v1.0 线路差异（已按本节实现，`sdk/packages/core/src/hub/a2a/`）
+
+冻结时草案面向 v0 系绑定；v1.0（含 Appendix A 破坏性变更）要求以下线路形态，P2-1 适配已切换（opt-in、无外部客户端，做直接切换而非兼容垫片）：
+
+| # | v1.0 要求 | 落地 |
+|---|---|---|
+| 1 | JSON-RPC 方法名为 PascalCase（§5.3/§9.4）：`SendMessage`/`SendStreamingMessage`/`GetTask`/`ListTasks`/`CancelTask`/`SubscribeToTask` | 分发器只认 v1 方法名；新增 `SubscribeToTask`（已存在任务订阅流）；push 配置四方法→`-32003`，`GetExtendedAgentCard`→`-32007` |
+| 2 | 枚举 ProtoJSON 化（§5.5）：`TASK_STATE_*` SCREAMING_SNAKE | `A2ATaskState` 全量切换；终端集含 `REJECTED`（`AUTH_REQUIRED` 为中断态，hub 无对应信号，只做类型接纳） |
+| 3 | `kind` 判别子移除（Appendix A.2.1） | 状态/artifact 更新事件与 artifact parts 去 `kind`；`TaskStatusUpdateEvent` 去 `final`（流以终端态关闭为准） |
+| 4 | SSE 每帧为完整 JSON-RPC 包络（§9.4.2）：`data: {"jsonrpc","id","result"}` | 分发器按请求 id 包络化每一帧 |
+| 5 | Agent Card v1 形状（§4.4.1）：`description` 必填、端点在 `supportedInterfaces[]`（无顶层 `url`） | `buildAgentCard` 输出 v1 形状； well-known 路径为 `/.well-known/agent-card.json`（§8.2/§14.3 注册值） |
+| 6 | 应用错误码（§5.4）：`-32002` 不可取消、`-32004` 不支持的操作 | `CancelTask` 先 `session.get`：缺失→`-32001`、已终端→`-32002`；无事件源的流→`-32004`（原 `-32603`） |
+| 7 | `ListTasks` 参数/回包（§9.4.4）：`contextId`/`status`/`pageSize`/`pageToken` → `{tasks,nextPageToken,pageSize,totalSize}` | hub 无游标分页：`pageSize`→`limit`，`contextId`/`status` 为投影后过滤，`nextPageToken` 恒空，非空 `pageToken` 以 `-32602` 明确拒绝（不静默忽略）；`GetTask` 的 `historyLength` 接纳后忽略（Task 无 history 存储，见 §7.4 待办） |
+| 8 | `capabilities.pushNotifications` 语义（§4.4.3）：声明即承诺推送投递 | **修正冻结 §3 草案**：hub 挂载无推送投递/配置存储，Card 声明 `pushNotifications: false`，push 方法一律 `-32003`；待推送投递实现后再翻转声明 |
+
+### 7.3 AG-UI 核验（名称确认 + 新增族登记）
+
+- §4 表中事件名与上游 `ag-ui-protocol/ag-ui`（`EventType`）逐项一致：`RUN_*`、`STEP_*`、`TEXT_MESSAGE_*`、`TOOL_CALL_START/ARGS/END`、`STATE_SNAPSHOT/DELTA`、`MESSAGES_SNAPSHOT`、`CUSTOM`；另有 `RAW`（外部事件透传容器）可与 `session.notice` 互映射，登记为候选。
+- 上游新增族（本冻结成文后出现）登记为后续映射候选，不在本轮实现：`REASONING_*`（hub `reasoning.delta/finished` 天然对应）、`SUBAGENT_*`（hub `spoke.*`/`team.progress` 对应）、`ACTIVITY_*`、`TOOL_CALL_RESULT/CHUNK`、`THINKING_*`（已 deprecated，上游建议用 `REASONING_*`）。
+
+### 7.4 本轮未做（登记待办）
+
+- Task `history`/`artifacts` 持久化投影（`session.messages`→`history`、`artifact.created`/`diff.created`→`artifacts`，`includeArtifacts` 语义）。
+- 推送投递实现（§7.2-8 的翻转条件）与 `GetExtendedAgentCard` 数据源。
+- `MESSAGES_SNAPSHOT`/`STATE_DELTA` 的 AG-UI 适配层（§4 原缺口，仍有效）。

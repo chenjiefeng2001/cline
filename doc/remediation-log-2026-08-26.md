@@ -554,3 +554,28 @@
 ## Phase-20 后剩余项
 
 - 可选增量：A2A/AG-UI 映射对照当期规范逐条核验（仍需规范访问，登记待办）。
+
+---
+
+# 第二十一阶段：A2A/AG-UI 当期规范核验 + v1.0 线路对齐
+
+> 约束条件：小提交、独立可验证。本阶段关闭 Phase-20 剩余项：对照 **A2A v1.0.0**（`a2a-protocol.org/latest/specification`，规范站抓取核验）与 AG-UI 上游 `EventType` 逐条核验；核验出的线路差一次性对齐（适配为 opt-in 且无外部客户端，按 SDK 重构标准做直接切换，不留 v0 垫片）。
+
+## Phase-21 提交清单
+
+| # | Commit | 域 | 类型 | 内容 | 验证 |
+|---|---|---|---|---|---|
+| P21-1 | `4d2e96294` | P2-1 v1 | feat | **A2A v1.0 线路对齐**：PascalCase 方法（`SendMessage`/`SendStreamingMessage`/`GetTask`/`ListTasks`/`CancelTask` + 新增 `SubscribeToTask`；push 四方法→`-32003`，`GetExtendedAgentCard`→`-32007`）；`TASK_STATE_*` 线路值（含 `REJECTED` 终端）；事件去 `kind`/`final`，artifact parts 去 `kind`；SSE 每帧包络化 `{jsonrpc,id,result}`；Card v1 形状（`supportedInterfaces`，无顶层 `url`，`pushNotifications: false` 修正冻结草案）；well-known→`agent-card.json`；`CancelTask` 先查后中止（缺失 `-32001`/已终端 `-32002`/成功回 Task）；`ListTasks` 回 `{tasks,nextPageToken:"",pageSize,totalSize}`（`pageSize`→`limit`，`contextId`/`status` 投影后过滤，非空 `pageToken` 明确 `-32602`）；输入 parts 保持宽容（v1 无 `kind` 与旧 `kind/type` 双接受）；barrel 补新错误码/类型导出 | core a2a+server+daemon 91 pass（+19）/ tsc / biome |
+| P21-2 | 待提交 | R6 | docs | 本记录 + 冻结文档 §7 v1.0 核验补记（含 63/49 词汇表无漂移结论、AG-UI 名称确认与新增族登记、§7.4 待办） | — |
+
+## Phase-21 取证
+
+1. **冻结文档的计数是约数，名单才是口径**：`HubCommandName` 实测 63、`HubEventName` 实测 49，名单与冻结 §2 表逐项一致——"70/48"只是成文约数。自冻结提交起零新增，映射表无需补登记。教训：**冻结口径应写"名单即规范"，计数只作阅读辅助**（已在 §7.1 落字）。
+2. **v1 包络化 SSE 是传输层与分发的分工变化**：v0 每帧是裸事件，v1 每帧是 `{jsonrpc,id,result}`——包络化放在分发器（唯一知道请求 id 的地方），`formatA2ASseFrame` 保持纯帧函数，mount 层零改动。教训：**"谁知道 id，谁做包络"**。
+3. **不支持的能力要诚实声明**：`pushNotifications: true`（冻结草案） vs 零推送实现——继续声明即不合规。改为 `false` + 方法级 `-32003`，并把翻转条件（推送投递实现）写进 §7.4。教训：**能力声明是承诺，不是愿景**。
+4. **AG-UI 侧无代码债**：§4 事件名与上游全对；新增族只登记映射候选（`reasoning.*`/`spoke.*` 已有天然对应物），不扩实现面。
+
+## Phase-21 后剩余项
+
+- §7.4 三项：Task `history`/`artifacts` 投影、`push` 投递与扩展卡数据源、AG-UI 适配层（STATE_DELTA 等）。
+- `test:extended` 本轮已重跑：webview-ui 48 文件/376 用例、desktop-app 16 文件/59 用例、multi-agent 3、rollout 36、examples/vscode 3——全部 exit 0。
