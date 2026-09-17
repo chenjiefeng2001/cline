@@ -579,3 +579,30 @@
 
 - §7.4 三项：Task `history`/`artifacts` 投影、`push` 投递与扩展卡数据源、AG-UI 适配层（STATE_DELTA 等）。
 - `test:extended` 本轮已重跑：webview-ui 48 文件/376 用例、desktop-app 16 文件/59 用例、multi-agent 3、rollout 36、examples/vscode 3——全部 exit 0。
+
+---
+
+# 第二十二阶段：上游审计与选择性合入（不整体合并）
+
+> 范围：`557d72569..upstream/main` 772 提交 vs 本地栈。方法：文件重叠面（约 100 文件，`sdk/a2a/` 为本地独有）+ vscode-sdk / webview / hub-server 三区审计。
+> 结论：**不整体合并**——上游做了大面积 legacy 删除（YOLO/`maxMistakes`/`error_retry`/`retryStatus`）与远控/hub 生命周期重构，与本地栈（SDK hub-A2A 路线图 + V21/稳定性）语义分叉；只取高价值无冲突修复，冲突区按"架构更优/更健壮者保留"手工融合。
+
+## Phase-22 提交清单
+
+| # | Commit | 内容 | 验证 |
+|---|---|---|---|
+| P22-1 | `47da5beb2` | refactor：lifecycle `onRetryAttempt`→`onAutoRetry`。上游 `01617f9a0` 已删除同名 legacy  plumbing（ApiHandlerOptions 层，从未被调用）；本地回调语义不同（turn 级自动重试），改名避复活歧义 | lifecycle+tracker 36 pass |
+| P22-2 | `c03f2aa55` | cherry-pick 上游 `d0a0c802a`（原作者保留）：History 搜索 `ignoreLocation`、showTaskWithId generation fence、persisted-status Resume 相位。与 V21 分页/currentTaskItem 正交互补 | tsc + coordinator/history/lifecycle 80 pass |
+| P22-3 | `9ce0e158a` | cherry-pick 上游 `0074b7222`（原作者保留）：编辑态跟踪 editedImages/Files，edit-regenerate 不再静默沿用原附件 | webview UserMessage 4 pass |
+| P22-4 | 待提交 | 本记录 | — |
+
+## 审计后拒绝直 pick 的（记入分期计划）
+
+1. `34f803fad`（API key 去零宽/BOM + credential-error 分类）：拖入上游新建的 `provider-credential-error` 子系统，与本地树多处文本冲突——需以子系统为单位移植（Phase B）。
+2. `9154a54a0`（订阅制计费 `===show`）：与本地 V21 计费修复（全量读取）同区不同层，`TaskHeader`/`useProviderUsageCostDisplay`（本地已删）冲突——需手工对账两套计费口径后融合（Phase A）。
+
+## 分期融合计划（未开工）
+
+- **Phase A（可移植）**：`useMessageHandlers` pending-response 系列（`0bcd60215/16d0d0457/f4230e475/2ce4facd9`）、`sdk-task-history` 导出/状态查询（`12772` 等）、`model-catalog` 能力并集（`e098a8ed0`）、compaction 真实 token 触发（`cb0092e34`，与本地 `triggerRatio` 相乘兼容：`max=rawMax/低估因子，trigger=max*ratio`，策略默认跟上游 `agentic`）、ollama 5min/effort 推理（`d3e32500a` 等，本地 `net.ts` 超时已覆盖，只取 effort 语义）。
+- **Phase B（结构融合，每项约一阶段）**：hub `close()`/生命周期重写 + A2A 重贴（`beginClose` 两阶段，`a2aResponses.destroy` 进 transportStopped 阶段）；`hub/client` 重连/鉴权/replay + 本地 span 外层重包；`agent-runtime` 上游重试/恢复 + 本地 span 重贴；`ai-sdk.ts` 重写 + `llm.request` span 重包（复用上游 opt-out 门控）；YOLO/`maxMistakes`/`error_retry` legacy 删除（含 proto 再生成 + 本地引用清理，本地 `combineErrorRetryMessages` 等一并退役）。
+- **架构判断备忘**：`pushNotifications: false` 维持（上游亦未实现推送投递）；`combineErrorRetryMessages`/legacy `configuration.onRetryAttempt` 透传列入 B 期退役清单，不在本期动。
