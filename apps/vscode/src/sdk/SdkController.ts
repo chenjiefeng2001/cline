@@ -89,6 +89,7 @@ function formatErrorMessage(error: unknown): string {
 	}
 	return String(error)
 }
+
 import { McpHub } from "@/services/mcp/McpHub"
 import { telemetryService } from "@/services/telemetry"
 import type { ClineExtensionContext } from "@/shared/cline"
@@ -496,11 +497,9 @@ export class Controller {
 				}
 				this.postStateToWebview().catch(() => {})
 			},
-			onRetryAttempt: (attempt, maxRetries, delayMs, error) => {
+			onAutoRetry: (attempt, maxRetries, delayMs, error) => {
 				const errorMsg = error instanceof Error ? error.message : String(error)
-				Logger.log(
-					`[SdkController] Auto-retry ${attempt}/${maxRetries} in ${delayMs}ms: ${errorMsg}`,
-				)
+				Logger.log(`[SdkController] Auto-retry ${attempt}/${maxRetries} in ${delayMs}ms: ${errorMsg}`)
 				this.turnStateTracker.setConnectionStatus("reconnecting", attempt, maxRetries)
 				this.messages.emitSessionEvents(
 					[

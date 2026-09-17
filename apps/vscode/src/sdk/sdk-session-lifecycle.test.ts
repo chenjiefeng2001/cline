@@ -640,7 +640,7 @@ describe("SdkSessionLifecycle", () => {
 	it("auto-retries a TIMEOUT failure instead of surfacing an error", async () => {
 		vi.useFakeTimers()
 		try {
-			const onRetryAttempt = vi.fn()
+			const onAutoRetry = vi.fn()
 			const onSendComplete = vi.fn()
 			const onSendError = vi.fn()
 			const send = vi
@@ -649,7 +649,7 @@ describe("SdkSessionLifecycle", () => {
 				.mockResolvedValueOnce(undefined)
 			const sdkHost = makeSdkHost({ send })
 			mockCreateSessionHost.mockResolvedValueOnce(sdkHost)
-			const lifecycle = makeLifecycle({ onRetryAttempt, onSendComplete, onSendError })
+			const lifecycle = makeLifecycle({ onAutoRetry, onSendComplete, onSendError })
 			// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
 			await lifecycle.startNewSession({} as any)
 
@@ -658,9 +658,9 @@ describe("SdkSessionLifecycle", () => {
 			await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1))
 
 			// First attempt fails with TIMEOUT → retry scheduled (base 2s + jitter).
-			await vi.waitFor(() => expect(onRetryAttempt).toHaveBeenCalled())
+			await vi.waitFor(() => expect(onAutoRetry).toHaveBeenCalled())
 			expect(onSendError).not.toHaveBeenCalled()
-			expect(onRetryAttempt).toHaveBeenCalledWith(1, 3, expect.any(Number), expect.anything())
+			expect(onAutoRetry).toHaveBeenCalledWith(1, 3, expect.any(Number), expect.anything())
 
 			// Firing the backoff timer runs the second attempt, which succeeds.
 			await vi.advanceTimersByTimeAsync(30_000)
@@ -673,12 +673,12 @@ describe("SdkSessionLifecycle", () => {
 	})
 
 	it("surfaces non-retryable errors without retrying", async () => {
-		const onRetryAttempt = vi.fn()
+		const onAutoRetry = vi.fn()
 		const onSendError = vi.fn()
 		const error = new Error("invalid api key")
 		const sdkHost = makeSdkHost({ send: vi.fn().mockRejectedValue(error) })
 		mockCreateSessionHost.mockResolvedValueOnce(sdkHost)
-		const lifecycle = makeLifecycle({ onRetryAttempt, onSendError })
+		const lifecycle = makeLifecycle({ onAutoRetry, onSendError })
 		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
 		await lifecycle.startNewSession({} as any)
 
@@ -686,7 +686,7 @@ describe("SdkSessionLifecycle", () => {
 		lifecycle.fireAndForgetSend(sdkHost as any, "session-123", "hello")
 		await vi.waitFor(() => expect(onSendError).toHaveBeenCalledWith(error, "session-123"))
 
-		expect(onRetryAttempt).not.toHaveBeenCalled()
+		expect(onAutoRetry).not.toHaveBeenCalled()
 	})
 })
 

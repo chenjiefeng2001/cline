@@ -73,7 +73,7 @@ export interface SdkSessionLifecycleOptions {
 	onSendComplete: (sessionId: string) => Promise<void> | void
 	onSendError: (error: unknown, sessionId: string) => Promise<void> | void
 	/** Called when a send is about to auto-retry after a transient error. */
-	onRetryAttempt?: (attempt: number, maxRetries: number, delayMs: number, error: unknown) => void
+	onAutoRetry?: (attempt: number, maxRetries: number, delayMs: number, error: unknown) => void
 	/**
 	 * Returns (and clears) a pending user-initiated plan/act switch recorded by
 	 * SdkModeCoordinator for this session, so fireAndForgetSend — the single
@@ -445,7 +445,7 @@ export class SdkSessionLifecycle {
 						Logger.warn(
 							`[SdkController] Turn failed (attempt ${attempt + 1}/${MAX_AUTO_RETRIES + 1}), retrying in ${totalDelay}ms: ${errorMsg}`,
 						)
-						this.options.onRetryAttempt?.(attempt + 1, MAX_AUTO_RETRIES, totalDelay, error)
+						this.options.onAutoRetry?.(attempt + 1, MAX_AUTO_RETRIES, totalDelay, error)
 						setTimeout(() => attemptSend(attempt + 1), totalDelay)
 						return
 					}
