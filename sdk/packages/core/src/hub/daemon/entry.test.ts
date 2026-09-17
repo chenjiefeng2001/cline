@@ -136,12 +136,31 @@ describe("hub daemon entry", () => {
 				owner: expect.objectContaining({ ownerId: "production" }),
 				telemetry: mockDaemonTelemetryService,
 				cronOptions: { workspaceRoot: cwd },
+				a2a: undefined,
 			}),
 		);
 		expect(mockCreateLocalHubScheduleRuntimeHandlers).toHaveBeenCalledOnce();
 		expect(mockCreateLocalHubScheduleRuntimeHandlers).toHaveBeenCalledWith({
 			telemetry: mockDaemonTelemetryService,
 		});
+	});
+
+	it("enables the A2A mount only when the opt-in flag is passed", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "cline-hub-entry-test-"));
+		tempDirs.push(cwd);
+		process.argv = ["node", "entry.js", "--cwd", cwd, "--a2a"];
+		vi.spyOn(process, "on").mockImplementation(() => process);
+
+		await import("./entry");
+		await vi.waitFor(() => {
+			expect(mockStartHubWebSocketServer).toHaveBeenCalled();
+		});
+
+		expect(mockStartHubWebSocketServer).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				a2a: { enabled: true },
+			}),
+		);
 	});
 
 	it("disposes telemetry and exits when server startup fails", async () => {

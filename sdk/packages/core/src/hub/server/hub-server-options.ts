@@ -9,12 +9,17 @@ import type {
 	RuntimeHost,
 } from "../../runtime/host/runtime-host";
 import type { CoreSettingsService } from "../../settings";
+import type { A2AHttpMountOptions, A2AServerOptions } from "../a2a";
 import type { HubOwnerContext } from "../discovery";
 
 export interface HubWebSocketServerOptions {
 	host?: string;
 	port?: number;
 	pathname?: string;
+	a2a?: Omit<A2AHttpMountOptions, "server"> & {
+		enabled?: boolean;
+		agentCard?: A2AServerOptions["agentCard"];
+	};
 	owner?: HubOwnerContext;
 	sessionHost?: RuntimeHost & Partial<PendingPromptsRuntimeService>;
 	settingsService?: CoreSettingsService;

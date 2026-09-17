@@ -16,11 +16,13 @@ function parseArgs(argv: string[]): {
 	host?: string;
 	port?: number;
 	pathname?: string;
+	a2a?: boolean;
 } {
 	let cwd = process.cwd();
 	let host: string | undefined;
 	let port: number | undefined;
 	let pathname: string | undefined;
+	let a2a: boolean | undefined;
 
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
@@ -46,10 +48,14 @@ function parseArgs(argv: string[]): {
 		if (arg === "--pathname" && value) {
 			pathname = value;
 			index += 1;
+			continue;
+		}
+		if (arg === "--a2a") {
+			a2a = true;
 		}
 	}
 
-	return { cwd, host, port, pathname };
+	return { cwd, host, port, pathname, a2a };
 }
 
 async function main(): Promise<void> {
@@ -79,6 +85,7 @@ async function main(): Promise<void> {
 				telemetry: daemonTelemetry.telemetry,
 			}),
 			cronOptions: { workspaceRoot: options.cwd },
+			a2a: options.a2a === true ? { enabled: true } : undefined,
 		});
 	} catch (error) {
 		// Flush before the top-level catch exits so failed daemon starts are

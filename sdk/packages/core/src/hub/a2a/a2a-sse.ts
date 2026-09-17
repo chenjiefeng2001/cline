@@ -36,7 +36,23 @@ export interface A2ATaskStatusUpdateEvent {
 }
 
 /** Streamed event payloads: the initial task snapshot or a status update. */
-export type A2AStreamEvent = A2ATask | A2ATaskStatusUpdateEvent;
+export type A2AStreamEvent =
+	| A2ATask
+	| A2ATaskStatusUpdateEvent
+	| A2AArtifactUpdateEvent;
+
+export interface A2AArtifactUpdateEvent {
+	kind: "artifact-update";
+	taskId: string;
+	contextId: string;
+	artifact: {
+		artifactId: string;
+		name?: string;
+		parts: Array<{ kind: "text"; text: string }>;
+	};
+	append: boolean;
+	lastChunk: boolean;
+}
 
 /**
  * Maps a hub event name onto the A2A Task state machine (per the frozen
@@ -98,6 +114,45 @@ export function buildStatusUpdateEvent(
 		},
 		final,
 	};
+}
+
+export function buildArtifactUpdateEvent(
+	taskId: string,
+	text: string,
+	options?: { append?: boolean; lastChunk?: boolean; contextId?: string },
+): A2AArtifactUpdateEvent {
+	return {
+		kind: "artifact-update",
+		taskId,
+		contextId: options?.contextId ?? taskId,
+		artifact: {
+			artifactId: `${taskId}:output`,
+			name: "output",
+			parts: [{ kind: "text", text }],
+		},
+		append: options?.append ?? false,
+		lastChunk: options?.lastChunk ?? false,
+	};
+}
+
+export interface A2ADeltaMapping {
+	statusState?: A2ATaskState;
+	artifactText?: string;
+}
+
+export function mapHubEventToStreamDelta(
+	event: string | undefined,
+	payload: Record<string, unknown> | undefined,
+): A2ADeltaMapping {
+	const state = mapHubEventToTaskState(event);
+	const mapping: A2ADeltaMapping = state ? { statusState: state } : {};
+	if (event === "assistant.delta") {
+		const text = payload?.text;
+		if (typeof text === "string" && text.length > 0) {
+			mapping.artifactText = text;
+		}
+	}
+	return mapping;
 }
 
 /**

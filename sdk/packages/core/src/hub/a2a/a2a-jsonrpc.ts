@@ -108,6 +108,7 @@ function asError(value: unknown): string {
  */
 export function createA2AJsonRpcHandler(
 	server: A2AServer,
+	options: { idleTimeoutMs?: number } = {},
 ): (
 	request: A2AJsonRpcRequest,
 ) => Promise<A2AJsonRpcResponse | A2AJsonRpcStreamResult> {
@@ -115,6 +116,15 @@ export function createA2AJsonRpcHandler(
 		const respond = (
 			response: Omit<A2AJsonRpcResponse, "jsonrpc">,
 		): A2AJsonRpcResponse => ({ jsonrpc: "2.0", ...response });
+		if (!request || typeof request !== "object" || Array.isArray(request)) {
+			return respond({
+				id: null,
+				error: {
+					code: A2A_JSONRPC_INVALID_REQUEST,
+					message: "invalid request",
+				},
+			});
+		}
 		if (typeof request.method !== "string" || !request.method) {
 			return respond({
 				id: request.id ?? null,
@@ -183,6 +193,10 @@ export function createA2AJsonRpcHandler(
 													: new Error(String(error)),
 											);
 										}
+									},
+									{
+										idleTimeoutMs: options.idleTimeoutMs,
+										onClose: () => finish(),
 									},
 								)
 								.then((unsubscribe) => {

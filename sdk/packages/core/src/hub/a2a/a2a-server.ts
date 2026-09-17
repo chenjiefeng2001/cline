@@ -20,9 +20,10 @@ import {
 } from "./a2a-mapping";
 import {
 	type A2AStreamEvent,
+	buildArtifactUpdateEvent,
 	buildStatusUpdateEvent,
 	isTerminalA2ATaskState,
-	mapHubEventToTaskState,
+	mapHubEventToStreamDelta,
 } from "./a2a-sse";
 import type { A2AAgentCard, A2AAgentSkill, A2ATask } from "./a2a-types";
 
@@ -54,6 +55,7 @@ export interface A2AHubEventClient {
 export interface A2AStreamOptions {
 	/** Terminal A2A states end the stream; idle streams close after a timeout. */
 	idleTimeoutMs?: number;
+	onClose?: () => void;
 }
 
 export interface A2ASendMessageInput {
@@ -240,12 +242,18 @@ export class A2AServer {
 		onEvent: (event: A2AStreamEvent) => void,
 		options: A2AStreamOptions = {},
 	): Promise<() => void> {
-		const task = await this.sendMessage(input);
-		const sessionId = task?.id;
-		if (!sessionId || !this.events) {
+		let task: A2ATask | undefined;
+		try {
+			task = await this.sendMessage(input);
+		} catch (error) {
+			options.onClose?.();
+			throw error;
+		}
+		if (!task) {
+			options.onClose?.();
 			return () => {};
 		}
-		return this.streamTask(sessionId, task, onEvent, options);
+		return this.streamTask(task.id, task, onEvent, options);
 	}
 
 	/** Whether an event source was bound at construction (SSE capability). */
@@ -265,27 +273,50 @@ export class A2AServer {
 		options: A2AStreamOptions = {},
 	): () => void {
 		if (!this.events) {
+			options.onClose?.();
 			return () => {};
 		}
 		let closed = false;
-		let unsubscribe = () => {};
+		let unsubscribe: (() => void) | undefined;
 		let idleTimer: ReturnType<typeof setTimeout> | undefined;
+		const contextId = task.contextId || sessionId;
+		let sawArtifactText = false;
 		const finish = (): void => {
 			if (closed) {
 				return;
 			}
 			closed = true;
 			clearTimeout(idleTimer);
-			unsubscribe();
+			try {
+				unsubscribe?.();
+			} finally {
+				options.onClose?.();
+			}
 		};
 		const emit = (event: A2AStreamEvent, final: boolean): void => {
 			if (closed) {
 				return;
 			}
-			onEvent(event);
+			try {
+				onEvent(event);
+			} catch (error) {
+				finish();
+				throw error;
+			}
 			if (final) {
 				finish();
 			}
+		};
+		const emitArtifact = (text: string, lastChunk: boolean): void => {
+			emit(
+				buildArtifactUpdateEvent(sessionId, text, {
+					contextId,
+					append: sawArtifactText,
+					lastChunk,
+				}),
+				false,
+			);
+			sawArtifactText = true;
 		};
 		// Initial snapshot: the task as it stands when the stream opens.
 		emit(task, isTerminalA2ATaskState(task.status.state));
@@ -300,25 +331,45 @@ export class A2AServer {
 			idleTimer = setTimeout(() => finish(), options.idleTimeoutMs);
 		};
 		armIdleTimer();
-		unsubscribe = this.events.subscribe(
-			(event) => {
-				armIdleTimer();
-				const state = mapHubEventToTaskState(event.event);
-				if (!state) {
-					return;
-				}
-				emit(
-					buildStatusUpdateEvent(
-						sessionId,
-						state,
-						isTerminalA2ATaskState(state),
-						event.sessionId,
-					),
-					isTerminalA2ATaskState(state),
-				);
-			},
-			{ sessionId },
-		);
+		try {
+			unsubscribe = this.events.subscribe(
+				(event) => {
+					if (closed) {
+						return;
+					}
+					if (
+						typeof event.sessionId === "string" &&
+						event.sessionId !== sessionId
+					) {
+						return;
+					}
+					armIdleTimer();
+					const mapping = mapHubEventToStreamDelta(event.event, event.payload);
+					const state = mapping.statusState;
+					if (mapping.artifactText !== undefined) {
+						emitArtifact(mapping.artifactText, false);
+					}
+					if (!state) {
+						return;
+					}
+					const final = isTerminalA2ATaskState(state);
+					if (final && sawArtifactText) {
+						emitArtifact("", true);
+					}
+					emit(
+						buildStatusUpdateEvent(sessionId, state, final, contextId),
+						final,
+					);
+				},
+				{ sessionId },
+			);
+			if (closed) {
+				unsubscribe();
+			}
+		} catch (error) {
+			finish();
+			throw error;
+		}
 		return finish;
 	}
 }

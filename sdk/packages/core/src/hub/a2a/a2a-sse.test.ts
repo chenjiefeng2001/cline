@@ -1,12 +1,15 @@
 import type { HubEventEnvelope } from "@cline/shared";
-import { describe, expect, it, vi } from "vitest";
+import { assert, describe, expect, it, vi } from "vitest";
 import type { A2AHubCommandClient } from "./a2a-server";
 import { A2AServer } from "./a2a-server";
 import {
 	A2A_SSE_CONTENT_TYPE,
+	type A2AStreamEvent,
+	buildArtifactUpdateEvent,
 	buildStatusUpdateEvent,
 	formatA2ASseFrame,
 	isTerminalA2ATaskState,
+	mapHubEventToStreamDelta,
 	mapHubEventToTaskState,
 } from "./a2a-sse";
 import type { A2ATask } from "./a2a-types";
@@ -74,6 +77,62 @@ describe("buildStatusUpdateEvent", () => {
 	});
 });
 
+describe("artifact mapping", () => {
+	it("maps only the producer's assistant text payload", () => {
+		expect(
+			mapHubEventToStreamDelta("assistant.delta", { text: "Hello\n " }),
+		).toEqual({ statusState: "working", artifactText: "Hello\n " });
+		for (const payload of [
+			undefined,
+			{},
+			{ text: 42 },
+			{ text: "" },
+			{ delta: "guessed" },
+		]) {
+			expect(mapHubEventToStreamDelta("assistant.delta", payload)).toEqual({
+				statusState: "working",
+			});
+		}
+		for (const event of [
+			"reasoning.delta",
+			"reasoning.finished",
+			"artifact.created",
+			"diff.created",
+		]) {
+			expect(
+				mapHubEventToStreamDelta(event, {
+					text: "private",
+					reasoning: "private",
+				}).artifactText,
+			).toBeUndefined();
+		}
+	});
+
+	it("builds stable artifact IDs with explicit append and completion flags", () => {
+		const first = buildArtifactUpdateEvent("t1", "Hello", { contextId: "c1" });
+		const last = buildArtifactUpdateEvent("t1", "", {
+			contextId: "c1",
+			append: true,
+			lastChunk: true,
+		});
+		expect(first).toEqual({
+			kind: "artifact-update",
+			taskId: "t1",
+			contextId: "c1",
+			artifact: {
+				artifactId: "t1:output",
+				name: "output",
+				parts: [{ kind: "text", text: "Hello" }],
+			},
+			append: false,
+			lastChunk: false,
+		});
+		expect(last.artifact.artifactId).toBe(first.artifact.artifactId);
+		expect(last.append).toBe(true);
+		expect(last.lastChunk).toBe(true);
+	});
+});
+
 describe("formatA2ASseFrame", () => {
 	it("frames JSON on a single data line", () => {
 		const payload: A2ATask = {
@@ -119,12 +178,12 @@ describe("A2AServer.streamMessage", () => {
 		const events = {
 			subscribe: vi.fn((listener: (event: HubEventEnvelope) => void) => {
 				listeners.push(listener);
-				return () => {
+				return vi.fn(() => {
 					const index = listeners.indexOf(listener);
 					if (index >= 0) {
 						listeners.splice(index, 1);
 					}
-				};
+				});
 			}),
 		};
 		const server = new A2AServer(
@@ -144,16 +203,16 @@ describe("A2AServer.streamMessage", () => {
 		);
 		expect(calls[0]?.command).toBe("session.create");
 
-		// Initial snapshot (submitted, non-final) before any hub events.
 		expect(received).toHaveLength(1);
 		expect(received[0]).toMatchObject({
 			id: "new-1",
 			status: { state: "submitted" },
 		});
 
-		// Progress event → working (non-final); terminal event → completed.
-		listeners[0]?.(hubEvent("run.started", "new-1"));
-		listeners[0]?.(hubEvent("run.completed", "new-1"));
+		const listener = listeners[0];
+		assert(listener);
+		listener(hubEvent("run.started", "new-1"));
+		listener(hubEvent("run.completed", "new-1"));
 		expect(received).toHaveLength(3);
 		expect(received[1]).toMatchObject({
 			kind: "status-update",
@@ -167,8 +226,8 @@ describe("A2AServer.streamMessage", () => {
 			final: true,
 		});
 
-		// Terminal state detaches the listener.
-		listeners[0]?.(hubEvent("assistant.delta", "new-1"));
+		expect(listeners).toHaveLength(0);
+		listener(hubEvent("assistant.delta", "new-1"));
 		expect(received).toHaveLength(3);
 		unsubscribe();
 	});
@@ -176,21 +235,26 @@ describe("A2AServer.streamMessage", () => {
 	it("approval.requested maps to input-required and keeps the stream open", async () => {
 		const { server, listeners } = makeServer();
 		const received: unknown[] = [];
-		await server.streamMessage({ prompt: "go" }, (event) =>
+		const unsubscribe = await server.streamMessage({ prompt: "go" }, (event) =>
 			received.push(event),
 		);
 		listeners[0]?.(hubEvent("approval.requested", "new-1"));
+		expect(received).toHaveLength(2);
 		expect(received[1]).toMatchObject({
 			kind: "status-update",
 			status: { state: "input-required" },
 			final: false,
 		});
+		expect(listeners).toHaveLength(1);
 		listeners[0]?.(hubEvent("approval.resolved", "new-1"));
+		expect(received).toHaveLength(3);
 		expect(received[2]).toMatchObject({
 			kind: "status-update",
 			status: { state: "working" },
 			final: false,
 		});
+		expect(listeners).toHaveLength(1);
+		unsubscribe();
 	});
 
 	it("unsubscribing mid-stream detaches and stops events", async () => {
@@ -243,6 +307,355 @@ describe("A2AServer.streamMessage", () => {
 				received.filter((event) => "final" in (event as object)),
 			).toHaveLength(1);
 			unsubscribe();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("fires onClose exactly once across terminal, idle, and manual close", async () => {
+		const { server, listeners } = makeServer();
+		const received: unknown[] = [];
+		const onClose = vi.fn();
+		const unsubscribe = await server.streamMessage(
+			{ prompt: "hi" },
+			(event) => received.push(event),
+			{ idleTimeoutMs: 50, onClose },
+		);
+		listeners[0]?.(hubEvent("run.completed", "new-1"));
+		unsubscribe();
+		await vi.waitFor(() => {
+			expect(onClose).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	it("fires onClose when the idle timer closes a stalled stream", async () => {
+		vi.useFakeTimers();
+		try {
+			const { server } = makeServer();
+			const onClose = vi.fn();
+			const unsubscribe = await server.streamMessage(
+				{ prompt: "stall" },
+				() => {},
+				{ idleTimeoutMs: 50, onClose },
+			);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(onClose).toHaveBeenCalledTimes(1);
+			unsubscribe();
+			expect(onClose).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("closes without hanging when the session cannot be created", async () => {
+		const client: A2AHubCommandClient = {
+			command: vi.fn(async () => ({
+				ok: true,
+				payload: {},
+			})),
+		};
+		const server = new A2AServer(
+			client,
+			{ agentCard: { name: "cline-hub", version: "1.0.0" } },
+			{ subscribe: () => () => {} },
+		);
+		const onClose = vi.fn();
+		const received: unknown[] = [];
+		const unsubscribe = await server.streamMessage(
+			{ prompt: "hi" },
+			(event) => received.push(event),
+			{ onClose },
+		);
+		expect(received).toHaveLength(0);
+		expect(onClose).toHaveBeenCalledTimes(1);
+		expect(unsubscribe()).toBeUndefined();
+	});
+
+	it("closes without hanging when sendMessage rejects", async () => {
+		const client: A2AHubCommandClient = {
+			command: vi.fn(async () => {
+				throw new Error("boom");
+			}),
+		};
+		const server = new A2AServer(
+			client,
+			{ agentCard: { name: "cline-hub", version: "1.0.0" } },
+			{ subscribe: () => () => {} },
+		);
+		const onClose = vi.fn();
+		await expect(
+			server.streamMessage({ prompt: "hi" }, () => {}, { onClose }),
+		).rejects.toThrow("boom");
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it("handles a subscribe that throws synchronously", async () => {
+		const { server } = makeServer();
+		(server as unknown as { events: { subscribe: () => void } }).events = {
+			subscribe: () => {
+				throw new Error("subscribe boom");
+			},
+		};
+		const received: unknown[] = [];
+		const onClose = vi.fn();
+		await expect(
+			server.streamMessage({ prompt: "hi" }, (event) => received.push(event), {
+				onClose,
+			}),
+		).rejects.toThrow("subscribe boom");
+		expect(received).toHaveLength(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not leak reasoning payloads into the artifact stream", async () => {
+		const { server, listeners } = makeServer();
+		const received: A2AStreamEvent[] = [];
+		const unsubscribe = await server.streamMessage({ prompt: "go" }, (event) =>
+			received.push(event),
+		);
+		const reasoningEnvelope = hubEvent("reasoning.delta", "new-1");
+		reasoningEnvelope.payload = {
+			text: "secret-thoughts",
+			reasoning: "secret-thoughts",
+		};
+		listeners[0]?.(reasoningEnvelope);
+		expect(received).toHaveLength(2);
+		expect(received[1]).toMatchObject({
+			kind: "status-update",
+			status: { state: "working" },
+			final: false,
+		});
+		expect(
+			received.filter(
+				(event) => "kind" in event && event.kind === "artifact-update",
+			),
+		).toHaveLength(0);
+		const assistantEnvelope = hubEvent("assistant.delta", "new-1");
+		assistantEnvelope.payload = {
+			text: "public",
+			reasoning: "secret-thoughts",
+			redacted: false,
+		};
+		listeners[0]?.(assistantEnvelope);
+		const artifacts = received.filter(
+			(event): event is Extract<A2AStreamEvent, { kind: "artifact-update" }> =>
+				"kind" in event && event.kind === "artifact-update",
+		);
+		expect(received).toHaveLength(4);
+		expect(artifacts).toEqual([
+			{
+				kind: "artifact-update",
+				taskId: "new-1",
+				contextId: "new-1",
+				artifact: {
+					artifactId: "new-1:output",
+					name: "output",
+					parts: [{ kind: "text", text: "public" }],
+				},
+				append: false,
+				lastChunk: false,
+			},
+		]);
+		expect(JSON.stringify(received)).not.toContain("secret-thoughts");
+		unsubscribe();
+	});
+
+	it("streams two real text chunks with a stable artifact ID before terminal completion", async () => {
+		const { server, listeners } = makeServer();
+		const received: A2AStreamEvent[] = [];
+		const onClose = vi.fn();
+		const unsubscribe = await server.streamMessage(
+			{ prompt: "go" },
+			(event) => received.push(event),
+			{ onClose },
+		);
+		const listener = listeners[0];
+		assert(listener);
+		for (const text of ["Hello", " world\n"]) {
+			const envelope = hubEvent("assistant.delta", "new-1");
+			envelope.payload = { text };
+			listener(envelope);
+		}
+		expect(received).toHaveLength(5);
+		expect(onClose).not.toHaveBeenCalled();
+		listener(hubEvent("run.completed", "new-1"));
+		expect(received).toMatchObject([
+			{ id: "new-1", status: { state: "submitted" } },
+			{
+				kind: "artifact-update",
+				artifact: {
+					artifactId: "new-1:output",
+					parts: [{ kind: "text", text: "Hello" }],
+				},
+				append: false,
+				lastChunk: false,
+			},
+			{ kind: "status-update", status: { state: "working" }, final: false },
+			{
+				kind: "artifact-update",
+				artifact: {
+					artifactId: "new-1:output",
+					parts: [{ kind: "text", text: " world\n" }],
+				},
+				append: true,
+				lastChunk: false,
+			},
+			{ kind: "status-update", status: { state: "working" }, final: false },
+			{
+				kind: "artifact-update",
+				artifact: {
+					artifactId: "new-1:output",
+					parts: [{ kind: "text", text: "" }],
+				},
+				append: true,
+				lastChunk: true,
+			},
+			{ kind: "status-update", status: { state: "completed" }, final: true },
+		]);
+		expect(listeners).toHaveLength(0);
+		listener(hubEvent("run.completed", "new-1"));
+		expect(received).toHaveLength(7);
+		unsubscribe();
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves the task contextId instead of the envelope sessionId", async () => {
+		const { server, listeners } = makeServer();
+		const received: A2AStreamEvent[] = [];
+		const snapshot: A2ATask = {
+			id: "task-9",
+			contextId: "conversation-77",
+			status: { state: "submitted" },
+		};
+		const unsubscribe = server.streamTask("task-9", snapshot, (event) =>
+			received.push(event),
+		);
+		listeners[0]?.(hubEvent("run.started", "task-9"));
+		const update = received.find(
+			(event): event is Extract<A2AStreamEvent, { kind: "status-update" }> =>
+				"kind" in event && event.kind === "status-update",
+		);
+		expect(update?.contextId).toBe("conversation-77");
+		unsubscribe();
+	});
+
+	it("handles a synchronous terminal event during subscribe", async () => {
+		const { server, events } = makeServer();
+		const received: A2AStreamEvent[] = [];
+		const onClose = vi.fn();
+		const cleanup = vi.fn(() => {});
+		events.subscribe.mockImplementationOnce(
+			(listener: (event: HubEventEnvelope) => void) => {
+				listener(hubEvent("run.completed", "new-1"));
+				return cleanup;
+			},
+		);
+		const unsubscribe = await server.streamMessage(
+			{ prompt: "hi" },
+			(event) => received.push(event),
+			{ onClose },
+		);
+		expect(received).toHaveLength(2);
+		expect(received[1]).toMatchObject({
+			kind: "status-update",
+			status: { state: "completed" },
+			final: true,
+		});
+		expect(cleanup).toHaveBeenCalledTimes(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+		expect(() => unsubscribe()).not.toThrow();
+		expect(cleanup).toHaveBeenCalledTimes(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it("drops events whose envelope sessionId does not match the task", async () => {
+		const { server, listeners } = makeServer();
+		const received: A2AStreamEvent[] = [];
+		await server.streamMessage({ prompt: "go" }, (event) =>
+			received.push(event),
+		);
+		listeners[0]?.(hubEvent("run.started", "other-session"));
+		expect(received).toHaveLength(1);
+		listeners[0]?.(hubEvent("assistant.delta", "other-session"));
+		expect(received).toHaveLength(1);
+		listeners[0]?.(hubEvent("run.completed", "new-1"));
+		expect(received).toHaveLength(2);
+		expect(received[1]).toMatchObject({
+			kind: "status-update",
+			status: { state: "completed" },
+			final: true,
+		});
+	});
+
+	it("cleans up exactly once when onEvent throws", async () => {
+		vi.useFakeTimers();
+		try {
+			const { server, events, listeners } = makeServer();
+			const onClose = vi.fn();
+			const onEvent = vi.fn();
+			const unsubscribe = await server.streamMessage(
+				{ prompt: "go" },
+				onEvent,
+				{ idleTimeoutMs: 50, onClose },
+			);
+			const cleanup = events.subscribe.mock.results[0]?.value;
+			const listener = listeners[0];
+			assert(listener);
+			onEvent.mockImplementationOnce(() => {
+				throw new Error("onEvent boom");
+			});
+			const envelope = hubEvent("assistant.delta", "new-1");
+			envelope.payload = { text: "Hello" };
+			expect(() => listener(envelope)).toThrow("onEvent boom");
+			expect(cleanup).toHaveBeenCalledTimes(1);
+			expect(onClose).toHaveBeenCalledTimes(1);
+			expect(listeners).toHaveLength(0);
+			expect(vi.getTimerCount()).toBe(0);
+			listener(hubEvent("run.completed", "new-1"));
+			unsubscribe();
+			await vi.advanceTimersByTimeAsync(100);
+			expect(onEvent).toHaveBeenCalledTimes(2);
+			expect(cleanup).toHaveBeenCalledTimes(1);
+			expect(onClose).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not reset the idle timeout for foreign-session events", async () => {
+		vi.useFakeTimers();
+		try {
+			const { server, events, listeners } = makeServer();
+			const onClose = vi.fn();
+			const onEvent = vi.fn();
+			const unsubscribe = await server.streamMessage(
+				{ prompt: "stall" },
+				onEvent,
+				{ idleTimeoutMs: 50, onClose },
+			);
+			const cleanup = events.subscribe.mock.results[0]?.value;
+			const listener = listeners[0];
+			assert(listener);
+			await vi.advanceTimersByTimeAsync(40);
+			const envelope = hubEvent("assistant.delta", "other-session");
+			envelope.payload = { text: "foreign text" };
+			listener(envelope);
+			listener(hubEvent("run.completed", "other-session"));
+			expect(onEvent).toHaveBeenCalledTimes(1);
+			await vi.advanceTimersByTimeAsync(9);
+			expect(onClose).not.toHaveBeenCalled();
+			expect(cleanup).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(onClose).toHaveBeenCalledTimes(1);
+			expect(cleanup).toHaveBeenCalledTimes(1);
+			expect(listeners).toHaveLength(0);
+			expect(vi.getTimerCount()).toBe(0);
+			listener(hubEvent("run.started", "new-1"));
+			unsubscribe();
+			await vi.advanceTimersByTimeAsync(100);
+			expect(onEvent).toHaveBeenCalledTimes(1);
+			expect(onClose).toHaveBeenCalledTimes(1);
+			expect(cleanup).toHaveBeenCalledTimes(1);
 		} finally {
 			vi.useRealTimers();
 		}

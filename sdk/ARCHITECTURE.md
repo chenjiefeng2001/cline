@@ -112,6 +112,7 @@ Design rules:
   - `daemon/` contains detached daemon startup, entrypoint, and local runtime handler wiring
   - `discovery/` contains endpoint defaults, discovery records, and workspace owner resolution
   - `server/` contains WebSocket server startup, native/browser socket adapters, server transport, server helpers, and `handlers/` for hub command dispatch
+- `a2a/` contains the opt-in A2A HTTP mount (Agent Card discovery, JSON-RPC dispatch, SSE task streaming) layered over the hub transport
 - settings mutations belong in core services and hub commands, not in host-specific file writes. Hosts should call the core settings facade or the `settings.*` hub command family and react to `settings.changed`.
 
 ## Runtime Flows
@@ -172,6 +173,52 @@ targets: reconnects may retry the same socket URL, but command recovery and
 startup-deadlock recovery must not replace them with the workspace-discovered
 hub. This keeps custom local hubs and remote hubs from silently drifting to a
 different process.
+
+#### A2A HTTP Mount (Opt-In)
+
+The hub server can additionally expose an A2A (agent-to-agent) HTTP surface on
+the same port as the WebSocket endpoint. It is disabled by default and only
+mounted when `HubWebSocketServerOptions.a2a.enabled` is `true` (the detached
+daemon exposes the `--a2a` CLI flag as its opt-in); hosts otherwise see no A2A
+routes at all.
+
+When enabled, the server constructs an `A2AServer` over the live
+`HubServerTransport` rather than a parallel runtime: JSON-RPC commands
+(`session.create`, `session.send_input`, `session.get`, `session.list`,
+`run.abort`) are translated into real hub command envelopes issued under a
+dedicated `a2a_<uuid>` client id, and the hub event stream for a session is
+subscribed through the same transport, which drives A2A `message/stream` SSE
+task updates. The Agent Card defaults to hub identity/version with the
+effective base path as its endpoint URL.
+
+Both A2A routes reuse the existing hub bearer-token contract: `GET
+<a2aBasePath>/.well-known/agent.json` and `POST <a2aBasePath>` require the same
+`Authorization: Bearer` token from the owner discovery record as `/status` and
+`/shutdown`, validated with the same constant-time comparison; unauthenticated
+requests are rejected with 401 before reaching A2A dispatch. The mount stays
+transport-shaped per the A2A module contract (`mountA2AHttpHandler` returning a
+chained `(req, res) => Promise<boolean>` handler), and hub dispatch errors are
+contained: a failed handler logs through the hub boundary logger and closes the
+response instead of crashing the process. On server close, in-flight SSE
+responses are destroyed before the HTTP server drains so `close()` completes
+promptly instead of hanging on long-lived streams.
+
+The HTTP mount bounds request bodies to 1 MiB by default (`maxBodyBytes`),
+including chunked bodies, returning HTTP 413 when exceeded. Text is decoded
+only after collecting bounded bytes so split UTF-8 sequences remain intact.
+Standalone users of `mountA2AHttpHandler` must provide their own authentication;
+the bearer-token check belongs to the hub host, not the standalone handler.
+
+SSE emits assistant text from `assistant.delta.payload.text` as artifact chunks
+with a stable task output ID, append flags, and a final chunk before terminal
+status. Reasoning content is not exposed. Terminal status, idle timeout and
+client disconnect release subscriptions and timers and end the HTTP response.
+The default heartbeat is a `: ping` comment every 15 seconds
+(`heartbeatIntervalMs`, zero disables it); the default idle timeout is 120 seconds
+(`idleTimeoutMs`). Heartbeats do not reset the idle timeout or claim task progress.
+These settings can be supplied through `HubWebSocketServerOptions.a2a`.
+Native artifact/diff event mapping and full protocol conformance are not implied
+by this text-streaming adapter.
 
 ### Interactive CLI Startup
 

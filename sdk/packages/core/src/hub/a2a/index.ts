@@ -35,8 +35,10 @@ export {
 } from "./a2a-server";
 export {
 	A2A_SSE_CONTENT_TYPE,
+	type A2AArtifactUpdateEvent,
 	type A2AStreamEvent,
 	type A2ATaskStatusUpdateEvent,
+	buildArtifactUpdateEvent,
 	buildStatusUpdateEvent,
 	formatA2ASseFrame,
 	isTerminalA2ATaskState,

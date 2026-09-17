@@ -6,6 +6,7 @@ import {
 } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
+import { A2AServer } from "../a2a";
 import { createLocalHubScheduleRuntimeHandlers } from "../daemon/runtime-handlers";
 import {
 	clearHubDiscovery,
@@ -353,6 +354,147 @@ describe("hub server startup", () => {
 			expect(health.status).toBe(200);
 		} finally {
 			handleUpgrade.mockRestore();
+		}
+	});
+});
+
+describe("hub server A2A opt-in mount", () => {
+	const servers = new Set<HubWebSocketServer>();
+
+	afterEach(async () => {
+		for (const server of servers) {
+			await server.close();
+		}
+		servers.clear();
+	});
+
+	function a2aCardUrl(server: HubWebSocketServer): string {
+		return `http://${server.host}:${server.port}/a2a/.well-known/agent.json`;
+	}
+
+	it("keeps A2A endpoints disabled by default", async () => {
+		const result = await ensureHubWebSocketServer({
+			owner: createInMemoryHubOwnerContext("hub-server-test-a2a-default-off"),
+			host: "127.0.0.1",
+			port: 0,
+			pathname: "/hub",
+			runtimeHandlers: createLocalHubScheduleRuntimeHandlers(),
+		});
+		const server = requireServer(result.server);
+		servers.add(server);
+
+		const discovery = await fetch(a2aCardUrl(server));
+		expect(discovery.status).toBe(404);
+	});
+
+	it("rejects unauthenticated A2A discovery and RPC requests", async () => {
+		const result = await ensureHubWebSocketServer({
+			owner: createInMemoryHubOwnerContext("hub-server-test-a2a-unauth"),
+			host: "127.0.0.1",
+			port: 0,
+			pathname: "/hub",
+			runtimeHandlers: createLocalHubScheduleRuntimeHandlers(),
+			a2a: { enabled: true },
+		});
+		const server = requireServer(result.server);
+		servers.add(server);
+
+		const discovery = await fetch(a2aCardUrl(server));
+		expect(discovery.status).toBe(401);
+
+		const rpc = await fetch(`http://${server.host}:${server.port}/a2a`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "tasks/list",
+			}),
+		});
+		expect(rpc.status).toBe(401);
+	});
+
+	it("serves authenticated A2A discovery and RPC over the shared port", async () => {
+		const result = await ensureHubWebSocketServer({
+			owner: createInMemoryHubOwnerContext("hub-server-test-a2a-auth"),
+			host: "127.0.0.1",
+			port: 0,
+			pathname: "/hub",
+			runtimeHandlers: createLocalHubScheduleRuntimeHandlers(),
+			a2a: { enabled: true },
+		});
+		const server = requireServer(result.server);
+		servers.add(server);
+
+		const authToken = server.authToken;
+		const card = await fetch(a2aCardUrl(server), {
+			headers: { authorization: `Bearer ${authToken}` },
+		});
+		expect(card.status).toBe(200);
+		const agentCard = (await card.json()) as { name: string };
+		expect(agentCard.name).toBe("Cline Hub");
+
+		const rpc = await fetch(`http://${server.host}:${server.port}/a2a`, {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${authToken}`,
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "tasks/list",
+			}),
+		});
+		expect(rpc.status).toBe(200);
+		const rpcBody = (await rpc.json()) as { result?: unknown[] };
+		expect(Array.isArray(rpcBody.result)).toBe(true);
+	});
+
+	it("closes promptly with an active A2A SSE response", async () => {
+		const result = await ensureHubWebSocketServer({
+			owner: createInMemoryHubOwnerContext("hub-server-test-a2a-sse-close"),
+			host: "127.0.0.1",
+			port: 0,
+			pathname: "/hub",
+			runtimeHandlers: createLocalHubScheduleRuntimeHandlers(),
+			a2a: { enabled: true },
+		});
+		const server = requireServer(result.server);
+		servers.add(server);
+
+		const send = vi
+			.spyOn(A2AServer.prototype, "sendMessage")
+			.mockResolvedValue({
+				id: "shutdown-stream",
+				contextId: "shutdown-stream",
+				status: { state: "working" },
+			});
+		try {
+			const response = await fetch(`http://${server.host}:${server.port}/a2a`, {
+				method: "POST",
+				headers: { authorization: `Bearer ${server.authToken}` },
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "message/stream",
+					params: { message: { parts: [{ kind: "text", text: "wait" }] } },
+				}),
+				signal: AbortSignal.timeout(3000),
+			});
+			expect(response.headers.get("content-type")).toBe("text/event-stream");
+			const reader = response.body?.getReader();
+			if (!reader) throw new Error("missing response body");
+			expect((await reader.read()).done).toBe(false);
+			const ended = reader.read().then(
+				(value) => value.done,
+				() => true,
+			);
+			await expect(server.close()).resolves.toBeUndefined();
+			expect(await ended).toBe(true);
+			servers.delete(server);
+		} finally {
+			send.mockRestore();
 		}
 	});
 });

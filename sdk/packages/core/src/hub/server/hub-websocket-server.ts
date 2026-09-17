@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { URL } from "node:url";
@@ -11,6 +11,11 @@ import {
 } from "@cline/shared";
 import { WebSocketServer } from "ws";
 import corePackage from "../../../package.json";
+import {
+	A2A_AGENT_CARD_WELL_KNOWN_PATH,
+	A2AServer,
+	mountA2AHttpHandler,
+} from "../a2a";
 import { rememberRecoverableLocalHubUrl, verifyHubConnection } from "../client";
 import {
 	clearHubDiscovery,
@@ -26,6 +31,7 @@ import {
 } from "../discovery";
 import { resolveDefaultHubPort } from "../discovery/defaults";
 import { BrowserWebSocketHubAdapter } from "./browser-websocket";
+import { logHubBoundaryError } from "./hub-server-logging";
 import type {
 	EnsuredHubWebSocketServerResult,
 	EnsureHubWebSocketServerOptions,
@@ -290,8 +296,43 @@ export async function startHubWebSocketServer(
 	let url = createHubServerUrl(host, requestedPort, pathname);
 	const buildId = resolveHubBuildId();
 	const authToken = createHubAuthToken();
+	const a2aBasePath = `/${(options.a2a?.basePath ?? "/a2a").replace(/^\/+|\/+$/g, "")}`;
 	const transport = new HubServerTransport(options);
+	const a2aClientId = `a2a_${randomUUID()}`;
+	const a2aHandler =
+		options.a2a?.enabled === true
+			? mountA2AHttpHandler({
+					...options.a2a,
+					basePath: a2aBasePath,
+					server: new A2AServer(
+						{
+							command: (command, payload, sessionId) =>
+								transport.handleCommand({
+									version: CURRENT_HUB_PROTOCOL_VERSION,
+									requestId: randomUUID(),
+									clientId: a2aClientId,
+									command,
+									payload,
+									sessionId,
+								}),
+						},
+						{
+							agentCard: options.a2a.agentCard ?? {
+								name: "Cline Hub",
+								version: corePackage.version,
+								url: new URL(a2aBasePath, url.replace(/^ws:/, "http:")).href,
+							},
+						},
+						{
+							subscribe: (listener, subscriptionOptions) =>
+								transport.subscribe(a2aClientId, listener, subscriptionOptions),
+						},
+					),
+				})
+			: undefined;
 	await transport.start();
+	const a2aResponses = new Set<http.ServerResponse>();
+	let closing = false;
 	const adapter = new BrowserWebSocketHubAdapter(
 		new NativeHubTransportAdapter(transport),
 		options.telemetry,
@@ -316,7 +357,12 @@ export async function startHubWebSocketServer(
 		if (closePromise) {
 			return closePromise;
 		}
+		closing = true;
 		closePromise = (async () => {
+			for (const response of a2aResponses) {
+				response.destroy();
+			}
+			a2aResponses.clear();
 			if (heartbeatTimer) {
 				clearInterval(heartbeatTimer);
 				heartbeatTimer = undefined;
@@ -357,6 +403,12 @@ export async function startHubWebSocketServer(
 	};
 
 	const server = http.createServer((req, res) => {
+		void handleRequest(req, res);
+	});
+	const handleRequest = async (
+		req: http.IncomingMessage,
+		res: http.ServerResponse,
+	): Promise<void> => {
 		if ((req.url ?? "/") === "/health") {
 			const body = JSON.stringify({
 				ok: true,
@@ -424,9 +476,56 @@ export async function startHubWebSocketServer(
 			});
 			return;
 		}
+		if (a2aHandler) {
+			if (closing) {
+				res.statusCode = 503;
+				res.end("Server closing");
+				return;
+			}
+			const a2aUrl = new URL(req.url ?? "/", `http://${host}:${port}`);
+			if (
+				(req.method === "GET" &&
+					a2aUrl.pathname ===
+						`${a2aBasePath}/${A2A_AGENT_CARD_WELL_KNOWN_PATH}`) ||
+				(req.method === "POST" && a2aUrl.pathname === a2aBasePath)
+			) {
+				if (
+					!isValidHubAuthToken(
+						readBearerToken(req.headers.authorization),
+						authToken,
+					)
+				) {
+					res.statusCode = 401;
+					res.end("Unauthorized");
+					return;
+				}
+				if (req.method === "POST") {
+					a2aResponses.add(res);
+					res.on("close", () => {
+						a2aResponses.delete(res);
+					});
+				}
+				try {
+					const handled = await a2aHandler(req, res);
+					if (!handled && !res.writableEnded) {
+						res.statusCode = 404;
+						res.end("Not found");
+					}
+				} catch (error) {
+					logHubBoundaryError("a2a request handling failed", error);
+					if (!res.headersSent) {
+						res.statusCode = 500;
+					}
+					if (!res.writableEnded) {
+						res.end();
+					}
+				}
+				return;
+			}
+		}
 		res.statusCode = 404;
 		res.end("Not found");
-	});
+	};
 	const wss = new WebSocketServer({ noServer: true });
 	heartbeatTimer = setInterval(() => {
 		for (const websocket of sockets) {
