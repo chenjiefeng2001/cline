@@ -161,17 +161,21 @@ async function mergeKnownModels(
 			(generatedKey) => generatedProviderModels[generatedKey] ?? {},
 		),
 	);
-	// For providers with a registered public model source (Ollama, LM Studio),
-	// the live response is the authoritative list of what the user has
-	// actually installed. Skip the bundled catalog so the picker doesn't
-	// show models that aren't downloaded — even when the live fetch fails or
-	// returns nothing. Falling back to the bundled (cloud) catalog here would
-	// auto-select a model the user never installed (e.g. Ollama silently
-	// defaulting to a cloud nemotron model when the local server is down).
-	const hasPublicModelSource = Boolean(
-		Llms.MODEL_COLLECTIONS_BY_PROVIDER_ID[providerId]?.provider.modelsSourceUrl,
+	// For local providers (Ollama, LM Studio), the live response is the
+	// authoritative list of what the user has actually installed. Skip the
+	// bundled catalog so the picker doesn't show models that aren't
+	// downloaded — even when the live fetch fails or returns nothing. Falling
+	// back to the bundled (cloud) catalog here would auto-select a model the
+	// user never installed (e.g. Ollama silently defaulting to a cloud
+	// nemotron model when the local server is down). Cloud providers should
+	// merge live results with their curated catalog instead.
+	const modelsSourceUrl =
+		Llms.MODEL_COLLECTIONS_BY_PROVIDER_ID[providerId]?.provider.modelsSourceUrl;
+	const isLocalProvider = Boolean(
+		modelsSourceUrl &&
+			/^https?:\/\/(localhost|127\.0\.0\.1|::1)([:/]|$)/i.test(modelsSourceUrl),
 	);
-	if (hasPublicModelSource) {
+	if (isLocalProvider) {
 		return Llms.sortModelsByReleaseDate({
 			...publicModels,
 			...userKnownModels,

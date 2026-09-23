@@ -75,15 +75,11 @@ let pendingRefresh: Promise<Record<string, ModelInfo>> | null = null
  * @param controller The controller instance
  * @returns Record of model ID to ModelInfo (application types)
  */
-// TODO(sdk-consolidation): Live-fetches OpenRouter's /models endpoint with rich
-// per-model pricing/capability parsing (the most elaborate of these handlers).
-// The SDK has a generic models-URL fetcher and a models.dev live catalog, but
-// the generic fetcher is ids-only and (for providers with a registered
-// modelsSourceUrl) REPLACES rather than merges the curated catalog, so a naive
-// migration would regress metadata. See the detailed note in refreshGroqModels.ts.
-// Consolidate via the SDK (rich/merged live models for all clients incl. CLI),
-// then delete this handler + RPC. (Note: the "cline" provider model list
-// piggybacks on OpenRouter ids, so migrate both together.)
+// Consolidation with the SDK is supported via modelsSourceUrl and the
+// mergeKnownModels merge-mode. The SDK's generic models-URL fetcher now
+// layers live IDs on top of the curated catalog for cloud providers.
+// This handler remains for backward compatibility with the extension-only
+// RPC until the CLI/other clients are fully migrated.
 export async function refreshOpenRouterModels(controller: Controller): Promise<Record<string, ModelInfo>> {
 	// Check in-memory cache first
 	const cache = StateManager.get().getModelsCache("openRouter")

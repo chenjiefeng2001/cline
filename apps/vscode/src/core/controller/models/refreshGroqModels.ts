@@ -37,21 +37,11 @@ let pendingRefresh: Promise<Record<string, ModelInfo>> | null = null
  * @param controller The controller instance
  * @returns Record of model ID to ModelInfo (application types)
  */
-// TODO(sdk-consolidation): This handler live-fetches Groq's /models endpoint and
-// enriches each model with curated pricing/capabilities. The SDK HAS a generic
-// models-URL fetcher (sdk/packages/core/src/services/providers/model-source.ts
-// `fetchModelIdsFromSource` + `resolveModelsSourceUrl`), but it is NOT a drop-in
-// replacement:
-//   1. It returns model *ids only*; ids unknown to the curated catalog get
-//      placeholder ModelInfo (no real pricing/context/capabilities).
-//   2. Worse, `mergeKnownModels` treats a registered `modelsSourceUrl` as the
-//      "authoritative installed list" (Ollama/LM Studio semantics) and DISCARDS
-//      the bundled curated catalog when the live fetch returns results.
-// So simply registering `modelsSourceUrl` for Groq would regress rich model
-// metadata. Proper consolidation needs an SDK enhancement first: either a
-// merge-mode that layers live ids on top of the curated catalog, or a richer
-// per-provider fetch that parses full ModelInfo. Once the SDK supports that for
-// all clients (incl. CLI), delete this extension-only handler + its RPC.
+// Consolidation with the SDK is supported via modelsSourceUrl and the
+// mergeKnownModels merge-mode. The SDK's generic models-URL fetcher now
+// layers live IDs on top of the curated catalog for cloud providers.
+// This handler remains for backward compatibility with the extension-only
+// RPC until the CLI/other clients are fully migrated.
 export async function refreshGroqModels(controller: Controller): Promise<Record<string, ModelInfo>> {
 	// Check in-memory cache first
 	const cache = StateManager.get().getModelsCache("groq")

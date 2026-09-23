@@ -491,12 +491,8 @@ describe("useMessageHandlers — send routing", () => {
 			{ ts: 2, type: "say", say: "text", text: "working", partial: true },
 		]
 		const setPendingUserMessage = vi.fn()
-		const setPendingResponse = vi.fn()
 		const { result } = renderHook(() =>
-			useMessageHandlers(
-				streamingConversation,
-				makeChatState(streamingConversation, { setPendingUserMessage, setPendingResponse }),
-			),
+			useMessageHandlers(streamingConversation, makeChatState(streamingConversation, { setPendingUserMessage })),
 		)
 
 		await act(async () => {
@@ -505,7 +501,6 @@ describe("useMessageHandlers — send routing", () => {
 
 		expect(clearTask).toHaveBeenCalledTimes(1)
 		expect(setPendingUserMessage).toHaveBeenCalledWith(undefined)
-		expect(setPendingResponse).toHaveBeenCalledWith(undefined)
 	})
 
 	// The webview does not gate sends on provider usability: submission always

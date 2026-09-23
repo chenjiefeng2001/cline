@@ -650,6 +650,7 @@ const OPENAI_COMPATIBLE_SPECS: BuiltinSpec[] = [
 		defaultModelId: "moonshotai/kimi-k2-instruct-0905",
 		apiKeyEnv: ["GROQ_API_KEY"],
 		defaults: { baseUrl: "https://api.groq.com/openai/v1" },
+		modelsSourceUrl: "https://api.groq.com/openai/v1/models",
 	},
 	{
 		id: "poolside",
@@ -729,6 +730,7 @@ const OPENAI_COMPATIBLE_SPECS: BuiltinSpec[] = [
 		apiKeyEnv: ["HF_TOKEN"],
 		modelsProviderId: "huggingface",
 		defaults: { baseUrl: "https://router.huggingface.co/v1" },
+		modelsSourceUrl: "https://router.huggingface.co/v1/models",
 	},
 	{
 		id: "vercel-ai-gateway",
@@ -740,6 +742,7 @@ const OPENAI_COMPATIBLE_SPECS: BuiltinSpec[] = [
 		apiKeyEnv: ["AI_GATEWAY_API_KEY"],
 		modelsProviderId: "vercel-ai-gateway",
 		defaults: { baseUrl: "https://ai-gateway.vercel.sh/v1" },
+		modelsSourceUrl: "https://ai-gateway.vercel.sh/v1/models?include_mappings=true",
 		metadata: ANTHROPIC_AND_QWEN_CACHE_ROUTING_METADATA,
 	},
 	{
@@ -923,11 +926,12 @@ const OPENAI_COMPATIBLE_SPECS: BuiltinSpec[] = [
 		apiKeyEnv: ["OPENROUTER_API_KEY"],
 		modelsProviderId: "openrouter",
 		docsUrl: "https://openrouter.ai/models",
-		defaults: { baseUrl: "https://openrouter.ai/api/v1" },
-		metadata: {
-			...ANTHROPIC_AND_QWEN_CACHE_ROUTING_METADATA,
-			...OPENROUTER_STICKY_SESSION_METADATA,
-		},
+defaults: { baseUrl: "https://openrouter.ai/api/v1" },
+			modelsSourceUrl: "https://openrouter.ai/api/v1/models",
+			metadata: {
+				...ANTHROPIC_AND_QWEN_CACHE_ROUTING_METADATA,
+				...OPENROUTER_STICKY_SESSION_METADATA,
+			},
 	},
 	{
 		id: "ollama",

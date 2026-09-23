@@ -37,13 +37,11 @@ let pendingRefresh: Promise<Record<string, ModelInfo>> | null = null
  * @param controller The controller instance
  * @returns Record of model ID to ModelInfo (application types)
  */
-// TODO(sdk-consolidation): Live-fetches Baseten's /models endpoint and parses
-// live pricing + reasoning support into ModelInfo. The SDK has a generic
-// models-URL fetcher but it returns ids-only and (for providers with a
-// registered modelsSourceUrl) REPLACES the curated catalog rather than merging,
-// so a naive migration would regress metadata. See the detailed note in
-// refreshGroqModels.ts; share via the SDK + delete this handler + RPC once the
-// SDK supports rich/merged per-provider live models for all clients.
+// Consolidation with the SDK is supported via modelsSourceUrl and the
+// mergeKnownModels merge-mode. The SDK's generic models-URL fetcher now
+// layers live IDs on top of the curated catalog for cloud providers.
+// This handler remains for backward compatibility with the extension-only
+// RPC until the CLI/other clients are fully migrated.
 export async function refreshBasetenModels(controller: Controller): Promise<Record<string, ModelInfo>> {
 	// Check in-memory cache first
 	const cache = StateManager.get().getModelsCache("baseten")
