@@ -114,6 +114,7 @@ export {
 	SDK_ERROR_TELEMETRY_EVENT,
 	stripUtf8Bom,
 } from "@cline/shared";
+export { CronUsageAggregator } from "./cron/service/usage-aggregator";
 export * from "@cline/shared/storage";
 export {
 	type ClineAccountBalance,
