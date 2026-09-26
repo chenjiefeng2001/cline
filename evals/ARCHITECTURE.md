@@ -1,6 +1,6 @@
 # Cline Evals Architecture
 
-> Note: Smoke tests (Layer 2) are partially disabled while the eval framework is repointed at the new SDK CLI. The scenarios under `evals/smoke-tests/` are preserved and `npm run eval:smoke:run` still works against whatever `cline` is on `$PATH` (install with `npm i -g cline`). The old build-and-link helpers and the auto-running `cline-evals-regression.yml` workflow are off until someone wires the build step at the new SDK CLI.
+> Note: Smoke tests (Layer 2) run in CI again. The eval framework is now wired at the SDK CLI (`bun run build:sdk` then `bun -F @cline/cli build`, linked onto `PATH`). `cline-evals-nightly.yml` runs the scenarios nightly against a live provider and reports pass@3; it does not gate PRs, and it enforces no pass-rate threshold yet. The deterministic behavioural gate is the separate offline `agent-conformance` job in `sdk-test.yml`. See `evals/smoke-tests/README.md`.
 
 ## Overview
 
@@ -219,12 +219,30 @@ ls evals/smoke-tests/results/latest/<scenario>/<model>/workspace-trial-1/
 
 ## CI Integration
 
-Smoke test CI is temporarily disabled. `.github/workflows/cline-evals-regression.yml` was removed until the build step is repointed at the new SDK CLI.
+Two layers with opposite contracts. The model-backed layer runs nightly against a
+live provider; the deterministic behavioural invariants that gate PRs are a
+separate offline suite. See `evals/smoke-tests/README.md` for the full table.
+
+| | PR gate | Nightly model eval |
+|---|---|---|
+| Workflow | `agent-conformance` in `sdk-test.yml` | `cline-evals-nightly.yml` |
+| Model | none (scripted) | live provider, 3 trials (pass@3) |
+| Secret | none | `CLINE_API_KEY` |
+| Blocks PRs | yes | no |
+
+The nightly does not enforce a pass-rate threshold; what counts as a regression
+is an open release-gate decision.
+
+### Required Secrets
+
+- `CLINE_API_KEY` — needed only by the model-backed workflows. A missing secret on
+  the canonical repository fails the nightly; on a fork it is skipped.
 
 ### Viewing CI Results
 
 1. **Job Summary**: Each run posts results to the Actions tab
-2. **Artifacts**: Full results downloadable as `smoke-test-results-<run_id>`
+2. **Artifacts**: Full results downloadable as `model-eval-report-<run_id>`
+   (90-day retention)
 
 ### Running CI-like Tests Locally
 

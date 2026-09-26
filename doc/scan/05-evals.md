@@ -16,9 +16,10 @@
 
 ## 2. 当前状态（重要）
 
-- **冒烟测试部分禁用**：评测框架正迁移到新的 SDK CLI（apps/cli）；场景文件保留，运行器仍可用
-- 旧自动回归工作流 `.github/workflows/cline-evals-regression.yml` 已移除
-- PR 门禁仅跑契约测试；夜间 E2E CI 尚未实现（README 明示 TODO）
+- **冒烟测试已在 CI 恢复**：评测框架已接到 SDK CLI（`bun run build:sdk` + `bun -F @cline/cli build` 后 link 到 `PATH`）
+- `cline-evals-nightly.yml` 每晚对 live provider 跑场景（3 trials，产出 pass@3），只报告不 gate PR，且**刻意不设 pass-rate 阈值**
+- PR 门禁是另一层：离线确定性的 `agent-conformance`（`sdk-test.yml`），baseline 钉住 case 集合
+- 仍缺：dataset regression threshold 与 release gate 口径（待决策）
 - TODO 还有：原生工具调用冒烟测试（`native_tool_call_enabled` 支持 Claude 4 native tools）
 - 默认测试模型：claude-sonnet-4 / gpt-4o / gemini-2.5-pro（经 Cline provider 路由，用 `cline auth` 凭证）
 

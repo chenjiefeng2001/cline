@@ -2,7 +2,7 @@
 
 A layered testing system for measuring Cline's performance at different levels.
 
-> Note: Smoke tests (Layer 2) are partially disabled while the eval framework is repointed at the new SDK CLI. The scenarios under `evals/smoke-tests/` are preserved and `npm run eval:smoke:run` still works against whatever `cline` is on `$PATH` (install with `npm i -g cline`). The old build-and-link helpers and the auto-running `cline-evals-regression.yml` workflow are off until someone wires the build step at the new SDK CLI.
+> Note: Smoke tests (Layer 2) run in CI again. The eval framework is now wired at the SDK CLI (`bun run build:sdk` then `bun -F @cline/cli build`, linked onto `PATH`). `cline-evals-nightly.yml` runs the scenarios nightly against a live provider and reports pass@3; it does not gate PRs, and it enforces no pass-rate threshold yet. The deterministic behavioural gate is the separate offline `agent-conformance` job in `sdk-test.yml`. See `evals/smoke-tests/README.md`.
 
 ## Directory Structure
 

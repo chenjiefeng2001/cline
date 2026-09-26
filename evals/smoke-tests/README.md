@@ -107,15 +107,58 @@ Shows `pass@1` when trials < 3, `pass@3` otherwise.
 
 ## CI Integration
 
-Smoke test CI is temporarily disabled while the build step is repointed at the SDK CLI. The remaining root script runs the scenarios against whichever `cline` binary is already on `$PATH`.
+There are two independent layers, with deliberately opposite contracts. Neither
+one substitutes for the other.
+
+| | PR gate | Nightly model eval |
+|---|---|---|
+| Workflow | `agent-conformance` in `sdk-test.yml` | `cline-evals-nightly.yml` |
+| Trigger | every PR | `schedule` (03:17 UTC) + manual dispatch |
+| Model | none (scripted) | live provider |
+| Credential | none | `CLINE_API_KEY` |
+| Measures | behavioural invariants | behavioural quality, pass@k |
+| Blocks PRs | **yes** | **no** |
+
+### PR gate — `agent-conformance`
+
+Runs `sdk/packages/core/src/eval/agent-conformance.ts`: deterministic, offline,
+no secret, no clock. Case coverage is pinned by
+`sdk/packages/core/src/eval/conformance-baseline.json`, so deleting a case fails
+the build instead of quietly reducing coverage. Run it locally with
+`bun run test:conformance` from the repo root.
+
+### Nightly model eval — `cline-evals-nightly`
+
+Runs these scenarios against a live provider with 3 trials, so pass@3 is a real
+number. It is intentionally **not** triggered by `pull_request` and is not a
+required status check, so model and provider variability can never make a PR
+flaky.
+
+A scenario failure is recorded as **data, not a build break**: the run is
+`continue-on-error`, the report is always published to the job summary and
+uploaded as an artifact (90-day retention), and the job reports a warning. This
+layer deliberately enforces **no pass-rate threshold** — deciding what counts as
+a regression, and at what pass@k, is an open release-gate decision. Producing
+comparable data every night is what makes that decision possible later.
+
+What does still fail loudly is a nightly that cannot run at all: a missing
+`CLINE_API_KEY` on the canonical repository is a hard error, because it would
+otherwise look like a healthy run. On a fork the secret is unreachable, so the
+run is skipped with a notice instead of failing every night.
+
+Manual runs remain available via `cline-evals-smoke.yml` (dispatch-only) and
+`workflow_dispatch` on the nightly.
 
 ### Required Secrets
 
-- `CLINE_API_KEY` - Cline API key, needed when CI is re-enabled
+- `CLINE_API_KEY` - Cline API key. Needed **only** by the two model-backed
+  workflows. The deterministic PR gate needs no credentials.
 
 ### Viewing Results
 
 - Local summaries are written under `evals/smoke-tests/results/latest/`
+- Nightly runs publish a summary in the job summary and upload
+  `model-eval-report-<run id>` as an artifact
 
 ## TODO
 

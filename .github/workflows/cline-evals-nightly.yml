@@ -1,0 +1,198 @@
+name: cline-evals-nightly
+
+# Nightly model eval (evals/smoke-tests).
+#
+# This is the LIVE layer, and its contract is deliberately the opposite of the
+# deterministic PR gate in sdk-test.yml:
+#
+#   PR gate (sdk-test.yml :: agent-conformance)
+#     deterministic | offline | no secret | behavioural invariants | must be
+#     green for every PR
+#
+#   This workflow
+#     live provider | scheduled | behavioural quality | pass@k tracking |
+#     allowed to expose model/provider variability
+#
+# It is therefore NOT a required check and is intentionally not triggered by
+# pull_request, so provider variability can never make a PR flaky. It also does
+# not enforce a pass-rate threshold: what counts as a regression, and at what
+# pass@k, is an open product/release-gate decision. This workflow's job is to
+# make that decision possible by producing comparable data every night.
+#
+# A run that cannot complete at all fails loudly, because a silently skipped
+# nightly is indistinguishable from a healthy one. A missing credential is the
+# one exception, and only on a fork: on the canonical repo it is a
+# misconfiguration of this layer's only prerequisite, so it fails.
+
+on:
+    schedule:
+        # 03:17 UTC nightly. Deliberately off the hour so this does not pile onto
+        # the top-of-hour scheduling spike shared by most cron jobs.
+        - cron: "17 3 * * *"
+    workflow_dispatch:
+        inputs:
+            model:
+                description: "Model id passed to --model (default: anthropic/claude-sonnet-4.5)"
+                required: false
+                default: "anthropic/claude-sonnet-4.5"
+            scenario:
+                description: "Scenario id passed to --scenario (empty = all)"
+                required: false
+                default: ""
+            trials:
+                description: "Trials per test passed to --trials"
+                required: false
+                default: "3"
+
+# One eval at a time. A long provider-bound run overlapping its own successor
+# would make the trend series incomparable.
+concurrency:
+    group: cline-evals-nightly
+    cancel-in-progress: false
+
+permissions:
+    contents: read
+
+defaults:
+    run:
+        working-directory: .
+
+jobs:
+    nightly:
+        runs-on: ubuntu-latest
+        name: Nightly model eval
+        # A broad scenario sweep with 3 trials against a live provider.
+        timeout-minutes: 180
+        env:
+            # Bound once at job level so the availability guard below is a single
+            # decision every later step can test, instead of re-reading a secret.
+            CLINE_API_KEY: ${{ secrets.CLINE_API_KEY }}
+        steps:
+            # Loud on the canonical repo, quiet on a fork.
+            #
+            # A missing credential on the canonical repo is a misconfiguration of
+            # the one prerequisite this layer has, so it fails the run: otherwise
+            # a nightly that stopped authenticating would look healthy. On a fork
+            # the secret is simply unreachable, and failing every night forever
+            # is pure noise, so it skips with a notice.
+            - name: Guard - provider credential
+              id: guard
+              run: |
+                  if [ -z "$CLINE_API_KEY" ]; then
+                      if [ "${{ github.event.repository.fork }}" = "false" ]; then
+                          echo "::error title=Missing credential::Repository secret CLINE_API_KEY is not set, so the nightly model eval cannot authenticate the cline provider. The nightly is the only layer that needs this secret; the deterministic PR gate does not."
+                          echo "available=false" >> "$GITHUB_OUTPUT"
+                          exit 1
+                      fi
+                      echo "::notice title=Skipped::CLINE_API_KEY is not reachable on a fork, so the nightly model eval was skipped."
+                      echo "available=false" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  echo "Provider credential is present."
+                  echo "available=true" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout code
+              if: steps.guard.outputs.available == 'true'
+              uses: actions/checkout@v4
+              with:
+                  submodules: recursive
+
+            - name: Setup Bun
+              if: steps.guard.outputs.available == 'true'
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: "1.3.13"
+
+            - name: Setup Node.js
+              if: steps.guard.outputs.available == 'true'
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "22.x"
+
+            - name: Install dependencies
+              if: steps.guard.outputs.available == 'true'
+              run: bun install
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Build SDK + CLI
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  bun run build:sdk
+                  bun -F @cline/cli build
+
+            - name: Link cline CLI onto PATH
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  cd apps/cli
+                  bun link
+                  which cline
+
+            - name: Install evals dependencies
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  npm ci
+                  cd analysis && npm ci
+
+            - name: Typecheck evals tooling
+              if: steps.guard.outputs.available == 'true'
+              working-directory: ./evals
+              run: npx tsc --noEmit
+
+            # Trials default to 3 so pass@3 is a real number. `continue-on-error`
+            # is deliberate: the runner exits non-zero when any scenario fails, and
+            # at this layer that is DATA, not a build break. The outcome is
+            # surfaced in the job summary and the report is always published.
+            - name: Run model eval
+              id: eval
+              if: steps.guard.outputs.available == 'true'
+              continue-on-error: true
+              working-directory: ./evals
+              run: |
+                  ARGS=(--trials "${{ inputs.trials }}" --model "${{ inputs.model }}")
+                  if [ -n "${{ inputs.scenario }}" ]; then
+                      ARGS+=(--scenario "${{ inputs.scenario }}")
+                  fi
+                  npx tsx smoke-tests/run-smoke-tests.ts "${ARGS[@]}"
+
+            - name: Publish eval report to the job summary
+              if: always() && steps.guard.outputs.available == 'true'
+              run: |
+                  REPORT=$(ls -1dt evals/smoke-tests/results/*/summary.md 2>/dev/null | head -n 1 || true)
+                  {
+                    echo "### Nightly model eval"
+                    echo ""
+                    echo "_Provider-backed behavioural quality. This run is reported, not gated: what counts as a"
+                    echo "regression is an open release-gate decision. The deterministic PR gate is"
+                    echo "\`agent-conformance\` in \`sdk-test.yml\`._"
+                    echo ""
+                    if [ -z "$REPORT" ]; then
+                      echo "No report was produced. See the run log for the failure."
+                    else
+                      cat "$REPORT"
+                    fi
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Summarize outcome
+              if: always() && steps.guard.outputs.available == 'true'
+              env:
+                  EVAL_OUTCOME: ${{ steps.eval.outcome }}
+              run: |
+                  if [ "$EVAL_OUTCOME" = "success" ]; then
+                      echo "::notice title=Model eval passed::All selected scenarios passed."
+                  elif [ -z "$EVAL_OUTCOME" ]; then
+                      # The step never ran, so an earlier setup step failed. Do not
+                      # let that read as a provider-quality regression.
+                      echo "::error title=Model eval did not run::An earlier step failed, so the eval never executed. This is a harness or build failure, not a quality regression."
+                  else
+                      echo "::warning title=Model eval reported failures::At least one scenario failed. This is provider-dependent quality, not a build break, and it does not affect PR status. See the job summary and the uploaded report."
+                  fi
+
+            - name: Upload results
+              if: always() && steps.guard.outputs.available == 'true'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: model-eval-report-${{ github.run_id }}
+                  path: evals/smoke-tests/results/
+                  if-no-files-found: ignore
+                  retention-days: 90

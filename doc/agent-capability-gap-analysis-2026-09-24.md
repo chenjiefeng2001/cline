@@ -39,7 +39,7 @@
 1. **通用可恢复 RunState 与审批后的自动进程 continuation 未闭环**：approval request/decision 已持久化并支持重连重发，显式单工具 resume、顺序与并行多工具 turn 的受控重放 MVP 已完成（turn 级 batch cursor + agent identity 校验 + 执行模式保持），delegated/team turn 的记录侧已身份正确并 fail closed，但 delegated/team 的可恢复 resume 与复杂配置的自动恢复仍未闭环。
 2. **Middleware、Memory、Sandbox 仍未全部默认接线**：idempotency middleware 已进入标准 runtime；approval/retry/redaction、Memory 和 Sandbox 仍有 opt-in 或未接线部分（budget 已由 runtime 内建，见 6.4）。
 3. **Hub 远程安全**：connection principal、分层 session ACL（read/write/own）、userFiles workspace containment（含符号链接逃逸）、凭据三处收口脱敏已关闭；仍缺 admin 角色与 owner 主动提升 observer 的协作通道、TLS/mTLS、OAuth scope、tenant identity，以及 A2A task-scoped credential。
-4. **持续评测**：PR 确定性门禁已建立（离线、无 secret、baseline 钉住 case 集合，删 case 即红）；nightly model eval、dataset regression threshold 与 release gate 仍缺，且需要 CI 资源与 `CLINE_API_KEY`。
+4. **持续评测**：两层已建立。PR 确定性门禁（离线、无 secret、baseline 钉住 case 集合，删 case 即红）+ nightly model eval（live provider、3 trials 产 pass@3、不 gate PR、不设阈值）。仍缺 dataset regression threshold 与 release gate，需 CI 资源与 `CLINE_API_KEY`。
 5. **成本治理只到 run 级**：budget 未跨轮次累计、未跨 delegated agent 池化，context 压缩仍由宿主实现。
 
 代码强制保证与待决策保证的完整清单见 6.7。
@@ -408,10 +408,26 @@ Teams、spawn、handoff/evaluator helper 已存在，但没有默认 orchestrati
 
 当前 case：tool-result 完整性（单工具与并行批次）、稳定 stepId、budget 达上限后不再发下一次模型请求且当前 turn 的 tool result 仍在、无 budget 时不误伤、delegated agent 上报 parent/rootRunId、lead agent 不上报 chain。
 
+**nightly model eval 层已建立（2026-09-26）**。契约与 PR 门禁刻意相反：
+
+| | PR 门禁 | nightly model eval |
+|---|---|---|
+| 触发 | 每个 PR | `schedule`（03:17 UTC）+ 手动 |
+| 模型 | 无（scripted） | 真实 provider |
+| secret | 不需要 | `CLINE_API_KEY` |
+| 度量 | 行为不变量 | 行为质量、pass@k |
+| 是否 gate PR | **是** | **否** |
+
+- 新增 `.github/workflows/cline-evals-nightly.yml`：以 3 trials 跑 live provider，使 pass@3 成为真实数字；`concurrency` 串行化，避免长跑与下一次重叠而使趋势不可比。
+- **刻意不由 `pull_request` 触发，也不是 required check**，因此 provider 波动不可能让 PR 变 flaky。
+- **scenario 失败按数据记录，不按构建失败处理**：run 为 `continue-on-error`，报告始终写入 job summary 并作为 artifact 上传（保留 90 天），job 报 warning。
+- **本层刻意不设 pass-rate 阈值**。「什么算回归、在什么 pass@k 上算回归」属于待决策的 release gate 口径；每晚产出可比数据正是为了让那个决策以后有依据。
+- 仍会硬失败的是「跑不起来」：canonical 仓库缺 `CLINE_API_KEY` 直接 `::error::`，否则一个已经无法认证的 nightly 看起来和健康的一样。fork 拿不到 secret 时用 notice 跳过，而不是每晚永久变红。
+- 手动运行入口保留：`cline-evals-smoke.yml`（仅 dispatch）与 nightly 的 `workflow_dispatch`。
+
 仍缺少：
 
-- **nightly model eval**：把 `cline-evals-smoke.yml` 从 `workflow_dispatch` 提到 `schedule`，产出 pass@k 趋势；仍需 `CLINE_API_KEY`，属于 CI 资源而非产品决策。
-- **dataset regression 与 baseline threshold**：需要先有稳定的 pass@k 历史。
+- **dataset regression 与 baseline threshold**：需要 nightly 先积累一段稳定的 pass@k 历史。
 - **production trace sampling → release gate 闭环**。
 
 ---
@@ -436,7 +452,7 @@ Teams、spawn、handoff/evaluator helper 已存在，但没有默认 orchestrati
 - 跨进程 delegated resume（阻塞点：审批时刻子 conversation 无 durable 落点）。
 - budget 的 session 级累计与子 Agent 预算池化（当前 per-run；把同一上限下发给 N 个子 Agent 等于放大 N 倍）。
 - Sandbox 默认隔离、MCP 协议版本对齐。
-- eval 的 nightly / dataset regression / release gate（需 CI 资源与密钥）。
+- eval 的 dataset regression threshold 与 release gate 口径（PR 门禁与 nightly 层已就位）。
 
 ---
 
@@ -520,7 +536,7 @@ A2A v1 方法、Agent Card、HTTP/SSE 代码已存在，但真实执行链路和
 2. Secret projection 脱敏。
 3. Remote file/network containment。
 4. Docker/E2B sandbox。
-5. PR/nightly eval gates。
+5. dataset regression threshold / release gate 口径（PR + nightly 两层已就位）。
 
 ---
 
@@ -585,6 +601,6 @@ Cline 当前不是“功能少”，而是“已有大量 building block，但�
 4. A2A 核心首消息/订阅时序与 live approval ingress 已关闭，后续补跨进程 approval continuation。
 5. Run 级 token/cost budget 已进入 runtime 默认契约；下一步是 session 累计与子 Agent 预算池化、context 压缩。
 6. Hub 的 connection principal、分层 session ACL、userFiles containment、凭据三处收口脱敏已由代码强制；剩余项（admin/协作提升、TLS/mTLS、tenant identity、A2A task-scoped credential）属产品/基础设施决策，已在 6.7 单列而非按假设实现。
-7. 最后补齐自动评测的 nightly/dataset/release 三层。
+7. 最后补齐自动评测的 dataset regression threshold 与 release gate 两层（nightly 与 PR 门禁已就位）。
 
 每一步均应保持小提交、可独立回退，并以负向测试和集成测试作为完成标准。
