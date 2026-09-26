@@ -1,0 +1,41 @@
+{
+	"$comment": "Pinned agent conformance contract. A case that is removed or renamed fails the gate, so coverage cannot be silently deleted. Widening the contract is an explicit edit to this file.",
+	"version": 1,
+	"cases": [
+		{
+			"id": "tool-result-completeness-single-tool",
+			"boundary": "tool-contract",
+			"guarantee": "A tool call always produces a tool result in the transcript the provider will see, so no turn is left unanswered."
+		},
+		{
+			"id": "parallel-tool-batch-settles-before-run-ends",
+			"boundary": "tool-contract",
+			"guarantee": "Every tool call in a multi-tool turn receives a tool result before the run returns, so no provider sees an unanswered tool call."
+		},
+		{
+			"id": "tool-context-carries-stable-step-identity",
+			"boundary": "tool-contract",
+			"guarantee": "Each tool call carries a stable stepId so an effect can be reconciled to the exact step across a restart."
+		},
+		{
+			"id": "budget-stops-before-next-model-request",
+			"boundary": "spend-governance",
+			"guarantee": "A reached run budget finishes the in-flight turn, keeps its tool result, and refuses another model request."
+		},
+		{
+			"id": "budget-absent-does-not-gate",
+			"boundary": "spend-governance",
+			"guarantee": "With no budget configured the loop is never gated on spend, so adding the guardrail cannot silently truncate existing runs."
+		},
+		{
+			"id": "delegated-run-reports-its-agent-chain",
+			"boundary": "runtime-contract",
+			"guarantee": "A delegated agent reports its parent and chain-root run through tool context, so a durable host can describe the chain it cannot rebuild."
+		},
+		{
+			"id": "lead-run-reports-no-agent-chain",
+			"boundary": "runtime-contract",
+			"guarantee": "A lead agent reports no parent or chain root, so ownership is never inferred for a session's own agent."
+		}
+	]
+}

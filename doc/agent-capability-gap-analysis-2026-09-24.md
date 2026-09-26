@@ -39,8 +39,10 @@
 1. **通用可恢复 RunState 与审批后的自动进程 continuation 未闭环**：approval request/decision 已持久化并支持重连重发，显式单工具 resume、顺序与并行多工具 turn 的受控重放 MVP 已完成（turn 级 batch cursor + agent identity 校验 + 执行模式保持），delegated/team turn 的记录侧已身份正确并 fail closed，但 delegated/team 的可恢复 resume 与复杂配置的自动恢复仍未闭环。
 2. **Middleware、Memory、Sandbox 仍未全部默认接线**：idempotency middleware 已进入标准 runtime；approval/retry/redaction、Memory 和 Sandbox 仍有 opt-in 或未接线部分（budget 已由 runtime 内建，见 6.4）。
 3. **Hub 远程安全**：connection principal、分层 session ACL（read/write/own）、userFiles workspace containment（含符号链接逃逸）、凭据三处收口脱敏已关闭；仍缺 admin 角色与 owner 主动提升 observer 的协作通道、TLS/mTLS、OAuth scope、tenant identity，以及 A2A task-scoped credential。
-4. **持续评测未形成 PR 门禁**：extended-tests 已进入 CI，但 Agent eval smoke 仍为手动 workflow。
+4. **持续评测**：PR 确定性门禁已建立（离线、无 secret、baseline 钉住 case 集合，删 case 即红）；nightly model eval、dataset regression threshold 与 release gate 仍缺，且需要 CI 资源与 `CLINE_API_KEY`。
 5. **成本治理只到 run 级**：budget 未跨轮次累计、未跨 delegated agent 池化，context 压缩仍由宿主实现。
+
+代码强制保证与待决策保证的完整清单见 6.7。
 
 因此，当前实现适合作为可信本机单用户 Agent 的高级基础；若目标是生产级远程、多租户或强副作用 Agent，仍需优先补齐执行语义、安全边界和持续评测。
 
@@ -70,7 +72,7 @@
 | Teams patterns | handoff/evaluator helper 存在 | 部分关闭 | `sdk/packages/core/src/session/patterns.ts:147` |
 | A2A | v1 HTTP/SSE + 真实首消息/订阅时序 | 核心时序已关闭 | `sdk/packages/core/src/hub/a2a/` |
 | Hub | Local baseline + server-issued connection principal + 分层 session ACL | 部分关闭（secret/remote file boundary 缺） | `sdk/packages/core/src/hub/server/hub-websocket-server.ts`、`sdk/packages/core/src/hub/server/browser-websocket.ts`、`sdk/packages/core/src/hub/server/handlers/session-access.ts` |
-| Eval | 手动 smoke runner | 未关闭 | `.github/workflows/cline-evals-smoke.yml:15` |
+| Eval | 离线确定性 PR 门禁已接线（case + baseline 钉住契约）；model eval 仍手动 | 部分关闭（PR 层已关闭） | `sdk/packages/core/src/eval/`、`.github/workflows/sdk-test.yml` |
 
 ---
 
@@ -396,17 +398,45 @@ Teams、spawn、handoff/evaluator helper 已存在，但没有默认 orchestrati
 
 ## 6.6 自动评测
 
-当前 eval smoke workflow 仍为 `workflow_dispatch`，没有 PR/nightly gate、baseline regression threshold 或 trace 查询闭环。
+**PR 确定性门禁已建立（2026-09-26）**。model-based smoke test 需要真实 provider，因此无法 gate PR：慢、fork 没有 secret、每次结果还会漂。缺的那一层是**离线确定性**的行为门禁，现已补上：
 
-建议建立：
+- `sdk/packages/core/src/eval/agent-conformance.ts` 是 case 注册表，每个 case 用 scripted model 断言一条行为保证，并标注所属边界（`runtime-contract` / `spend-governance` / `tool-contract` / `hub-authorization` / `file-boundary` / `projection-boundary`），便于审计时按边界归类。
+- `conformance-baseline.json` 用 `id + boundary + guarantee` 钉住契约。**删掉或改名一个 case 会让门禁变红**——这正是回归门禁唯一不能有的失败模式（悄悄删测试让 CI 变绿）。扩大契约必须显式改这个文件。
+- 门禁无 flake：不联网、不用 secret、没有时钟敏感断言，所以红了就信，不必重跑。
+- 已接线为 `sdk-test.yml` 的 `agent-conformance` job（PR + push，`needs: quality-checks`），本地用 `bun run test:conformance`。因为同级包通过 `dist/` 解析，job 会先 `build:sdk`。
+- 已用「故意删掉一个 case」验证过门禁真的会红（`pins every registered case and nothing else` + 同步性检查双失败），随后恢复。
 
-```text
-PR deterministic smoke
-→ nightly model eval
-→ production trace sampling
-→ dataset regression
-→ release gate
-```
+当前 case：tool-result 完整性（单工具与并行批次）、稳定 stepId、budget 达上限后不再发下一次模型请求且当前 turn 的 tool result 仍在、无 budget 时不误伤、delegated agent 上报 parent/rootRunId、lead agent 不上报 chain。
+
+仍缺少：
+
+- **nightly model eval**：把 `cline-evals-smoke.yml` 从 `workflow_dispatch` 提到 `schedule`，产出 pass@k 趋势；仍需 `CLINE_API_KEY`，属于 CI 资源而非产品决策。
+- **dataset regression 与 baseline threshold**：需要先有稳定的 pass@k 历史。
+- **production trace sampling → release gate 闭环**。
+
+---
+
+## 6.7 审计口径：代码保证 vs 待决策保证
+
+为避免「已实现」与「已决定」混为一谈，本文的完成状态按下面两类记录：
+
+**A. 代码强制保证（已实现且有负向测试）**——不依赖任何产品决策，删掉即测试变红：
+
+- connection principal：未注册连接、冒用 identity、跨连接抢占 identity、订阅冒用均被拒；重连可回收；provenance 不可被客户端伪造。
+- 分层 session ACL：read/write/own 单表前置校验；observer 只读；attach 不可提权；live state 丢失后写被拒、读仍开放。
+- userFiles workspace containment：`..`、外部绝对路径、工作区内符号链接逃逸均被拒；仅脱敏投影不改持久化。
+- 凭据三处收口脱敏：事件 payload、session record、client registry。
+- run budget：pre-request stop gate + 非法上限构造期失败 + 排除 team auto-continue。
+- durable HITL：delegated turn 身份正确且 fail closed。
+
+**B. 待决策/待基础设施保证（明确未实现，不做假设）**：
+
+- `admin` 角色、owner 主动把 observer 提升为 participant 的通道——因此 `write` 档目前只有创建者可达。
+- TLS/mTLS、OAuth scope、tenant identity、A2A task-scoped credential。
+- 跨进程 delegated resume（阻塞点：审批时刻子 conversation 无 durable 落点）。
+- budget 的 session 级累计与子 Agent 预算池化（当前 per-run；把同一上限下发给 N 个子 Agent 等于放大 N 倍）。
+- Sandbox 默认隔离、MCP 协议版本对齐。
+- eval 的 nightly / dataset regression / release gate（需 CI 资源与密钥）。
 
 ---
 
@@ -554,6 +584,7 @@ Cline 当前不是“功能少”，而是“已有大量 building block，但�
 3. Durable approval persistence 与 root turn 的可恢复 RunState（含顺序/并行多工具 turn 的 batch cursor 与执行模式保持）已完成；delegated/team 的记录侧已身份正确并 fail closed，下一步是可恢复 resume。
 4. A2A 核心首消息/订阅时序与 live approval ingress 已关闭，后续补跨进程 approval continuation。
 5. Run 级 token/cost budget 已进入 runtime 默认契约；下一步是 session 累计与子 Agent 预算池化、context 压缩。
-6. 最后补齐租户/传输层安全（TLS/mTLS、OAuth scope、tenant identity、A2A task-scoped credential）与自动评测。
+6. Hub 的 connection principal、分层 session ACL、userFiles containment、凭据三处收口脱敏已由代码强制；剩余项（admin/协作提升、TLS/mTLS、tenant identity、A2A task-scoped credential）属产品/基础设施决策，已在 6.7 单列而非按假设实现。
+7. 最后补齐自动评测的 nightly/dataset/release 三层。
 
 每一步均应保持小提交、可独立回退，并以负向测试和集成测试作为完成标准。

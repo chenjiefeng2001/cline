@@ -111,6 +111,39 @@ jobs:
               if: ${{ !cancelled() && steps.build_sdk_step.outcome == 'success' && steps.build_cli_step.outcome == 'success' && matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x' }}
               run: bun sdk/scripts/check-publish.ts
 
+    # PR gate for the agent behavioural contract. The model-based smoke tests
+    # under evals/ need a live provider, so they cannot gate a pull request.
+    # This job runs the deterministic, offline conformance suite instead: no
+    # network, no secret, no clock-sensitive assertion, so a failure is a
+    # behaviour change rather than noise. It also fails when a case is deleted
+    # from the registry without editing the pinned baseline, so coverage cannot
+    # be silently dropped.
+    agent-conformance:
+        needs: quality-checks
+        runs-on: ubuntu-latest
+        name: Agent Conformance Gate
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: "1.3.13"
+
+            - name: Install dependencies
+              run: bun install
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            # Sibling packages resolve through dist/, so the suite must run
+            # against a build rather than stale output.
+            - name: Build SDK
+              run: bun run build:sdk
+
+            - name: Run agent conformance gate
+              run: bun -F @cline/core test:unit -- --run src/eval
+
     extended-tests:
         needs: quality-checks
         runs-on: ubuntu-latest
