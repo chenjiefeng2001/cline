@@ -122,6 +122,45 @@ function truncateStateForIpc(state: ExtensionState, maxMessages?: number): Exten
 }
 
 /**
+ * Fields kept when even the halved payload is still over the limit. This is a
+ * fixed-size allowlist on purpose: it is the only way to *guarantee* the
+ * payload fits, since any pass-through field could in principle be huge.
+ */
+const STATE_SIZE_FLOOR_FIELDS = [
+	"version",
+	"mode",
+	"platform",
+	"preferredLanguage",
+	"welcomeViewCompleted",
+	"mcpMarketplaceEnabled",
+	"mcpDisplayMode",
+	"planActSeparateModelsSetting",
+	"enableCheckpointsSetting",
+	"telemetrySetting",
+	"shellIntegrationTimeout",
+	"terminalReuseEnabled",
+	"maxConsecutiveMistakes",
+	"requestTimeoutMs",
+	"yoloModeToggled",
+	"useAutoCondense",
+	"compactionStrategy",
+	"autoCompactThreshold",
+	"subagentsEnabled",
+	"worktreesEnabled",
+	"multiRootSetting",
+	"isMultiRootWorkspace",
+	"primaryRootIndex",
+	"workspaceRoots",
+	"backgroundCommandRunning",
+	"backgroundCommandTaskId",
+	"foregroundCommandRunning",
+	"stateVersion",
+	"epoch",
+	"messageTruncated",
+	"totalMessageCount",
+] as const satisfies readonly (keyof ExtensionState)[]
+
+/**
  * Check state size and apply truncation if necessary.
  * Returns the final state JSON and whether truncation was applied.
  *
@@ -151,9 +190,9 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 			const aggressiveSize = Buffer.byteLength(aggressiveJson, "utf8")
 
 			if (aggressiveSize > STATE_SIZE_HARD_LIMIT) {
-				// Last resort: strip message bodies entirely, keep only metadata
-				Logger.error(
-					`[subscribeToState] CRITICAL: State size ${(aggressiveSize / 1024).toFixed(1)}KB exceeds hard limit even after aggressive truncation. Sending minimal state.`,
+				// Strip message bodies entirely, keep only metadata
+				Logger.warn(
+					`[subscribeToState] Aggressive truncation still large: ${(aggressiveSize / 1024).toFixed(1)}KB, stripping message bodies`,
 				)
 				const minimalState = {
 					...aggressiveState,
@@ -164,7 +203,28 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 						toolInvocations: undefined,
 					})),
 				}
-				return { stateJson: JSON.stringify(minimalState), wasTruncated: true }
+				const minimalJson = JSON.stringify(minimalState)
+				const minimalSize = Buffer.byteLength(minimalJson, "utf8")
+
+				if (minimalSize > STATE_SIZE_HARD_LIMIT) {
+					// The remaining bulk is OUTSIDE clineMessages. taskHistory is the
+					// usual culprit: it grows with every task in the workspace and
+					// truncateStateForIpc() only ever slices the transcript, so the
+					// tiers above could return a payload many times over the IPC
+					// limit. Previously this path logged CRITICAL and sent the
+					// oversized payload anyway, which starves the webview of state and
+					// leaves the sidebar blank with nothing surfaced to the user.
+					//
+					// Both collections are recoverable by paging, so shedding them
+					// beats dropping the frame: halve until the payload fits, then
+					// fall back to a fixed-size skeleton that always does.
+					Logger.error(
+						`[subscribeToState] CRITICAL: State size ${(minimalSize / 1024).toFixed(1)}KB exceeds hard limit even after aggressive truncation. Halving collections.`,
+					)
+					return halveCollectionsToFit(minimalState, minimalSize)
+				}
+
+				return { stateJson: minimalJson, wasTruncated: true }
 			}
 
 			return { stateJson: aggressiveJson, wasTruncated: true }
@@ -174,6 +234,61 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 	}
 
 	return { stateJson: JSON.stringify(state), wasTruncated: false }
+}
+
+/**
+ * Last-resort reducer: repeatedly halve the two unbounded collections until the
+ * serialized state fits the IPC limit, then fall back to a fixed-size
+ * allowlist. Terminates because the loop is bounded and the floor is fixed.
+ */
+function halveCollectionsToFit(state: ExtensionState, initialSize: number): { stateJson: string; wasTruncated: boolean } {
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const messages: any[] = [...((state as any).clineMessages ?? [])]
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const history: any[] = [...((state as any).taskHistory ?? [])]
+	const totalMessages = messages.length
+	const totalHistory = history.length
+
+	for (let attempt = 0; attempt < 24; attempt++) {
+		const candidate = {
+			...state,
+			clineMessages: messages,
+			taskHistory: history,
+			messageTruncated: true,
+			totalMessageCount: totalMessages,
+		}
+		const json = JSON.stringify(candidate)
+		if (Buffer.byteLength(json, "utf8") <= STATE_SIZE_HARD_LIMIT) {
+			Logger.warn(
+				`[subscribeToState] Reduced state to fit IPC limit after ${attempt} halving pass(es): ${messages.length}/${totalMessages} messages, ${history.length}/${totalHistory} history entries`,
+			)
+			return { stateJson: json, wasTruncated: true }
+		}
+		if (messages.length === 0 && history.length === 0) {
+			break
+		}
+		messages.splice(0, Math.max(1, Math.ceil(messages.length / 2)))
+		history.splice(0, Math.max(1, Math.ceil(history.length / 2)))
+	}
+
+	// Nothing left to halve and still oversized: some other field is huge.
+	// Ship a fixed-size skeleton so the webview gets a renderable state.
+	const skeleton: Record<string, unknown> = {
+		messageTruncated: true,
+		totalMessageCount: totalMessages,
+		clineMessages: [],
+		taskHistory: [],
+	}
+	for (const key of STATE_SIZE_FLOOR_FIELDS) {
+		if (state[key] !== undefined) {
+			skeleton[key] = state[key]
+		}
+	}
+	const skeletonJson = JSON.stringify(skeleton)
+	Logger.error(
+		`[subscribeToState] Sent reduced state skeleton: ${(Buffer.byteLength(skeletonJson, "utf8") / 1024).toFixed(1)}KB (was ${(initialSize / 1024).toFixed(1)}KB)`,
+	)
+	return { stateJson: skeletonJson, wasTruncated: true }
 }
 
 /**
