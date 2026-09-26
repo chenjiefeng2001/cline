@@ -25,10 +25,21 @@ export const ActionButtons: React.FC<ActionButtonsProps> = ({ task, messages, ch
 	const { turnState } = useMessagesState()
 
 	// Tracks the ask the user last acted on. Clicking a footer button latches this so the
-	// buttons disable immediately (and survive the trailing bookkeeping re-renders before the
-	// backend advances the turn). It is a ref, not state, so it can be compared against the
-	// current ask during render without scheduling an extra update.
-	const processedAskRef = useRef<string | undefined>(undefined)
+	// buttons disable immediately (and survive the trailing bookkeeping re-renders before
+	// the backend advances the turn). It is a ref, not state, so it can be compared against
+	// the current ask during render without scheduling an extra update.
+	//
+	// The latch also records the TurnState seq it was taken at. Comparing identity alone
+	// was not enough to guarantee the buttons ever come back: the latch was only cleared
+	// when the RPC rejected, so a *successful* action left it set until askIdentity
+	// happened to change. askIdentity is derived from turnState.anchorTs, which is not
+	// stamped on the terminal `completed` transition, so it degenerates to
+	// lastMessage.ts + button text - a combination that readily repeats once a loop has
+	// finished. The result was a permanently dead footer (and, with the config's
+	// sendingDisabled, a dead input) with no way back. Keying the latch on seq as well
+	// makes it self-healing: any real turn advance re-enables the buttons, while the
+	// same-seq trailing re-renders that the latch exists for still keep them disabled.
+	const processedAskRef = useRef<{ identity: string; seq: number | undefined } | undefined>(undefined)
 	// Forces a re-render when the latch flips; the counter value itself is unused.
 	const [, bumpRender] = useState(0)
 
@@ -58,7 +69,7 @@ export const ActionButtons: React.FC<ActionButtonsProps> = ({ task, messages, ch
 	// ask. Because the latch is keyed on the ask identity, a new ask (even one reusing the same
 	// shared config object) is never seen as already-processed, so its buttons are interactive
 	// again.
-	const isProcessing = processedAskRef.current === askIdentity
+	const isProcessing = processedAskRef.current?.identity === askIdentity && processedAskRef.current?.seq === turnState?.seq
 
 	// Mirror the config's sending-disabled flag into chat state whenever the active button set
 	// changes.
@@ -78,23 +89,23 @@ export const ActionButtons: React.FC<ActionButtonsProps> = ({ task, messages, ch
 
 	const handleActionClick = useCallback(
 		(action: ButtonActionType, text?: string, images?: string[], files?: string[]) => {
-			if (processedAskRef.current === askIdentity) {
+			if (processedAskRef.current?.identity === askIdentity && processedAskRef.current?.seq === turnState?.seq) {
 				return
 			}
 			// Latch this ask as processed and force a render so the buttons disable immediately.
-			processedAskRef.current = askIdentity
+			processedAskRef.current = { identity: askIdentity, seq: turnState?.seq }
 			bumpRender((n) => n + 1)
 
 			void messageHandlers.executeButtonAction(action, text, images, files).catch(() => {
 				// Re-enable on error so the user is not stuck; a later ask would clear the latch
 				// on its own, but failures keep the same ask.
-				if (processedAskRef.current === askIdentity) {
+				if (processedAskRef.current?.identity === askIdentity) {
 					processedAskRef.current = undefined
 					bumpRender((n) => n + 1)
 				}
 			})
 		},
-		[messageHandlers, askIdentity],
+		[messageHandlers, askIdentity, turnState?.seq],
 	)
 
 	// Keyboard event handler
