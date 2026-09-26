@@ -101,14 +101,21 @@ webview-ui/coverage/**
 webview-ui/.vite-port
 
 # Debug/scratch artifacts never shipped in the VSIX
-vsix-build-*.log
-*.log
+# These need an explicit `**/` prefix. Unlike .gitignore, vsce anchors a bare
+# pattern to the extension root, so `*.log` only ever excluded a log sitting at
+# the top level and silently shipped every log in a subdirectory. Verified with
+# `vsce ls`: dist/probe.log and webview-ui/storybook-static/probe.txt were both
+# packed, while a root-level probe.log was correctly dropped. The logs that
+# motivated this block are vsce's own, which it writes into dist/ and which
+# embed the absolute path of whoever ran the build.
+**/vsix-build-*.log
+**/*.log
 e2e-repro.mjs
 tmp-msg-handler.ts
 
 # Ignore Storybook files
 **/*.stories.tsx
-*storybook.log
-storybook-static
+**/*storybook.log
+**/storybook-static
 **/StorybookDecorator.tsx
 
