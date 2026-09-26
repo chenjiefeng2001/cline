@@ -49,11 +49,16 @@ export function wrapToolsWithMiddleware<T extends AgentTool>(
 			) => unknown;
 			return chain(() => Promise.resolve(executor(input, context)), {
 				toolName: tool.name,
+				stepId: context.stepId,
 				toolCallId: context.toolCallId,
+				toolCallIndex: context.toolCallIndex,
 				iteration: context.iteration,
 				sessionId: resolveSessionId(context),
+				runId: context.runId,
 				agentId: context.agentId,
 				conversationId: context.conversationId,
+				retryable: tool.retryable === true,
+				signal: context.signal,
 				input,
 				policy: undefined,
 			});

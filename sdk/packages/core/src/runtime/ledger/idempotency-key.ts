@@ -45,22 +45,52 @@ function stableStringify(value: unknown): string {
 export interface DeriveIdempotencyKeyInput {
 	sessionId: string;
 	toolName: string;
+	runId?: string;
+	toolCallIndex?: number;
 	/** Loop iteration that produced the call. */
 	iteration?: number;
 	toolCallId?: string;
 	input?: unknown;
+	inputHash?: string;
 }
 
 /**
- * Derives the ledger key for a tool call:
- * `<sessionId>:<iteration|->:<toolName>:<toolCallId|->:<inputHash>`.
- * Distinct logical calls derive distinct keys; the same call re-derived
- * after recovery collides by design (that is the replay path).
+ * Derives the durable ledger key for a logical tool step:
+ * `<sessionId>:<runId|->:<iteration|->:<toolName>:<toolCallIndex|->:<inputHash>`.
+ * Provider-generated tool call ids are intentionally excluded because a
+ * restored model run may assign a new id to the same logical step.
  */
 export function deriveIdempotencyKey(input: DeriveIdempotencyKeyInput): string {
+	if (input.input !== undefined && input.inputHash !== undefined) {
+		throw new Error("Idempotency key accepts input or inputHash, not both");
+	}
+	const runId = input.runId ?? "-";
+	const iteration = input.iteration ?? "-";
+	const toolCallIndex = input.toolCallIndex ?? "-";
+	const inputHash = input.inputHash ?? hashToolInput(input.input);
+	return `${input.sessionId}:${runId}:${iteration}:${input.toolName}:${toolCallIndex}:${inputHash}`;
+}
+
+export function deriveV2IdempotencyKey(
+	input: DeriveIdempotencyKeyInput,
+): string {
+	if (input.input !== undefined && input.inputHash !== undefined) {
+		throw new Error("Idempotency key accepts input or inputHash, not both");
+	}
+	const iteration = input.iteration ?? "-";
+	const inputHash = input.inputHash ?? hashToolInput(input.input);
+	return `${input.sessionId}:${iteration}:${input.toolName}:${inputHash}`;
+}
+
+export function deriveLegacyIdempotencyKey(
+	input: DeriveIdempotencyKeyInput,
+): string {
+	if (input.input !== undefined && input.inputHash !== undefined) {
+		throw new Error("Idempotency key accepts input or inputHash, not both");
+	}
 	const iteration = input.iteration ?? "-";
 	const toolCallId = input.toolCallId ?? "-";
-	const inputHash = hashToolInput(input.input);
+	const inputHash = input.inputHash ?? hashToolInput(input.input);
 	return `${input.sessionId}:${iteration}:${input.toolName}:${toolCallId}:${inputHash}`;
 }
 
@@ -75,8 +105,10 @@ export function deriveIdempotencyKeyFromContext(
 	return deriveIdempotencyKey({
 		sessionId,
 		toolName: context.toolName,
+		runId: context.runId,
 		iteration: context.iteration,
 		toolCallId: context.toolCallId,
+		toolCallIndex: context.toolCallIndex,
 		input: context.input,
 	});
 }

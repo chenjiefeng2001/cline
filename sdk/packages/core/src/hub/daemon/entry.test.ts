@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const {
 	mockCreateLocalHubScheduleRuntimeHandlers,
 	mockInitVcr,
+	mockLocalRuntimeHostDispose,
 	mockResolveHubEndpointOptions,
+	mockResolveA2AClientId,
 	mockResolveProductionHubOwnerContext,
 	mockResolveSharedHubOwnerContext,
 	mockStartHubWebSocketServer,
@@ -18,6 +20,7 @@ const {
 		abortSession: vi.fn(),
 	})),
 	mockInitVcr: vi.fn(),
+	mockLocalRuntimeHostDispose: vi.fn(async () => undefined),
 	mockResolveHubEndpointOptions: vi.fn(
 		(options: { host?: string; port?: number; pathname?: string }) => ({
 			host: options.host ?? "127.0.0.1",
@@ -25,6 +28,7 @@ const {
 			pathname: options.pathname ?? "/hub",
 		}),
 	),
+	mockResolveA2AClientId: vi.fn(() => "a2a_stable_test"),
 	mockResolveProductionHubOwnerContext: vi.fn(() => ({
 		ownerId: "production",
 		discoveryPath: "/tmp/cline-data/locks/hub/production.json",
@@ -60,6 +64,20 @@ vi.mock("@cline/shared", () => ({
 	resolveClineBuildEnv: () => "production",
 }));
 
+vi.mock("../../runtime/host/local-runtime-host", () => ({
+	LocalRuntimeHost: class {
+		dispose = mockLocalRuntimeHostDispose;
+	},
+}));
+
+vi.mock("../../services/storage/sqlite-session-store", () => ({
+	SqliteSessionStore: class {},
+}));
+
+vi.mock("../../session/services/session-service", () => ({
+	CoreSessionService: class {},
+}));
+
 vi.mock("../daemon/runtime-handlers", () => ({
 	createLocalHubScheduleRuntimeHandlers:
 		mockCreateLocalHubScheduleRuntimeHandlers,
@@ -70,6 +88,7 @@ vi.mock("../discovery/defaults", () => ({
 }));
 
 vi.mock("../discovery/workspace", () => ({
+	resolveA2AClientId: mockResolveA2AClientId,
 	resolveProductionHubOwnerContext: mockResolveProductionHubOwnerContext,
 	resolveSharedHubOwnerContext: mockResolveSharedHubOwnerContext,
 }));
@@ -95,7 +114,9 @@ describe("hub daemon entry", () => {
 		vi.resetModules();
 		mockCreateLocalHubScheduleRuntimeHandlers.mockClear();
 		mockInitVcr.mockClear();
+		mockLocalRuntimeHostDispose.mockClear();
 		mockResolveHubEndpointOptions.mockClear();
+		mockResolveA2AClientId.mockClear();
 		mockResolveProductionHubOwnerContext.mockClear();
 		mockResolveSharedHubOwnerContext.mockClear();
 		mockStartHubWebSocketServer.mockClear();
@@ -142,7 +163,19 @@ describe("hub daemon entry", () => {
 		expect(mockCreateLocalHubScheduleRuntimeHandlers).toHaveBeenCalledOnce();
 		expect(mockCreateLocalHubScheduleRuntimeHandlers).toHaveBeenCalledWith({
 			telemetry: mockDaemonTelemetryService,
+			sessionHost: expect.any(Object),
 		});
+		const serverSessionHost = (
+			mockStartHubWebSocketServer.mock.calls as unknown as Array<
+				[{ sessionHost?: unknown }]
+			>
+		)[0]?.[0]?.sessionHost;
+		const scheduleSessionHost = (
+			mockCreateLocalHubScheduleRuntimeHandlers.mock.calls as unknown as Array<
+				[{ sessionHost?: unknown }]
+			>
+		)[0]?.[0]?.sessionHost;
+		expect(scheduleSessionHost).toBe(serverSessionHost);
 	});
 
 	it("enables the A2A mount only when the opt-in flag is passed", async () => {
@@ -158,7 +191,12 @@ describe("hub daemon entry", () => {
 
 		expect(mockStartHubWebSocketServer).toHaveBeenLastCalledWith(
 			expect.objectContaining({
-				a2a: { enabled: true },
+				a2a: {
+					enabled: true,
+					clientId: "a2a_stable_test",
+					recoveryOwner: "a2a_stable_test",
+					defaultSessionConfig: { cwd },
+				},
 			}),
 		);
 	});
@@ -180,6 +218,9 @@ describe("hub daemon entry", () => {
 		await vi.waitFor(() => {
 			expect(exitSpy).toHaveBeenCalledWith(1);
 		});
+		expect(mockLocalRuntimeHostDispose).toHaveBeenCalledWith(
+			"hub_server_start_failed",
+		);
 		expect(mockDaemonTelemetryDispose).toHaveBeenCalled();
 	});
 });

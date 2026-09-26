@@ -17,7 +17,11 @@ import {
 	formatA2ASseFrame,
 	isTerminalA2ATaskState,
 } from "./a2a-sse";
-import type { A2ATask } from "./a2a-types";
+import {
+	A2A_APPROVAL_DECISION_PART_TYPE,
+	type A2AApprovalDecisionData,
+	type A2ATask,
+} from "./a2a-types";
 
 export interface A2AJsonRpcRequest {
 	jsonrpc?: "2.0";
@@ -122,6 +126,75 @@ export function extractA2ARequestSessionId(
 		}
 	}
 	return undefined;
+}
+
+export type A2AApprovalDecisionExtraction =
+	| { kind: "none" }
+	| { kind: "decision"; decision: A2AApprovalDecisionData }
+	| { kind: "invalid"; message: string };
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+export function extractA2AApprovalDecision(
+	params: Record<string, unknown> | undefined,
+): A2AApprovalDecisionExtraction {
+	const message = asRecord(params?.message);
+	const parts = Array.isArray(message?.parts) ? message.parts : [];
+	const dataParts = parts
+		.map((part) => asRecord(part))
+		.filter((part): part is Record<string, unknown> => part !== undefined)
+		.map((part) => asRecord(part.data))
+		.filter((data): data is Record<string, unknown> => data !== undefined);
+	if (dataParts.length === 0) {
+		return { kind: "none" };
+	}
+	const hasTextPart = parts.some((part) => {
+		const record = asRecord(part);
+		return typeof record?.text === "string";
+	});
+	if (dataParts.length !== 1 || hasTextPart || parts.length !== 1) {
+		return {
+			kind: "invalid",
+			message: "approval decision must be the only message part",
+		};
+	}
+	const data = dataParts[0];
+	if (data.type !== A2A_APPROVAL_DECISION_PART_TYPE) {
+		return {
+			kind: "invalid",
+			message: `unsupported structured message type: ${String(data.type ?? "missing")}`,
+		};
+	}
+	const approvalId =
+		typeof data.approvalId === "string" ? data.approvalId.trim() : "";
+	const decision = data.decision;
+	if (!approvalId || (decision !== "approved" && decision !== "denied")) {
+		return {
+			kind: "invalid",
+			message: "approval decision requires approvalId and decision",
+		};
+	}
+	if (data.reason !== undefined && typeof data.reason !== "string") {
+		return {
+			kind: "invalid",
+			message: "approval decision reason must be a string",
+		};
+	}
+	return {
+		kind: "decision",
+		decision: {
+			type: A2A_APPROVAL_DECISION_PART_TYPE,
+			approvalId,
+			decision,
+			...(typeof data.reason === "string" && data.reason.trim()
+				? { reason: data.reason }
+				: {}),
+		},
+	};
 }
 
 function asError(value: unknown): string {
@@ -232,12 +305,15 @@ export function createA2AJsonRpcHandler(
 						});
 					}
 					let task: A2ATask | undefined;
+					let start: (() => Promise<unknown>) | undefined;
 					try {
-						task = await server.sendMessage({
+						const prepared = await server.prepareMessage({
 							prompt,
 							sessionId: extractA2ARequestSessionId(params),
 							source: "a2a",
 						});
+						task = prepared?.task;
+						start = prepared?.start;
 					} catch (error) {
 						return respond({
 							id: request.id ?? null,
@@ -256,9 +332,50 @@ export function createA2AJsonRpcHandler(
 							},
 						});
 					}
-					return openTaskStream(task.id, task);
+					return openTaskStream(task.id, task, start);
 				}
 				case "SendMessage": {
+					const approvalExtraction = extractA2AApprovalDecision(params);
+					if (approvalExtraction.kind === "invalid") {
+						return respond({
+							id: request.id ?? null,
+							error: {
+								code: A2A_JSONRPC_INVALID_PARAMS,
+								message: approvalExtraction.message,
+							},
+						});
+					}
+					if (approvalExtraction.kind === "decision") {
+						const sessionId = extractA2ARequestSessionId(params);
+						if (!sessionId) {
+							return respond({
+								id: request.id ?? null,
+								error: {
+									code: A2A_JSONRPC_INVALID_PARAMS,
+									message:
+										"approval decision requires message.taskId or contextId",
+								},
+							});
+						}
+						const task = await server.respondToApproval({
+							sessionId,
+							approvalId: approvalExtraction.decision.approvalId,
+							approved: approvalExtraction.decision.decision === "approved",
+							...(approvalExtraction.decision.reason
+								? { reason: approvalExtraction.decision.reason }
+								: {}),
+						});
+						if (!task) {
+							return respond({
+								id: request.id ?? null,
+								error: {
+									code: A2A_TASK_NOT_FOUND,
+									message: `task not found: ${sessionId}`,
+								},
+							});
+						}
+						return respond({ id: request.id ?? null, result: { task } });
+					}
 					const prompt = extractA2ARequestPrompt(params);
 					if (!prompt) {
 						return respond({
@@ -415,6 +532,7 @@ export function createA2AJsonRpcHandler(
 		function openTaskStream(
 			sessionId: string,
 			task: A2ATask,
+			start?: () => Promise<unknown>,
 		): A2AJsonRpcStreamResult {
 			return {
 				stream: true,
@@ -453,6 +571,12 @@ export function createA2AJsonRpcHandler(
 						);
 						if (done) {
 							cancel();
+						} else if (start) {
+							void start().catch((error) => {
+								finish(
+									error instanceof Error ? error : new Error(String(error)),
+								);
+							});
 						}
 					} catch (error) {
 						finish(error instanceof Error ? error : new Error(String(error)));

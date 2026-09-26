@@ -15,6 +15,7 @@
 
 import {
 	A2A_TERMINAL_TASK_STATES,
+	type A2AApprovalDescriptor,
 	type A2AArtifact,
 	type A2ATask,
 	type A2ATaskState,
@@ -103,6 +104,7 @@ export function buildStatusUpdateEvent(
 	taskId: string,
 	state: A2ATaskState,
 	contextId?: string,
+	metadata?: Record<string, unknown>,
 ): A2ATaskStatusUpdateEvent {
 	return {
 		taskId,
@@ -111,6 +113,7 @@ export function buildStatusUpdateEvent(
 			state,
 			timestamp: new Date().toISOString(),
 		},
+		...(metadata ? { metadata } : {}),
 	};
 }
 
@@ -135,6 +138,39 @@ export function buildArtifactUpdateEvent(
 export interface A2ADeltaMapping {
 	statusState?: A2ATaskState;
 	artifactText?: string;
+	metadata?: Record<string, unknown>;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+export function parseA2AApprovalDescriptor(
+	value: unknown,
+): A2AApprovalDescriptor | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return undefined;
+	}
+	return approvalDescriptorFromPayload(value as Record<string, unknown>);
+}
+
+function approvalDescriptorFromPayload(
+	payload: Record<string, unknown> | undefined,
+): A2AApprovalDescriptor | undefined {
+	const approvalId = asNonEmptyString(payload?.approvalId);
+	const toolCallId = asNonEmptyString(payload?.toolCallId);
+	const toolName = asNonEmptyString(payload?.toolName);
+	const expiresAt = payload?.expiresAt;
+	if (
+		!approvalId ||
+		!toolCallId ||
+		!toolName ||
+		typeof expiresAt !== "number" ||
+		!Number.isFinite(expiresAt)
+	) {
+		return undefined;
+	}
+	return { approvalId, toolCallId, toolName, expiresAt };
 }
 
 export function mapHubEventToStreamDelta(
@@ -143,6 +179,12 @@ export function mapHubEventToStreamDelta(
 ): A2ADeltaMapping {
 	const state = mapHubEventToTaskState(event);
 	const mapping: A2ADeltaMapping = state ? { statusState: state } : {};
+	if (event === "approval.requested") {
+		const approval = approvalDescriptorFromPayload(payload);
+		if (approval) {
+			mapping.metadata = { approval };
+		}
+	}
 	if (event === "assistant.delta") {
 		const text = payload?.text;
 		if (typeof text === "string" && text.length > 0) {

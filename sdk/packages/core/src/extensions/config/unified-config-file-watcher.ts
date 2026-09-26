@@ -44,6 +44,7 @@ export interface UnifiedConfigRecord<
 	id: string;
 	item: TItem;
 	filePath: string;
+	contentHash?: string;
 }
 
 export type UnifiedConfigWatcherEvent<
@@ -70,10 +71,11 @@ export type UnifiedConfigWatcherEvent<
 interface InternalRecord<TType extends string, TItem>
 	extends UnifiedConfigRecord<TType, TItem> {
 	fingerprint: string;
+	contentHash: string;
 }
 
-function toFingerprint(content: string): string {
-	return createHash("sha1").update(content).digest("hex");
+function toContentHash(content: string | Buffer): string {
+	return createHash("sha256").update(content).digest("hex");
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
@@ -374,6 +376,7 @@ export class UnifiedConfigFileWatcher<
 					id,
 					item: nextRecord.item,
 					filePath: nextRecord.filePath,
+					contentHash: nextRecord.contentHash,
 				},
 			});
 		}
@@ -414,7 +417,9 @@ export class UnifiedConfigFileWatcher<
 					continue;
 				}
 				try {
-					const content = await readFile(filePath, "utf8");
+					const contentBuffer = await readFile(filePath);
+					const content = contentBuffer.toString("utf8");
+					const contentHash = toContentHash(contentBuffer);
 					const context: UnifiedConfigFileContext<TType> = {
 						type: definition.type,
 						directoryPath: candidate.directoryPath,
@@ -432,7 +437,8 @@ export class UnifiedConfigFileWatcher<
 						id,
 						item: parsed,
 						filePath,
-						fingerprint: toFingerprint(content),
+						fingerprint: contentHash,
+						contentHash,
 					});
 				} catch (error) {
 					if (this.emitParseErrors) {

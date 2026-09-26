@@ -72,11 +72,32 @@ export interface ToolApprovalRequest {
 	 * routing key.
 	 */
 	conversationId: string;
+	/**
+	 * Immediate parent agent id when the requesting agent is delegated
+	 * (sub-agent or teammate). Absent for lead/root agent tool calls.
+	 *
+	 * Durable hosts use this to refuse a delegated run continuation until the
+	 * parent agent chain itself can be rebuilt; a delegated transcript is not
+	 * the session transcript, so it can never be replayed as a root turn.
+	 */
+	parentAgentId?: string;
+	/**
+	 * Run that owns the requesting agent's chain. Only meaningful for
+	 * delegated agents: a lead agent's own run id changes per run, so the
+	 * root run id is only stable for a delegated chain.
+	 */
+	rootRunId?: string;
 	iteration: number;
+	stepId?: string;
+	runId?: string;
+	toolCallIndex?: number;
+	assistantMessageId?: string;
+	approvalId?: string;
 	toolCallId: string;
 	toolName: string;
 	input: unknown;
 	policy: ToolPolicy;
+	signal?: AbortSignal;
 }
 
 export interface ToolApprovalResult {

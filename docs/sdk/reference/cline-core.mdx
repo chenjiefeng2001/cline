@@ -31,6 +31,10 @@ Common options:
 | `automation` | `boolean \| ClineCoreAutomationOptions` | Enable automation APIs |
 | `fetch` | `typeof fetch` | Custom fetch for local provider calls |
 
+For durable approvals, configure a stable `hub.clientId` or `remote.clientId`.
+The server binds each approval to that principal and replays pending requests
+to the same principal after reconnect.
+
 ## `start(input)`
 
 ```typescript
@@ -101,7 +105,99 @@ Returns `AgentResult | undefined`.
 | `stop(sessionId)` | Stop session |
 | `delete(sessionId)` | Delete session |
 | `restore(input)` | Restore from checkpoint |
+| `resumePendingRun(input)` | Resume one decided approval continuation |
 | `dispose(reason?)` | Dispose runtime resources |
+
+## Durable Tool Effects
+
+Local and hub execution automatically persist tool-effect records in SQLite.
+Before a tool runs, the runtime obtains an atomic, expiring claim. A repeated
+logical call replays its recorded result instead of applying the effect again.
+If a process stops while an effect is pending, the record becomes `in_doubt`
+and is not retried automatically.
+
+`restore(input)` re-keys source-session effects before applying the workspace
+checkpoint or running the restored prompt. Succeeded effects replay, uncertain
+effects remain blocked, and failures proven to be side-effect free may be
+retried. Active source sessions cannot be restored.
+
+The durable key uses session, checkpoint-stable run id, loop iteration, tool
+name, call ordinal, and input hash. A restored provider call may receive a new
+tool-call id without bypassing the record, while repeated calls in later turns
+or later positions are not collapsed. Recovery still assumes the restored model
+preserves logical call ordering and input.
+
+## Durable Tool Approvals
+
+Tool approval requests are persisted separately from tool effects in a SQLite
+approval store. The request identity uses the same durable session/run/iteration/
+tool-call scope, and the store retains the input, policy, target client, expiry,
+and terminal decision. A decision is atomic and idempotent; abort, expiry, run
+cancellation, and session deletion persist a terminal non-approval state.
+Pending requests are republished when the assigned client attaches to a session.
+
+The coordinator is shared by the local execution host and hub transport, so a
+client disconnect does not remove the durable request. The single-tool MVP
+continuation journal is available through `LocalRuntimeHost.resumePendingRun`
+and the Hub `session.resume` command; callers provide the runtime start
+configuration when rebuilding a process. `session.resume` also accepts
+`continuationKeys` to replay every decided tool call of one assistant turn as a
+batch, and `LocalRuntimeHost.resumePendingRunBatch` exposes the same operation
+locally. Resume is limited to one sequential
+server-owned tool with a matching persisted assistant message and prepared
+input. `executing` continuations are rejected by default because their outcome
+is uncertain; pass `reclaimExecuting: true` only after an operator has
+established that the prior execution lease is safe to reclaim. Recovery may
+retain bounded rules/skills/workflows selectors, a skills allowlist, and an aggregate SHA-256
+source reference, but never source contents, paths, plugins, credentials, or
+callbacks. Each turn or continuation acquires a detached, deeply frozen
+in-memory source snapshot, so active rules, skills, and workflows do not observe
+mid-run source changes. The persisted snapshot remains hash-only: recovery
+reloads current sources, compares the reference, and fails closed on drift. A
+strict versioned `RunState` manifest is persisted alongside the legacy snapshot
+with a safe resume cursor, the stable `stepId` for the pending call, and bounded
+reconstruction fingerprints; it excludes
+raw input, transcript bodies, source content, secrets, callbacks, and process
+objects. The cursor is a versioned union: `tool_call` for one pending step and
+`tool_call_batch` for a whole assistant turn, stored as an ordered,
+duplicate-free step list with contiguous call ordinals. The host writes the
+turn-level cursor once every tool call of a sequential turn has a durable
+continuation. `RunState` also carries a serializable `agent` block
+(`agentId`, plus `parentAgentId` and `rootRunId` for delegated runs) so resume
+can prove it rebuilt the same agent identity; a continuation that names a parent
+agent is refused until the agent chain itself is rebuildable. Explicit resume prefers `RunState`
+and falls back to the legacy
+snapshot, failing closed on identity, step-identity, agent-identity, or transcript drift. A batch resume
+additionally requires the recorded cursor to cover exactly the replayed
+continuations in persisted order and to match the persisted assistant turn;
+replaying a single call of a multi-tool turn is refused before the lease is
+claimed. The detached daemon automatically scans a bounded set of versioned, redacted recovery
+snapshots before schedules start, but only for stale root sessions with one
+sequential server-owned built-in tool. The snapshot and `RunState` record the
+session's real tool-execution mode, and the host forwards `maxParallelToolCalls`
+into the agent config, so a replayed session keeps the recorded mode. A one-call
+turn replays identically in either mode and stays recoverable; a session
+configured with
+`maxParallelToolCalls >= 2` is stored as `parallel` and is neither scheduled nor
+resumable while its assistant turn is incomplete. A persisted assistant message with more
+than one tool call is recorded as `parallel_or_ambiguous`; it is resumed only
+when every tool call in that turn has a decided continuation record, in which
+case the scan groups them by assistant turn and replays them in the recorded
+execution mode under
+their persisted step identities. Every tool call carries a stable `stepId`
+(`step:<runId>:<iteration>:<callIndex>`) through the tool context, approval
+request, middleware, telemetry, and the Effect Ledger, so a specific step can be
+reconciled after a restart. Incomplete tool-call groups and delegated/team
+continuation remain unsupported.
+ A2A cross-process recovery is limited to a
+stable server recovery owner, trusted daemon workspace, and server-owned
+snapshot; A2A clients receive a redacted pending-approval descriptor and may
+submit one `cline.approval.decision` structured data part to continue a live
+run. A process-level e2e fixture covers both root and A2A abrupt seed-process
+exits and recovery in fresh processes; its deterministic fake leaf agent does
+not establish external tool-side-effect idempotency. A post-restart approval
+decision triggers a bounded per-session recovery scan through the Hub approval
+boundary.
 
 ## Automation API
 

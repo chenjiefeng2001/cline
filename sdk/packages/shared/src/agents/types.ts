@@ -11,7 +11,7 @@
  */
 
 import { z } from "zod";
-import type { AgentRuntimeHooks, AgentTool } from "../agent";
+import type { AgentRuntimeHooks, AgentTool, AgentUsage } from "../agent";
 import type { ExtensionContext } from "../extensions/context";
 import type {
 	AgentExtensionApi,
@@ -519,6 +519,7 @@ export type AgentHooks = Partial<AgentRuntimeHooks>;
 export type AgentFinishReason =
 	| "completed" // Normal completion (no more tool calls)
 	| "max_iterations" // Hit the maximum iteration limit
+	| "budget_exhausted" // Stopped before another model request: run budget reached
 	| "aborted" // User or system aborted
 	| "mistake_limit" // Stopped after repeated recoverable mistakes
 	| "error"; // Unrecoverable error occurred
@@ -526,10 +527,109 @@ export type AgentFinishReason =
 export const AgentFinishReasonSchema = z.enum([
 	"completed",
 	"max_iterations",
+	"budget_exhausted",
 	"aborted",
 	"mistake_limit",
 	"error",
 ]);
+
+// =============================================================================
+// Agent Run Budget
+// =============================================================================
+
+/**
+ * Cumulative spend guardrails for a single agent run.
+ *
+ * The budget is enforced as a **stop gate**: once cumulative usage reaches a
+ * configured cap, the runtime finishes the in-flight turn (so every tool call
+ * still receives a tool result and the transcript stays valid) and then refuses
+ * to issue another model request. It is deliberately not a reservation — a
+ * single model call can overshoot a cap, exactly as turn limits do in other
+ * agent runtimes. Use it to bound spend, not to predict it.
+ *
+ * All fields are optional; an empty budget never stops a run. A cap must be a
+ * positive, finite number so a zero/absurd value fails fast at construction
+ * instead of silently disabling the guardrail.
+ */
+export interface AgentRunBudget {
+	/** Cumulative input (prompt) tokens allowed for the run. */
+	maxInputTokens?: number;
+	/** Cumulative output (completion) tokens allowed for the run. */
+	maxOutputTokens?: number;
+	/** Cumulative input + output tokens allowed for the run. */
+	maxTotalTokens?: number;
+	/** Cumulative provider cost allowed for the run, in USD. */
+	maxTotalCost?: number;
+}
+
+export const AgentRunBudgetSchema = z.object({
+	maxInputTokens: z.number().positive().finite().optional(),
+	maxOutputTokens: z.number().positive().finite().optional(),
+	maxTotalTokens: z.number().positive().finite().optional(),
+	maxTotalCost: z.number().positive().finite().optional(),
+});
+
+/** Which cap stopped a run, and the usage that reached it. */
+export type AgentRunBudgetLimit = keyof AgentRunBudget;
+
+export interface AgentRunBudgetStatus {
+	limit: AgentRunBudgetLimit;
+	/** The cap that was reached. */
+	cap: number;
+	/** Cumulative usage that reached the cap. */
+	used: number;
+	usage: AgentUsage;
+}
+
+const AGENT_RUN_BUDGET_KEYS = [
+	"maxInputTokens",
+	"maxOutputTokens",
+	"maxTotalTokens",
+	"maxTotalCost",
+] as const satisfies readonly (keyof AgentRunBudget)[];
+
+function requireBudgetCap(value: unknown, field: string): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+		throw new Error(
+			`Agent run budget ${field} must be a positive finite number`,
+		);
+	}
+	return value;
+}
+
+/**
+ * Validate a run budget and return a frozen, normalized copy, or `undefined`
+ * when no cap is set. Accepts `unknown` so the same strict check can guard a
+ * host-provided budget and a budget decoded from a durable record. Throws on an
+ * unknown field or a non-positive/non-finite cap so a misconfigured guardrail
+ * fails loudly instead of silently turning into an unbounded run.
+ */
+export function normalizeAgentRunBudget(
+	value: unknown,
+): AgentRunBudget | undefined {
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+	if (typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("Agent run budget must be an object");
+	}
+	const record = value as Record<string, unknown>;
+	for (const key of Object.keys(record)) {
+		if (!AGENT_RUN_BUDGET_KEYS.includes(key as keyof AgentRunBudget)) {
+			throw new Error(`Agent run budget contains unsupported field: ${key}`);
+		}
+	}
+	const normalized: Record<string, number> = {};
+	for (const key of AGENT_RUN_BUDGET_KEYS) {
+		const cap = record[key];
+		if (cap !== undefined) {
+			normalized[key] = requireBudgetCap(cap, key);
+		}
+	}
+	return Object.keys(normalized).length === 0
+		? undefined
+		: Object.freeze(normalized as AgentRunBudget);
+}
 
 // =============================================================================
 // Agent Usage
@@ -705,6 +805,12 @@ export interface AgentConfig {
 	 */
 	maxIterations?: number;
 	/**
+	 * Cumulative token/cost guardrails for the run. When a cap is reached the
+	 * runtime finishes the in-flight turn and then stops instead of issuing
+	 * another model request, finishing with `budget_exhausted`.
+	 */
+	budget?: AgentRunBudget;
+	/**
 	 * Maximum number of tool calls to execute concurrently in a single iteration.
 	 * @default 8
 	 */
@@ -769,6 +875,13 @@ export interface AgentConfig {
 	 * Root agents should leave this undefined.
 	 */
 	parentAgentId?: string;
+	/**
+	 * Run that owns this agent's chain. Only set for delegated agents; a root
+	 * agent's own run id changes per run, so the root run id is only stable for
+	 * a delegated chain. It is propagated into tool contexts and tool approval
+	 * requests so durable hosts can describe the agent chain.
+	 */
+	rootRunId?: string;
 	/**
 	 * Extension modules that can intercept lifecycle events and register tools/commands.
 	 */
@@ -890,6 +1003,7 @@ export const AgentConfigSchema = z.object({
 	systemPrompt: z.string(),
 	tools: z.array(z.custom<AgentTool>()),
 	maxIterations: z.number().positive().optional(),
+	budget: AgentRunBudgetSchema.optional(),
 	maxParallelToolCalls: z.number().int().positive().default(8),
 	maxTokensPerTurn: z.number().positive().optional(),
 	temperature: z.number().nonnegative().optional(),
@@ -929,6 +1043,7 @@ export const AgentConfigSchema = z.object({
 		.optional(),
 	hooks: z.custom<AgentHooks>().optional(),
 	parentAgentId: z.string().optional(),
+	rootRunId: z.string().optional(),
 	extensions: z.array(z.custom<AgentExtension>()).optional(),
 	hookErrorMode: z.enum(["ignore", "throw"]).default("ignore"),
 	toolPolicies: z

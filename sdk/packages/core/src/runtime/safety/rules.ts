@@ -1,7 +1,5 @@
-import type {
-	RuleConfig,
-	UserInstructionConfigWatcher,
-} from "../../extensions/config/user-instruction-config-loader";
+import type { RuleConfig } from "../../extensions/config/user-instruction-config-loader";
+import type { UserInstructionSourceReader } from "../../extensions/config/user-instruction-service";
 
 export function isRuleEnabled(rule: RuleConfig): boolean {
 	return rule.disabled !== true;
@@ -33,7 +31,7 @@ export function mergeRulesForSystemPrompt(
 }
 
 export function listEnabledRulesFromWatcher(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 ): RuleConfig[] {
 	const snapshot = watcher.getSnapshot("rule");
 	return [...snapshot.values()]
@@ -43,7 +41,7 @@ export function listEnabledRulesFromWatcher(
 }
 
 export function loadRulesForSystemPromptFromWatcher(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 ): string {
 	return formatRulesForSystemPrompt(listEnabledRulesFromWatcher(watcher));
 }

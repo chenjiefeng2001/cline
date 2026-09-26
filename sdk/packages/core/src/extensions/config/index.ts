@@ -42,5 +42,10 @@ export type {
 	CreateUserInstructionConfigServiceOptions,
 	UserInstructionConfigRecord,
 	UserInstructionConfigService,
+	UserInstructionSourceItem,
+	UserInstructionSourceReader,
+	UserInstructionSourceRecord,
+	UserInstructionSourceReference,
+	UserInstructionSourceSnapshot,
 } from "./user-instruction-service";
 export { createUserInstructionConfigService } from "./user-instruction-service";

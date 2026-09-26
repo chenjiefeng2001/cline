@@ -88,7 +88,10 @@ Use `z.enum` for fields with a fixed set of values. This dramatically improves a
 
 ## Using AgentToolContext
 
-The `execute` function receives a context object with execution metadata:
+The `execute` function receives a context object with execution metadata.
+`runId` identifies the logical run, and `toolCallIndex` is the stable position of
+the call within that model response; both are useful for correlation and
+idempotency diagnostics.
 
 ```typescript
 const longProcess = createTool({

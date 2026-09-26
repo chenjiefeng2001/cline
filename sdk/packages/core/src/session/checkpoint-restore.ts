@@ -34,6 +34,10 @@ export function readSessionCheckpointHistory(
 			const ref = String(entry.ref ?? "").trim();
 			const createdAt = Number(entry.createdAt ?? 0);
 			const runCount = Number(entry.runCount ?? 0);
+			const runId =
+				typeof entry.runId === "string" && entry.runId.trim()
+					? entry.runId.trim()
+					: undefined;
 			if (
 				ref.length === 0 ||
 				!Number.isFinite(createdAt) ||
@@ -46,7 +50,15 @@ export function readSessionCheckpointHistory(
 				entry.kind === "stash" || entry.kind === "commit"
 					? entry.kind
 					: undefined;
-			return [{ ref, createdAt, runCount, ...(kind ? { kind } : {}) }];
+			return [
+				{
+					ref,
+					createdAt,
+					runCount,
+					...(runId ? { runId } : {}),
+					...(kind ? { kind } : {}),
+				},
+			];
 		});
 }
 

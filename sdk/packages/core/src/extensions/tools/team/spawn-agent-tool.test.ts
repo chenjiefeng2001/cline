@@ -8,12 +8,14 @@ const runMock = vi.fn();
 const getAgentIdMock = vi.fn(() => "sub-agent-1");
 const getConversationIdMock = vi.fn(() => "conv-sub-1");
 const agentConstructorSpy = vi.fn();
+const agentConstructorDepsSpy = vi.fn();
 
 vi.mock("../../../runtime/orchestration/session-runtime-orchestrator", () => {
 	return {
 		SessionRuntime: class MockSessionRuntime {
-			constructor(config: unknown) {
+			constructor(config: unknown, deps: unknown) {
 				agentConstructorSpy(config);
+				agentConstructorDepsSpy(deps);
 			}
 
 			getAgentId(): string {
@@ -109,6 +111,108 @@ describe("createSpawnAgentTool", () => {
 				prepareTurn: expect.anything(),
 			}),
 		);
+	});
+
+	it("propagates the root session and tool wrapper to delegated agents", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		runMock.mockResolvedValue({
+			text: "ok",
+			iterations: 1,
+			finishReason: "completed",
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+		const wrapTools = vi.fn((tools) => tools);
+		const tool = createSpawnAgentTool({
+			configProvider: createDelegatedAgentConfigProvider({
+				providerId: "anthropic",
+				modelId: "mock-model",
+				sessionId: "configured-session",
+			}),
+			subAgentTools: [],
+			wrapTools,
+		});
+
+		await tool.execute(
+			{ systemPrompt: "System", task: "Task" },
+			{
+				sessionId: "root-session",
+				agentId: "parent-agent",
+				iteration: 1,
+			},
+		);
+
+		expect(agentConstructorSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ sessionId: "root-session" }),
+		);
+		expect(agentConstructorDepsSpy).toHaveBeenCalledWith({ wrapTools });
+	});
+
+	it("seeds the delegated agent chain from the parent tool context", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		runMock.mockResolvedValue({
+			text: "ok",
+			iterations: 1,
+			finishReason: "completed",
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+		const tool = createSpawnAgentTool({
+			configProvider: createDelegatedAgentConfigProvider({
+				providerId: "anthropic",
+				modelId: "mock-model",
+			}),
+			subAgentTools: [],
+		});
+
+		await tool.execute(
+			{ systemPrompt: "System", task: "Task" },
+			{
+				agentId: "grandparent-agent",
+				runId: "run-middle",
+				rootRunId: "run_root",
+				iteration: 1,
+			},
+		);
+
+		expect(agentConstructorSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				parentAgentId: "grandparent-agent",
+				rootRunId: "run_root",
+			}),
+		);
+		// The chain root is carried on the orchestrator deps, never as the
+		// child's own first run id.
+		expect(agentConstructorDepsSpy).toHaveBeenCalledWith({
+			chainRootRunId: "run_root",
+		});
+	});
+
+	it("uses the parent run id as the chain root for a lead agent", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		runMock.mockResolvedValue({
+			text: "ok",
+			iterations: 1,
+			finishReason: "completed",
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+		const tool = createSpawnAgentTool({
+			configProvider: createDelegatedAgentConfigProvider({
+				providerId: "anthropic",
+				modelId: "mock-model",
+			}),
+			subAgentTools: [],
+		});
+
+		await tool.execute(
+			{ systemPrompt: "System", task: "Task" },
+			{ agentId: "lead-agent", runId: "run_lead", iteration: 1 },
+		);
+
+		expect(agentConstructorSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ rootRunId: "run_lead" }),
+		);
+		expect(agentConstructorDepsSpy).toHaveBeenCalledWith({
+			chainRootRunId: "run_lead",
+		});
 	});
 
 	it("passes extension hooks through delegated config", async () => {

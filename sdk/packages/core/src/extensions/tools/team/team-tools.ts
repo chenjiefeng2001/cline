@@ -172,6 +172,7 @@ export interface CreateAgentTeamsToolsOptions {
 	includeSpawnTool?: boolean;
 	includeManagementTools?: boolean;
 	onLeadToolsUnlocked?: (tools: AgentTool[]) => void;
+	wrapTools?: (tools: AgentTool[]) => AgentTool[];
 }
 
 export interface BootstrapAgentTeamsOptions {
@@ -184,6 +185,7 @@ export interface BootstrapAgentTeamsOptions {
 	includeLeadSpawnTool?: boolean;
 	includeLeadManagementTools?: boolean;
 	onLeadToolsUnlocked?: (tools: AgentTool[]) => void;
+	wrapTools?: (tools: AgentTool[]) => AgentTool[];
 }
 
 export interface BootstrapAgentTeamsResult {
@@ -242,6 +244,7 @@ function spawnTeamTeammate(
 			tools: teammateTools,
 			maxIterations: options.spec.maxIterations,
 			cwd: options.teammateConfigProvider.getRuntimeConfig().cwd,
+			sessionId: options.teammateConfigProvider.getRuntimeConfig().sessionId,
 		}),
 	});
 }
@@ -261,6 +264,7 @@ export function bootstrapAgentTeams(
 		includeSpawnTool: options.includeLeadSpawnTool,
 		includeManagementTools: options.includeLeadManagementTools,
 		onLeadToolsUnlocked: options.onLeadToolsUnlocked,
+		wrapTools: options.wrapTools,
 	});
 
 	const restoredTeammates: string[] = [];

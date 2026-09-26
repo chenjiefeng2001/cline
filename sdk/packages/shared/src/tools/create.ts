@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentTool, AgentToolContext } from "../agent";
-import { zodToJsonSchema } from "../parse/zod";
+import { validateWithZod, zodToJsonSchema } from "../parse/zod";
 
 function normalizeToolInputSchema(
 	inputSchema: Record<string, unknown>,
@@ -87,6 +87,7 @@ export function createTool<TInput, TOutput>(config: {
 	timeoutMs?: number;
 	retryable?: boolean;
 	maxRetries?: number;
+	validateInput?: (input: unknown) => unknown;
 }): AgentTool<TInput, TOutput>;
 export function createTool<TSchema extends z.ZodTypeAny, TOutput>(config: {
 	name: string;
@@ -100,6 +101,7 @@ export function createTool<TSchema extends z.ZodTypeAny, TOutput>(config: {
 	timeoutMs?: number;
 	retryable?: boolean;
 	maxRetries?: number;
+	validateInput?: (input: unknown) => unknown;
 }): AgentTool<z.infer<TSchema>, TOutput>;
 export function createTool<TInput, TOutput>(config: {
 	name: string;
@@ -110,12 +112,18 @@ export function createTool<TInput, TOutput>(config: {
 	timeoutMs?: number;
 	retryable?: boolean;
 	maxRetries?: number;
+	validateInput?: (input: unknown) => unknown;
 }): AgentTool<TInput, TOutput> {
+	const inputSchemaSource = config.inputSchema;
 	const inputSchema = normalizeToolInputSchema(
-		config.inputSchema instanceof z.ZodType
-			? zodToJsonSchema(config.inputSchema)
-			: config.inputSchema,
+		inputSchemaSource instanceof z.ZodType
+			? zodToJsonSchema(inputSchemaSource)
+			: inputSchemaSource,
 	);
+	const validateInput =
+		inputSchemaSource instanceof z.ZodType
+			? (input: unknown) => validateWithZod(inputSchemaSource, input)
+			: config.validateInput;
 
 	return {
 		name: config.name,
@@ -123,8 +131,9 @@ export function createTool<TInput, TOutput>(config: {
 		inputSchema,
 		lifecycle: config.lifecycle,
 		timeoutMs: config.timeoutMs ?? 30_000,
-		retryable: config.retryable ?? true,
-		maxRetries: config.maxRetries ?? 3,
+		retryable: config.retryable ?? false,
+		maxRetries: config.maxRetries ?? 0,
+		validateInput,
 		execute: config.execute,
 	};
 }

@@ -64,6 +64,15 @@ const result = await agent.run("What's the weather in San Francisco?");
 console.log(result.outputText);
 ```
 
+## Single-Tool Resume
+
+For a host-owned approval boundary, `AgentRuntime.resumePendingToolCall()`
+rehydrates a persisted assistant tool-call message, skips model generation and
+approval for that call, executes or records the decided result, and then
+continues with the next model iteration. The input must match the original
+sequential run identity and prepared tool input; malformed or multi-call
+boundaries fail closed.
+
 ## Two Ways to Configure
 
 `Agent` / `AgentRuntime` accepts two config shapes:
@@ -126,7 +135,12 @@ const summarize: AgentTool<{ text: string }, { summary: string }> = {
 
 The runtime wraps successful tool outputs in an internal tool-result message.
 Throw from `execute(...)` to report a tool failure, or use an `afterTool` hook
-to transform the internal `AgentToolResult` envelope.
+to transform the internal `AgentToolResult` envelope. `createTool()` derives an
+input validator from Zod schemas; raw JSON Schema tools can provide
+`validateInput`. Each attempt receives a tool-scoped `context.signal` and honors
+`timeoutMs`. Retries are disabled by default and occur only when a tool opts in
+with `retryable: true` and `maxRetries`. Parallel execution waits for every tool
+in the batch to settle; `maxParallelToolCalls` can bound worker concurrency.
 
 ### Events
 

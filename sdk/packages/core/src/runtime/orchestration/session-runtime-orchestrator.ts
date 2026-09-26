@@ -19,7 +19,11 @@
  * OAuth-retry and run replay feasible.
  */
 
-import type { AgentRuntime } from "@cline/agents";
+import type {
+	AgentRuntime,
+	AgentRuntimeResumeToolBatch,
+	AgentRuntimeResumeToolCall,
+} from "@cline/agents";
 import { createAgentRuntime } from "@cline/agents";
 import {
 	type AgentConfig,
@@ -251,6 +255,19 @@ export type SessionEventListener = (event: AgentEvent) => void;
 export interface SessionRuntimeOrchestratorDeps {
 	readonly logger?: BasicLogger;
 	readonly telemetry?: ITelemetryService;
+	readonly initialRunId?: string;
+	/**
+	 * Run that owns this agent's chain. Only meaningful for delegated agents;
+	 * the lead agent's own run id changes per run, so the root run id is only
+	 * stable for a delegated chain. It is deliberately separate from
+	 * `initialRunId`, which instead seeds the id of this agent's first run.
+	 */
+	readonly chainRootRunId?: string;
+	readonly runtimeIdentity?: {
+		agentId: string;
+		conversationId: string;
+	};
+	readonly wrapTools?: (tools: AgentTool[]) => AgentTool[];
 	/**
 	 * Test hook: override the `AgentRuntime` factory. Production
 	 * callers leave this undefined and get the real `createAgentRuntime`.
@@ -311,6 +328,9 @@ export class SessionRuntime {
 	private readonly createAgentRuntimeImpl: (
 		config: Parameters<typeof createAgentRuntime>[0],
 	) => AgentRuntime;
+	private readonly wrapTools?: (tools: AgentTool[]) => AgentTool[];
+	private initialRunId?: string;
+	private readonly chainRootRunId?: string;
 
 	/** Stable run id for the active run. */
 	private activeRunId: string | null = null;
@@ -362,16 +382,22 @@ export class SessionRuntime {
 
 	constructor(config: AgentConfig, deps: SessionRuntimeOrchestratorDeps = {}) {
 		this.config = config;
-		this.agentId = `agent_${Date.now()}_${Math.random()
-			.toString(36)
-			.slice(2, 8)}`;
+		this.agentId =
+			deps.runtimeIdentity?.agentId ??
+			`agent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 		this.parentAgentId = config.parentAgentId;
 		this.logger = deps.logger ?? config.logger;
 		this.telemetry = deps.telemetry ?? config.telemetry;
 		this.createAgentRuntimeImpl =
 			deps.createAgentRuntimeImpl ?? createAgentRuntime;
+		this.wrapTools = deps.wrapTools;
+		this.initialRunId = deps.initialRunId;
+		this.chainRootRunId = deps.chainRootRunId;
 
-		this.conversation = new ConversationStore(config.initialMessages);
+		this.conversation = new ConversationStore(
+			config.initialMessages,
+			deps.runtimeIdentity?.conversationId,
+		);
 		this.messageBuilder = new MessageBuilder(getMessageBuilderOptionsFromEnv());
 		this.contributionRegistry = createContributionRegistry<
 			AgentExtension,
@@ -446,6 +472,19 @@ export class SessionRuntime {
 
 	getAgentId(): string {
 		return this.agentId;
+	}
+
+	/** Immediate parent agent for delegated (sub-agent/team) sessions. */
+	getParentAgentId(): string | undefined {
+		return this.parentAgentId;
+	}
+
+	/**
+	 * Run that owns this agent chain. Only meaningful for delegated sessions;
+	 * root sessions return `undefined` because their run id changes per run.
+	 */
+	getRootRunId(): string | undefined {
+		return this.parentAgentId ? this.chainRootRunId : undefined;
 	}
 
 	getConversationId(): string {
@@ -669,6 +708,24 @@ export class SessionRuntime {
 		});
 	}
 
+	resumePendingToolCall(
+		input: AgentRuntimeResumeToolCall,
+	): Promise<AgentResult> {
+		return this.executeRun({
+			isContinue: true,
+			resume: input,
+		});
+	}
+
+	resumePendingToolBatch(
+		input: AgentRuntimeResumeToolBatch,
+	): Promise<AgentResult> {
+		return this.executeRun({
+			isContinue: true,
+			resumeBatch: input,
+		});
+	}
+
 	// -------------------------------------------------------------------
 	// Private implementation
 	// -------------------------------------------------------------------
@@ -689,6 +746,8 @@ export class SessionRuntime {
 		userImages?: string[];
 		userFiles?: string[];
 		isContinue: boolean;
+		resume?: AgentRuntimeResumeToolCall;
+		resumeBatch?: AgentRuntimeResumeToolBatch;
 	}): Promise<AgentResult> {
 		let activePromise!: Promise<AgentResult>;
 		activePromise = this.executeRunInternal(input).finally(() => {
@@ -705,6 +764,8 @@ export class SessionRuntime {
 		userImages?: string[];
 		userFiles?: string[];
 		isContinue: boolean;
+		resume?: AgentRuntimeResumeToolCall;
+		resumeBatch?: AgentRuntimeResumeToolBatch;
 	}): Promise<AgentResult> {
 		if (this.shutdownCalled) {
 			throw new Error(
@@ -719,9 +780,11 @@ export class SessionRuntime {
 		this.running = true;
 		this.abortRequested = false;
 		this.abortReason = undefined;
-		this.activeRunId = `run_${Date.now()}_${Math.random()
-			.toString(36)
-			.slice(2, 8)}`;
+		this.activeRunId =
+			input.resume?.runId ??
+			this.initialRunId ??
+			`run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		this.initialRunId = undefined;
 		// Lazily initialize contribution-registry extensions on the
 		// first run, before runtime construction.
 		await this.ensureExtensionsInitialized();
@@ -789,7 +852,8 @@ export class SessionRuntime {
 		}
 		const conversationId = this.conversation.getConversationId();
 		const modelInfo = tryGetModelInfo(this.config);
-		const tools = Array.from(mergedToolsByName.values());
+		const mergedTools = Array.from(mergedToolsByName.values());
+		const tools = this.wrapTools ? this.wrapTools(mergedTools) : mergedTools;
 		// Seed initialMessages with the full prior transcript (including
 		// the user message we just appended) so multi-turn history is
 		// preserved across runs. Fixes P1 #1: prior turns were silently
@@ -802,9 +866,11 @@ export class SessionRuntime {
 		const runtimeConfig = createAgentRuntimeConfig({
 			agentConfig: this.config,
 			sessionId: this.config.sessionId,
+			runId: this.activeRunId ?? undefined,
 			agentId: this.agentId,
 			conversationId,
 			parentAgentId: this.parentAgentId,
+			rootRunId: this.getRootRunId(),
 			model: agentModel,
 			logger: this.logger,
 			telemetry: this.telemetry,
@@ -839,7 +905,11 @@ export class SessionRuntime {
 			// user message we already seeded via `initialMessages`. The
 			// runtime's `normalizeInput` treats `""`/`undefined` as
 			// "no extra messages".
-			if (input.isContinue) {
+			if (input.resume) {
+				runResult = await runtime.resumePendingToolCall(input.resume);
+			} else if (input.resumeBatch) {
+				runResult = await runtime.resumePendingToolBatch(input.resumeBatch);
+			} else if (input.isContinue) {
 				runResult = await runtime.continue(undefined);
 			} else {
 				runResult = await runtime.run("");
@@ -1365,6 +1435,8 @@ function deriveFinishReason(
 	switch (runResult.status) {
 		case "completed":
 			return "completed";
+		case "budget_exhausted":
+			return "budget_exhausted";
 		case "aborted":
 			return "aborted";
 		case "failed":

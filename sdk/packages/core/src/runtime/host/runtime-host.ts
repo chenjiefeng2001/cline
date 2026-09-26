@@ -9,6 +9,7 @@ import type { CheckpointEntry } from "../../hooks/checkpoint-hooks";
 import type { ProviderSettings } from "../../services/llms/provider-settings";
 import type { SessionCompactionState } from "../../session/models/session-compaction";
 import type { SessionManifest } from "../../session/models/session-manifest";
+import type { SessionCheckpointRestoreContext } from "../../session/session-versioning-service";
 import type { SessionSource } from "../../types/common";
 import type { CoreSessionConfig } from "../../types/config";
 import type {
@@ -99,7 +100,13 @@ export interface LocalRuntimeStartOptions {
 	onTeamRestored?: () => void;
 }
 
+export const RUNTIME_INTERNAL_RECOVERY_OWNER = Symbol(
+	"cline.runtime.recoveryOwner",
+);
+
 export interface StartSessionInput {
+	[RUNTIME_INTERNAL_RECOVERY_OWNER]?: string;
+	recoveryOwner?: string;
 	config: RuntimeSessionConfig;
 	source?: SessionSource;
 	prompt?: string;
@@ -117,6 +124,10 @@ export interface StartSessionInput {
 	localRuntime?: LocalRuntimeStartOptions;
 	capabilities?: RuntimeCapabilities;
 	toolPolicies?: import("@cline/shared").AgentConfig["toolPolicies"];
+	runtimeIdentity?: {
+		agentId: string;
+		conversationId: string;
+	};
 }
 
 export function splitCoreSessionConfig(config: CoreSessionConfig): {
@@ -284,6 +295,10 @@ export interface RestoreSessionInput {
 		omitCheckpointMessageFromSession?: boolean;
 	};
 	start?: StartSessionInput;
+	buildStartInput?: (
+		context: SessionCheckpointRestoreContext,
+		start: StartSessionInput,
+	) => StartSessionInput | Promise<StartSessionInput>;
 }
 
 export interface RestoreSessionResult {

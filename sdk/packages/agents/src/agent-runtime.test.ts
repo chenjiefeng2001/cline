@@ -5,11 +5,12 @@ import type {
 	AgentModelRequest,
 	AgentRuntimePlugin,
 	AgentTool,
+	AgentToolContext,
 	ITelemetryService,
 } from "@cline/shared";
 import { AGENT_UNEXPECTED_REASONING_TOKENS_EVENT } from "@cline/shared";
 import { describe, expect, it, vi } from "vitest";
-import { AgentRuntime } from "./index";
+import { AgentRuntime, type AgentRuntimeResumeToolCall } from "./index";
 
 class ScriptedModel implements AgentModel {
 	public readonly requests: AgentModelRequest[] = [];
@@ -67,6 +68,55 @@ describe("AgentRuntime", () => {
 		expect(result.outputText).toBe("hello");
 		expect(result.messages).toHaveLength(2);
 		expect(model.requests).toHaveLength(1);
+	});
+
+	it("consumes a configured run id after the first execution", async () => {
+		const model = new ScriptedModel([
+			() => [
+				{ type: "text-delta", text: "first" },
+				{ type: "finish", reason: "stop" },
+			],
+			() => [
+				{ type: "text-delta", text: "second" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({ model, runId: "configured-run" });
+
+		const first = await runtime.run("First");
+		const second = await runtime.continue("Second");
+
+		expect(first.runId).toBe("configured-run");
+		expect(second.runId).toMatch(/^run_/);
+		expect(second.runId).not.toBe("configured-run");
+	});
+
+	it("calls afterRun before the terminal event for a completed run", async () => {
+		const lifecycle: string[] = [];
+		const model = new ScriptedModel([
+			() => [
+				{ type: "text-delta", text: "done" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			hooks: {
+				afterRun: ({ result }) => {
+					lifecycle.push(`afterRun:${result.status}`);
+				},
+				onEvent: (event) => {
+					if (event.type === "run-finished" || event.type === "run-failed") {
+						lifecycle.push(`event:${event.type}`);
+					}
+				},
+			},
+		});
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(lifecycle).toEqual(["afterRun:completed", "event:run-finished"]);
 	});
 
 	it("fails a turn that hits the model output token limit before completion", async () => {
@@ -148,6 +198,32 @@ describe("AgentRuntime", () => {
 		expect(result.messages[0]?.role).toBe("user");
 	});
 
+	it("calls afterRun before run-failed for a failed run", async () => {
+		const lifecycle: string[] = [];
+		const model = new ScriptedModel([
+			() => [{ type: "finish", reason: "error", error: "upstream failed" }],
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			hooks: {
+				afterRun: ({ result }) => {
+					lifecycle.push(`afterRun:${result.status}`);
+				},
+				onEvent: (event) => {
+					if (event.type === "run-finished" || event.type === "run-failed") {
+						lifecycle.push(`event:${event.type}`);
+					}
+				},
+			},
+		});
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("failed");
+		expect(result.error?.message).toBe("upstream failed");
+		expect(lifecycle).toEqual(["afterRun:failed", "event:run-failed"]);
+	});
+
 	it("executes a tool call and continues the loop", async () => {
 		const model = new ScriptedModel([
 			() => [
@@ -168,7 +244,23 @@ describe("AgentRuntime", () => {
 				];
 			},
 		]);
-		const runtime = new AgentRuntime({ model, tools: [createEchoTool()] });
+		const execute = vi.fn(
+			async (input: { text: string }, context: AgentToolContext) => ({
+				echoed: input.text,
+				runId: context.runId,
+				stepId: context.stepId,
+				toolCallIndex: context.toolCallIndex,
+			}),
+		);
+		const tool = {
+			...createEchoTool(),
+			execute,
+		} as AgentTool<{ text: string }, unknown>;
+		const runtime = new AgentRuntime({
+			model,
+			tools: [tool],
+			runId: "run_fixed",
+		});
 
 		const result = await runtime.run("Start");
 
@@ -177,6 +269,408 @@ describe("AgentRuntime", () => {
 			result.messages.filter((message) => message.role === "tool"),
 		).toHaveLength(1);
 		expect(result.outputText).toBe("done");
+		expect(result.runId).toBe("run_fixed");
+		expect(execute).toHaveBeenCalledWith(
+			{ text: "hi" },
+			expect.objectContaining({
+				runId: "run_fixed",
+				stepId: "step:run_fixed:1:0",
+				toolCallIndex: 0,
+			}),
+		);
+	});
+
+	it("validates tool input before execution and returns a model-visible error", async () => {
+		const executeTool = vi.fn(async () => ({ ok: true }));
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_validation",
+					toolName: "validated",
+					inputText: '{"value":"wrong"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			(request) => {
+				expect(request.messages.at(-1)?.content[0]).toMatchObject({
+					type: "tool-result",
+					isError: true,
+					output: {
+						error: expect.stringContaining("value must be a number"),
+					},
+				});
+				return [
+					{ type: "text-delta", text: "validation recovered" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const tool: AgentTool<{ value: number }> = {
+			name: "validated",
+			description: "Validated tool",
+			inputSchema: { type: "object" },
+			validateInput: (input) => {
+				const value = (input as { value?: unknown }).value;
+				if (typeof value !== "number") {
+					throw new Error("value must be a number");
+				}
+				return { value };
+			},
+			execute: executeTool,
+		};
+		const runtime = new AgentRuntime({ model, tools: [tool] });
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("validation recovered");
+		expect(executeTool).not.toHaveBeenCalled();
+	});
+
+	it("times out tool execution without aborting the agent run", async () => {
+		let observedAbort = false;
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_timeout",
+					toolName: "slow",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			(request) => {
+				expect(request.messages.at(-1)?.content[0]).toMatchObject({
+					type: "tool-result",
+					isError: true,
+					output: {
+						error: expect.stringContaining("timed out after 10ms"),
+					},
+				});
+				return [
+					{ type: "text-delta", text: "timeout recovered" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const slowTool: AgentTool = {
+			name: "slow",
+			description: "Slow tool",
+			inputSchema: { type: "object" },
+			timeoutMs: 10,
+			execute: async (_input, context) =>
+				new Promise((_resolve, reject) => {
+					const onAbort = (): void => {
+						observedAbort = true;
+						reject(context.signal?.reason ?? new Error("aborted"));
+					};
+					if (context.signal?.aborted) {
+						onAbort();
+					} else {
+						context.signal?.addEventListener("abort", onAbort, { once: true });
+					}
+				}),
+		};
+		const runtime = new AgentRuntime({ model, tools: [slowTool] });
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("timeout recovered");
+		expect(observedAbort).toBe(true);
+	});
+
+	it("retries explicitly retryable tools with bounded backoff", async () => {
+		let attempts = 0;
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_retry",
+					toolName: "retryable",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			(request) => {
+				expect(request.messages.at(-1)?.content[0]).toMatchObject({
+					type: "tool-result",
+					output: { attempts: 3 },
+				});
+				return [
+					{ type: "text-delta", text: "retry recovered" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const retryableTool: AgentTool = {
+			name: "retryable",
+			description: "Retryable tool",
+			inputSchema: { type: "object" },
+			timeoutMs: 100,
+			retryable: true,
+			maxRetries: 2,
+			execute: async () => {
+				attempts += 1;
+				if (attempts < 3) {
+					throw new Error("transient failure");
+				}
+				return { attempts };
+			},
+		};
+		const runtime = new AgentRuntime({
+			model,
+			tools: [retryableTool],
+			toolRetryDelayMs: 0,
+		});
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("retry recovered");
+		expect(attempts).toBe(3);
+	});
+
+	it("does not retry tools unless explicitly marked retryable", async () => {
+		let attempts = 0;
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_no_retry",
+					toolName: "non_retryable",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "no retry" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const nonRetryableTool: AgentTool = {
+			name: "non_retryable",
+			description: "Non-retryable tool",
+			inputSchema: { type: "object" },
+			retryable: false,
+			maxRetries: 3,
+			execute: async () => {
+				attempts += 1;
+				throw new Error("permanent failure");
+			},
+		};
+		const runtime = new AgentRuntime({ model, tools: [nonRetryableTool] });
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(attempts).toBe(1);
+		expect(
+			result.messages.find((message) => message.role === "tool"),
+		).toMatchObject({
+			content: [
+				{
+					isError: true,
+					output: { error: "permanent failure" },
+				},
+			],
+		});
+	});
+
+	it("waits for parallel tools and preserves every tool result after a hook failure", async () => {
+		let slowFinished = false;
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_bad",
+					toolName: "bad",
+					inputText: "{}",
+				},
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_slow",
+					toolName: "slow",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			(request) => {
+				const toolMessages = request.messages.slice(-2);
+				expect(toolMessages).toMatchObject([
+					{
+						role: "tool",
+						content: [
+							{
+								toolCallId: "call_bad",
+								isError: true,
+								output: { error: "after hook failed" },
+							},
+						],
+					},
+					{
+						role: "tool",
+						content: [
+							{
+								toolCallId: "call_slow",
+								output: { ok: true },
+							},
+						],
+					},
+				]);
+				return [
+					{ type: "text-delta", text: "parallel recovered" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			toolExecution: "parallel",
+			tools: [
+				{
+					name: "bad",
+					description: "Bad hook tool",
+					inputSchema: { type: "object" },
+					execute: async () => ({ ok: true }),
+				},
+				{
+					name: "slow",
+					description: "Slow successful tool",
+					inputSchema: { type: "object" },
+					execute: async () => {
+						await new Promise((resolve) => setTimeout(resolve, 20));
+						slowFinished = true;
+						return { ok: true };
+					},
+				},
+			],
+			hooks: {
+				afterTool: ({ tool }) => {
+					if (tool.name === "bad") {
+						throw new Error("after hook failed");
+					}
+				},
+			},
+		});
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("parallel recovered");
+		expect(slowFinished).toBe(true);
+		expect(
+			result.messages.filter((message) => message.role === "tool"),
+		).toHaveLength(2);
+	});
+
+	it("limits parallel tool concurrency without reordering results", async () => {
+		let active = 0;
+		let maxActive = 0;
+		const model = new ScriptedModel([
+			() => [
+				...["one", "two", "three"].map((id) => ({
+					type: "tool-call-delta" as const,
+					toolCallId: `call_${id}`,
+					toolName: "limited",
+					inputText: "{}",
+				})),
+				{ type: "finish", reason: "tool-calls" },
+			],
+			(request) => {
+				expect(request.messages.slice(-3)).toMatchObject([
+					{ content: [{ toolCallId: "call_one" }] },
+					{ content: [{ toolCallId: "call_two" }] },
+					{ content: [{ toolCallId: "call_three" }] },
+				]);
+				return [
+					{ type: "text-delta", text: "limited" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			toolExecution: "parallel",
+			maxParallelToolCalls: 2,
+			tools: [
+				{
+					name: "limited",
+					description: "Concurrency-limited tool",
+					inputSchema: { type: "object" },
+					execute: async () => {
+						active += 1;
+						maxActive = Math.max(maxActive, active);
+						await new Promise((resolve) => setTimeout(resolve, 15));
+						active -= 1;
+						return { ok: true };
+					},
+				},
+			],
+		});
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(maxActive).toBe(2);
+		expect(
+			result.messages.filter((message) => message.role === "tool"),
+		).toHaveLength(3);
+	});
+
+	it("settles every tool in a terminal batch before completing the run", async () => {
+		let regularFinished = false;
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_terminal",
+					toolName: "finish",
+					inputText: "{}",
+				},
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_regular",
+					toolName: "regular",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			toolExecution: "parallel",
+			tools: [
+				{
+					name: "finish",
+					description: "Terminal tool",
+					inputSchema: { type: "object" },
+					lifecycle: { completesRun: true },
+					execute: async () => "finished",
+				},
+				{
+					name: "regular",
+					description: "Regular batch tool",
+					inputSchema: { type: "object" },
+					execute: async () => {
+						await new Promise((resolve) => setTimeout(resolve, 20));
+						regularFinished = true;
+						return { ok: true };
+					},
+				},
+			],
+		});
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(result.iterations).toBe(1);
+		expect(result.outputText).toBe("finished");
+		expect(regularFinished).toBe(true);
+		expect(
+			result.messages.filter((message) => message.role === "tool"),
+		).toHaveLength(2);
 	});
 
 	it("injects a pending user message after tool results and before the next model request", async () => {
@@ -668,16 +1162,124 @@ describe("AgentRuntime", () => {
 		expect(result.status).toBe("completed");
 		expect(result.outputText).toBe("approval handled");
 		expect(executeTool).not.toHaveBeenCalled();
-		expect(requestToolApproval).toHaveBeenCalledWith({
-			sessionId: "session_test",
-			agentId: "agent_test",
-			conversationId: "conversation_test",
-			iteration: 1,
-			toolCallId: "call_approval",
-			toolName: "echo",
-			input: { text: "hi" },
-			policy: { autoApprove: false },
+		expect(requestToolApproval).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sessionId: "session_test",
+				agentId: "agent_test",
+				conversationId: "conversation_test",
+				iteration: 1,
+				runId: expect.any(String),
+				stepId: expect.any(String),
+				assistantMessageId: expect.any(String),
+				toolCallIndex: 0,
+				toolCallId: "call_approval",
+				toolName: "echo",
+				input: { text: "hi" },
+				policy: { autoApprove: false },
+				signal: expect.anything(),
+			}),
+		);
+	});
+
+	it("carries the delegated agent chain into tool contexts and approvals", async () => {
+		const seenContexts: AgentToolContext[] = [];
+		const requestToolApproval = vi.fn(async () => ({ approved: true }));
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_chain",
+					toolName: "echo",
+					inputText: '{"text":"hi"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "done" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			sessionId: "session_chain",
+			agentId: "agent_child",
+			parentAgentId: "agent_parent",
+			rootRunId: "run_root",
+			conversationId: "conversation_child",
+			model,
+			tools: [
+				{
+					name: "echo",
+					description: "Echo input text",
+					inputSchema: { type: "object" },
+					execute: async (_input, context) => {
+						seenContexts.push(context);
+						return { echoed: "hi" };
+					},
+				},
+			],
+			toolPolicies: { "*": { autoApprove: false } },
+			requestToolApproval,
 		});
+
+		await runtime.run("Start");
+
+		expect(requestToolApproval).toHaveBeenCalledWith(
+			expect.objectContaining({
+				agentId: "agent_child",
+				parentAgentId: "agent_parent",
+				rootRunId: "run_root",
+			}),
+		);
+		expect(seenContexts[0]).toMatchObject({
+			agentId: "agent_child",
+			parentAgentId: "agent_parent",
+			rootRunId: "run_root",
+		});
+	});
+
+	it("omits the agent chain for a lead agent", async () => {
+		const requestToolApproval = vi.fn(async () => ({ approved: true }));
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_lead",
+					toolName: "echo",
+					inputText: '{"text":"hi"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "done" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			sessionId: "session_lead",
+			agentId: "agent_lead",
+			conversationId: "conversation_lead",
+			model,
+			tools: [
+				{
+					name: "echo",
+					description: "Echo input text",
+					inputSchema: { type: "object" },
+					execute: async () => ({ echoed: "hi" }),
+				},
+			],
+			toolPolicies: { "*": { autoApprove: false } },
+			requestToolApproval,
+		});
+
+		await runtime.run("Start");
+
+		const request = requestToolApproval.mock.calls[0]?.[0] as Record<
+			string,
+			unknown
+		>;
+		expect(request.agentId).toBe("agent_lead");
+		expect(request).not.toHaveProperty("parentAgentId");
+		expect(request).not.toHaveProperty("rootRunId");
 	});
 
 	it("applies beforeTool approval policy overrides before executing tools", async () => {
@@ -735,16 +1337,23 @@ describe("AgentRuntime", () => {
 		expect(result.status).toBe("completed");
 		expect(result.outputText).toBe("live policy handled");
 		expect(executeTool).not.toHaveBeenCalled();
-		expect(requestToolApproval).toHaveBeenCalledWith({
-			sessionId: "session_test",
-			agentId: "agent_test",
-			conversationId: "conversation_test",
-			iteration: 1,
-			toolCallId: "call_live_policy",
-			toolName: "echo",
-			input: { text: "hi" },
-			policy: { autoApprove: false },
-		});
+		expect(requestToolApproval).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sessionId: "session_test",
+				agentId: "agent_test",
+				conversationId: "conversation_test",
+				iteration: 1,
+				runId: expect.any(String),
+				stepId: expect.any(String),
+				assistantMessageId: expect.any(String),
+				toolCallIndex: 0,
+				toolCallId: "call_live_policy",
+				toolName: "echo",
+				input: { text: "hi" },
+				policy: { autoApprove: false },
+				signal: expect.anything(),
+			}),
+		);
 	});
 
 	it("stores tool calls but skips execution when metadata disables external execution", async () => {
@@ -1065,6 +1674,7 @@ describe("AgentRuntime", () => {
 
 	it("unwinds cleanly when beforeRun stops the run", async () => {
 		const events: string[] = [];
+		const afterRunStatuses: string[] = [];
 		let stopNextRun = true;
 		const runtime = new AgentRuntime({
 			model: new ScriptedModel([
@@ -1081,6 +1691,9 @@ describe("AgentRuntime", () => {
 					stopNextRun = false;
 					return { stop: true, reason: "blocked" };
 				},
+				afterRun: ({ result }) => {
+					afterRunStatuses.push(result.status);
+				},
 			},
 		});
 		runtime.subscribe((event) => {
@@ -1092,6 +1705,7 @@ describe("AgentRuntime", () => {
 
 		expect(first.status).toBe("aborted");
 		expect(first.error).toBeUndefined();
+		expect(afterRunStatuses).toEqual(["aborted", "completed"]);
 		expect(events[0]).toBe("run-finished");
 		expect(events).toContain("run-started");
 		expect(events.at(-1)).toBe("run-finished");
@@ -1859,5 +2473,726 @@ describe("AgentRuntime", () => {
 			outputTokens: 40,
 			totalCost: 1.0,
 		});
+	});
+
+	it("stops before the next model request once the token budget is reached", async () => {
+		const notices: Array<{ message: string; metadata?: unknown }> = [];
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "usage",
+					usage: { inputTokens: 100, outputTokens: 20, totalCost: 0.5 },
+				},
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_budget",
+					toolName: "echo",
+					inputText: '{"text":"one"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			tools: [createEchoTool()],
+			budget: { maxTotalTokens: 100 },
+			hooks: {
+				onEvent: (event) => {
+					if (event.type === "status-notice") {
+						notices.push({
+							message: event.message,
+							metadata: event.metadata,
+						});
+					}
+				},
+			},
+		});
+
+		const result = await runtime.run("Go");
+
+		// The turn that crossed the cap still completes — the tool call keeps its
+		// tool result — but no second model request is paid for.
+		expect(result.status).toBe("budget_exhausted");
+		expect(result.iterations).toBe(1);
+		expect(result.usage).toMatchObject({
+			inputTokens: 100,
+			outputTokens: 20,
+			totalCost: 0.5,
+		});
+		expect(model.requests).toHaveLength(1);
+		const toolMessage = result.messages.find(
+			(message) => message.role === "tool",
+		) as AgentMessage | undefined;
+		expect(toolMessage?.content[0]).toMatchObject({
+			type: "tool-result",
+			output: { echoed: "one" },
+		});
+		expect(notices).toHaveLength(1);
+		expect(notices[0]?.metadata).toMatchObject({
+			kind: "budget_exhausted",
+			limit: "maxTotalTokens",
+			cap: 100,
+			used: 120,
+		});
+	});
+
+	it("keeps running while usage stays under every configured cap", async () => {
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "usage",
+					usage: { inputTokens: 10, outputTokens: 5, totalCost: 0.01 },
+				},
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_ok",
+					toolName: "echo",
+					inputText: '{"text":"one"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{
+					type: "usage",
+					usage: { inputTokens: 20, outputTokens: 8, totalCost: 0.02 },
+				},
+				{ type: "text-delta", text: "all done" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			tools: [createEchoTool()],
+			budget: { maxTotalTokens: 10_000, maxTotalCost: 5 },
+		});
+
+		const result = await runtime.run("Go");
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("all done");
+		expect(result.usage).toMatchObject({
+			inputTokens: 30,
+			outputTokens: 13,
+		});
+	});
+
+	it("stops on a cost cap independently of the token caps", async () => {
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "usage",
+					usage: { inputTokens: 1, outputTokens: 1, totalCost: 0.3 },
+				},
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_cost",
+					toolName: "echo",
+					inputText: '{"text":"one"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			tools: [createEchoTool()],
+			// Token caps are effectively unlimited, so only cost can stop this run.
+			budget: { maxTotalTokens: 1_000_000, maxTotalCost: 0.25 },
+		});
+
+		const result = await runtime.run("Go");
+
+		expect(result.status).toBe("budget_exhausted");
+		expect(model.requests).toHaveLength(1);
+	});
+
+	it("rejects a malformed run budget instead of running unbounded", () => {
+		expect(
+			() => new AgentRuntime({ model: new ScriptedModel([]), budget: {} }),
+		).not.toThrow();
+		expect(
+			() =>
+				new AgentRuntime({
+					model: new ScriptedModel([]),
+					budget: { maxTotalTokens: 0 },
+				}),
+		).toThrow("maxTotalTokens must be a positive finite number");
+		expect(
+			() =>
+				new AgentRuntime({
+					model: new ScriptedModel([]),
+					budget: { maxTotalCost: Number.NaN },
+				}),
+		).toThrow("maxTotalCost must be a positive finite number");
+		expect(
+			() =>
+				new AgentRuntime({
+					model: new ScriptedModel([]),
+					budget: { maxCalls: 3 } as never,
+				}),
+		).toThrow("unsupported field: maxCalls");
+	});
+
+	it("resumes an approved persisted tool call without replaying the model turn", async () => {
+		const initialMessages: AgentMessage[] = [
+			{
+				id: "msg_resume_user",
+				role: "user",
+				content: [{ type: "text", text: "Run it" }],
+				createdAt: 1,
+			},
+			{
+				id: "msg_resume_assistant",
+				role: "assistant",
+				content: [
+					{ type: "text", text: "I will run it" },
+					{
+						type: "tool-call",
+						toolCallId: "call_resume",
+						toolName: "echo",
+						input: { text: "hi" },
+					},
+				],
+				createdAt: 2,
+			},
+		];
+		const model = new ScriptedModel([
+			(request) => {
+				expect(request.messages.at(-1)).toMatchObject({
+					role: "tool",
+					content: [
+						{
+							type: "tool-result",
+							toolCallId: "call_resume",
+							toolName: "echo",
+							output: { echoed: "hi" },
+						},
+					],
+				});
+				expect(request.options?.metadata).toMatchObject({
+					runId: "run_resume",
+					iteration: 2,
+				});
+				return [
+					{ type: "text-delta", text: "resumed done" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const execute = vi.fn(async (input: { text: string }) => ({
+			echoed: input.text,
+		}));
+		const beforeTool = vi.fn();
+		const requestToolApproval = vi.fn(async () => ({ approved: true }));
+		const runtime = new AgentRuntime({
+			model,
+			initialMessages,
+			tools: [
+				{
+					name: "echo",
+					description: "Echo input text",
+					inputSchema: { type: "object" },
+					execute,
+				},
+			],
+			hooks: { beforeTool },
+			requestToolApproval,
+		});
+		const events: string[] = [];
+		runtime.subscribe((event) => events.push(event.type));
+
+		const result = await runtime.resumePendingToolCall({
+			runId: "run_resume",
+			iteration: 1,
+			assistantMessageId: "msg_resume_assistant",
+			toolCallId: "call_resume",
+			toolName: "echo",
+			preparedInput: { text: "hi" },
+			approval: { approved: true },
+		});
+
+		expect(result.status).toBe("completed");
+		expect(result.runId).toBe("run_resume");
+		expect(result.iterations).toBe(2);
+		expect(result.outputText).toBe("resumed done");
+		expect(result.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"tool",
+			"assistant",
+		]);
+		expect(model.requests).toHaveLength(1);
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(execute).toHaveBeenCalledWith(
+			{ text: "hi" },
+			expect.objectContaining({
+				iteration: 1,
+				runId: "run_resume",
+				stepId: "step:run_resume:1:0",
+				toolCallId: "call_resume",
+				toolCallIndex: 0,
+			}),
+		);
+		expect(beforeTool).not.toHaveBeenCalled();
+		expect(requestToolApproval).not.toHaveBeenCalled();
+		expect(events).toEqual(
+			expect.arrayContaining([
+				"run-started",
+				"turn-started",
+				"tool-started",
+				"tool-finished",
+				"message-added",
+				"turn-finished",
+				"assistant-message",
+				"run-finished",
+			]),
+		);
+	});
+
+	it("resumes a decided multi-tool batch in persisted order", async () => {
+		const initialMessages: AgentMessage[] = [
+			{
+				id: "msg_batch_user",
+				role: "user",
+				content: [{ type: "text", text: "Run both" }],
+				createdAt: 1,
+			},
+			{
+				id: "msg_batch_assistant",
+				role: "assistant",
+				content: [
+					{
+						type: "tool-call",
+						toolCallId: "call_batch_1",
+						toolName: "echo",
+						input: { text: "first" },
+					},
+					{
+						type: "tool-call",
+						toolCallId: "call_batch_2",
+						toolName: "echo",
+						input: { text: "second" },
+					},
+				],
+				createdAt: 2,
+			},
+		];
+		const model = new ScriptedModel([
+			(request) => {
+				const results = request.messages
+					.filter((message) => message.role === "tool")
+					.flatMap((message) => message.content);
+				expect(results.map((part) => part.toolCallId)).toEqual([
+					"call_batch_1",
+					"call_batch_2",
+				]);
+				expect(results[0]).toMatchObject({
+					toolCallId: "call_batch_1",
+					output: { echoed: "first" },
+				});
+				return [
+					{ type: "text-delta", text: "batch resumed" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const execute = vi.fn(async (input: { text: string }) => ({
+			echoed: input.text,
+		}));
+		const runtime = new AgentRuntime({
+			model,
+			initialMessages,
+			tools: [
+				{
+					name: "echo",
+					description: "Echo input text",
+					inputSchema: { type: "object" },
+					execute,
+				},
+			],
+		});
+
+		const result = await runtime.resumePendingToolBatch({
+			runId: "run_batch",
+			iteration: 1,
+			assistantMessageId: "msg_batch_assistant",
+			calls: [
+				{
+					stepId: "step:run_batch:1:0",
+					toolCallId: "call_batch_1",
+					toolName: "echo",
+					preparedInput: { text: "first" },
+					approval: { approved: true },
+				},
+				{
+					stepId: "step:run_batch:1:1",
+					toolCallId: "call_batch_2",
+					toolName: "echo",
+					preparedInput: { text: "second" },
+					approval: { approved: false, reason: "denied by reviewer" },
+				},
+			],
+		});
+
+		expect(result.error?.message).toBeUndefined();
+		expect(result.status).toBe("completed");
+		expect(result.runId).toBe("run_batch");
+		expect(result.outputText).toBe("batch resumed");
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(execute).toHaveBeenNthCalledWith(
+			1,
+			{ text: "first" },
+			expect.objectContaining({
+				stepId: "step:run_batch:1:0",
+				toolCallIndex: 0,
+			}),
+		);
+		const results = result.messages
+			.filter((message) => message.role === "tool")
+			.flatMap((message) => message.content);
+		expect(results[1]).toMatchObject({
+			toolCallId: "call_batch_2",
+			isError: true,
+			output: { denied: true, reason: "denied by reviewer" },
+		});
+	});
+
+	it("rejects a resume batch that does not match the persisted tool calls", async () => {
+		const initialMessages: AgentMessage[] = [
+			{
+				id: "msg_batch_bad_user",
+				role: "user",
+				content: [{ type: "text", text: "Run both" }],
+				createdAt: 1,
+			},
+			{
+				id: "msg_batch_bad_assistant",
+				role: "assistant",
+				content: [
+					{
+						type: "tool-call",
+						toolCallId: "call_bad_1",
+						toolName: "echo",
+						input: { text: "first" },
+					},
+					{
+						type: "tool-call",
+						toolCallId: "call_bad_2",
+						toolName: "echo",
+						input: { text: "second" },
+					},
+				],
+				createdAt: 2,
+			},
+		];
+		const createRuntime = () =>
+			new AgentRuntime({
+				model: new ScriptedModel([]),
+				initialMessages,
+				tools: [
+					{
+						name: "echo",
+						description: "Echo input text",
+						inputSchema: { type: "object" },
+						execute: vi.fn(async () => ({ echoed: "hi" })),
+					},
+				],
+			});
+		const base = {
+			runId: "run_bad",
+			iteration: 1,
+			assistantMessageId: "msg_batch_bad_assistant",
+		};
+
+		const mismatched = await createRuntime().resumePendingToolBatch({
+			...base,
+			calls: [
+				{
+					toolCallId: "call_bad_1",
+					toolName: "echo",
+					preparedInput: { text: "first" },
+					approval: { approved: true },
+				},
+			],
+		});
+		expect(mismatched.status).toBe("failed");
+		expect(mismatched.error?.message).toMatch(/do not match the resume batch/);
+
+		const duplicated = await createRuntime().resumePendingToolBatch({
+			...base,
+			calls: [
+				{
+					toolCallId: "call_bad_1",
+					toolName: "echo",
+					preparedInput: { text: "first" },
+					approval: { approved: true },
+				},
+				{
+					toolCallId: "call_bad_1",
+					toolName: "echo",
+					preparedInput: { text: "first" },
+					approval: { approved: true },
+				},
+			],
+		});
+		expect(duplicated.status).toBe("failed");
+		expect(duplicated.error?.message).toMatch(/duplicate tool call id/);
+
+		const tampered = await createRuntime().resumePendingToolBatch({
+			...base,
+			calls: [
+				{
+					toolCallId: "call_bad_1",
+					toolName: "echo",
+					preparedInput: { text: "tampered" },
+					approval: { approved: true },
+				},
+				{
+					toolCallId: "call_bad_2",
+					toolName: "echo",
+					preparedInput: { text: "second" },
+					approval: { approved: true },
+				},
+			],
+		});
+		expect(tampered.status).toBe("failed");
+		expect(tampered.error?.message).toMatch(/prepared input does not match/);
+
+		const empty = await createRuntime().resumePendingToolBatch({
+			...base,
+			calls: [],
+		});
+		expect(empty.status).toBe("failed");
+		expect(empty.error?.message).toMatch(/1 to 16 entries/);
+	});
+
+	it("resumes a denied tool call with a structured denial result", async () => {
+		const initialMessages: AgentMessage[] = [
+			{
+				id: "msg_denied_user",
+				role: "user",
+				content: [{ type: "text", text: "Run it" }],
+				createdAt: 1,
+			},
+			{
+				id: "msg_denied_assistant",
+				role: "assistant",
+				content: [
+					{
+						type: "tool-call",
+						toolCallId: "call_denied",
+						toolName: "echo",
+						input: { text: "hi" },
+					},
+				],
+				createdAt: 2,
+			},
+		];
+		const model = new ScriptedModel([
+			(request) => {
+				expect(request.messages.at(-1)?.content[0]).toMatchObject({
+					type: "tool-result",
+					toolCallId: "call_denied",
+					isError: true,
+					output: { denied: true, reason: "user denied" },
+				});
+				return [
+					{ type: "text-delta", text: "denial handled" },
+					{ type: "finish", reason: "stop" },
+				];
+			},
+		]);
+		const execute = vi.fn(async () => ({ echoed: "hi" }));
+		const beforeTool = vi.fn();
+		const requestToolApproval = vi.fn(async () => ({ approved: true }));
+		const runtime = new AgentRuntime({
+			model,
+			initialMessages,
+			tools: [
+				{
+					name: "echo",
+					description: "Echo input text",
+					inputSchema: { type: "object" },
+					execute,
+				},
+			],
+			hooks: { beforeTool },
+			requestToolApproval,
+		});
+
+		const result = await runtime.resumePendingToolCall({
+			runId: "run_denied",
+			iteration: 1,
+			assistantMessageId: "msg_denied_assistant",
+			toolCallId: "call_denied",
+			toolName: "echo",
+			preparedInput: { text: "hi" },
+			approval: { approved: false, reason: "user denied" },
+		});
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("denial handled");
+		expect(model.requests).toHaveLength(1);
+		expect(execute).not.toHaveBeenCalled();
+		expect(beforeTool).not.toHaveBeenCalled();
+		expect(requestToolApproval).not.toHaveBeenCalled();
+		expect(
+			result.messages.find((message) => message.role === "tool")?.content[0],
+		).toMatchObject({
+			type: "tool-result",
+			toolCallId: "call_denied",
+			isError: true,
+			output: { denied: true, reason: "user denied" },
+		});
+	});
+
+	it("fails closed when resume identity or prepared input does not match", async () => {
+		const initialMessages: AgentMessage[] = [
+			{
+				id: "msg_mismatch_assistant",
+				role: "assistant",
+				content: [
+					{
+						type: "tool-call",
+						toolCallId: "call_mismatch",
+						toolName: "echo",
+						input: { text: "expected" },
+					},
+				],
+				createdAt: 1,
+			},
+		];
+		const baseInput: AgentRuntimeResumeToolCall = {
+			runId: "run_mismatch",
+			iteration: 1,
+			assistantMessageId: "msg_mismatch_assistant",
+			toolCallId: "call_mismatch",
+			toolName: "echo",
+			preparedInput: { text: "expected" },
+			approval: { approved: true },
+		};
+		const cases: AgentRuntimeResumeToolCall[] = [
+			{ ...baseInput, assistantMessageId: "msg_wrong" },
+			{ ...baseInput, toolCallId: "call_wrong" },
+			{ ...baseInput, preparedInput: { text: "wrong" } },
+		];
+
+		for (const input of cases) {
+			const execute = vi.fn(async () => ({ echoed: "expected" }));
+			const model = new ScriptedModel([]);
+			const runtime = new AgentRuntime({
+				model,
+				initialMessages,
+				tools: [
+					{
+						name: "echo",
+						description: "Echo input text",
+						inputSchema: { type: "object" },
+						execute,
+					},
+				],
+			});
+
+			const result = await runtime.resumePendingToolCall(input);
+
+			expect(result.status).toBe("failed");
+			expect(result.error?.message).toMatch(/mismatch|does not match/);
+			expect(model.requests).toHaveLength(0);
+			expect(execute).not.toHaveBeenCalled();
+		}
+	});
+
+	it("rejects duplicate and multiple persisted tool calls", async () => {
+		const duplicateMessages: AgentMessage[] = [
+			{
+				id: "msg_duplicate_assistant",
+				role: "assistant",
+				content: [
+					{
+						type: "tool-call",
+						toolCallId: "call_duplicate",
+						toolName: "echo",
+						input: { text: "hi" },
+					},
+					{
+						type: "tool-call",
+						toolCallId: "call_duplicate",
+						toolName: "echo",
+						input: { text: "hi" },
+					},
+				],
+				createdAt: 1,
+			},
+		];
+		const multipleMessages: AgentMessage[] = [
+			{
+				id: "msg_multiple_assistant",
+				role: "assistant",
+				content: [
+					{
+						type: "tool-call",
+						toolCallId: "call_first",
+						toolName: "echo",
+						input: { text: "hi" },
+					},
+					{
+						type: "tool-call",
+						toolCallId: "call_second",
+						toolName: "echo",
+						input: { text: "hi" },
+					},
+				],
+				createdAt: 1,
+			},
+		];
+		const cases = [
+			{
+				messages: duplicateMessages,
+				input: {
+					runId: "run_duplicate",
+					iteration: 1,
+					assistantMessageId: "msg_duplicate_assistant",
+					toolCallId: "call_duplicate",
+					toolName: "echo",
+					preparedInput: { text: "hi" },
+					approval: { approved: true },
+				} satisfies AgentRuntimeResumeToolCall,
+			},
+			{
+				messages: multipleMessages,
+				input: {
+					runId: "run_multiple",
+					iteration: 1,
+					assistantMessageId: "msg_multiple_assistant",
+					toolCallId: "call_first",
+					toolName: "echo",
+					preparedInput: { text: "hi" },
+					approval: { approved: true },
+				} satisfies AgentRuntimeResumeToolCall,
+			},
+		];
+
+		for (const testCase of cases) {
+			const execute = vi.fn(async () => ({ echoed: "hi" }));
+			const model = new ScriptedModel([]);
+			const runtime = new AgentRuntime({
+				model,
+				initialMessages: testCase.messages,
+				tools: [
+					{
+						name: "echo",
+						description: "Echo input text",
+						inputSchema: { type: "object" },
+						execute,
+					},
+				],
+			});
+
+			const result = await runtime.resumePendingToolCall(testCase.input);
+
+			expect(result.status).toBe("failed");
+			expect(result.error?.message).toMatch(/do not match the resume batch/);
+			expect(model.requests).toHaveLength(0);
+			expect(execute).not.toHaveBeenCalled();
+		}
 	});
 });

@@ -8,6 +8,8 @@ import type {
 	AgentModel,
 	AgentModelFinishReason,
 	AgentModelRequest,
+	AgentRunBudget,
+	AgentRunBudgetStatus,
 	AgentRunResult,
 	AgentRuntimeEvent,
 	AgentRuntimeHooks,
@@ -28,11 +30,12 @@ import {
 	captureSdkError,
 	estimateTokens,
 	mergeModelOptions,
+	normalizeAgentRunBudget,
 	normalizeJsonLikeStringsForSchema,
 	omitUndefinedValues,
 	trimNonEmpty,
 } from "@cline/shared";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
+import { context, SpanStatusCode, trace } from "@opentelemetry/api";
 import { nanoid } from "nanoid";
 
 // No-op unless a TracerProvider is registered (OpenTelemetryProvider/Langfuse
@@ -43,6 +46,8 @@ const agentTracer = trace.getTracer("cline.agents");
 const MAX_TOKENS_INCOMPLETE_TURN_MESSAGE =
 	"Model reached the maximum output token limit before completing the turn";
 
+const MAX_RESUME_TOOL_BATCH = 16;
+
 // Local `createUID` helper. The clinee source imports this from
 // `@cline/shared` (see `packages/shared/dist/identifier.ts`), but
 // sdk-re's shared package does not expose it yet. Inlining here keeps
@@ -52,8 +57,47 @@ function createUID(prefix: string, length = 8): string {
 	return `${prefix}_${nanoid(length)}`;
 }
 
+export function createToolStepId(
+	runId: string | undefined,
+	iteration: number,
+	callIndex: number,
+): string {
+	return `step:${runId ?? "unknown"}:${iteration}:${callIndex}`;
+}
+
 export type AgentRunInput = string | AgentMessage | readonly AgentMessage[];
 export type AgentEventListener = (event: AgentRuntimeEvent) => void;
+
+export interface AgentRuntimeResumeToolCall {
+	runId: string;
+	iteration: number;
+	stepId?: string;
+	assistantMessageId: string;
+	toolCallId: string;
+	toolName: string;
+	preparedInput: unknown;
+	approval: ToolApprovalResult;
+}
+
+export interface AgentRuntimeResumeToolCallEntry {
+	stepId?: string;
+	toolCallId: string;
+	toolName: string;
+	preparedInput: unknown;
+	approval: ToolApprovalResult;
+}
+
+/**
+ * Resumes a decided assistant turn that requested more than one tool call.
+ * Entries must match the persisted assistant message exactly, in order, and
+ * are executed sequentially under their persisted step identities.
+ */
+export interface AgentRuntimeResumeToolBatch {
+	runId: string;
+	iteration: number;
+	assistantMessageId: string;
+	calls: AgentRuntimeResumeToolCallEntry[];
+}
 
 /**
  * Advanced form: caller supplies a pre-built `AgentModel`. Used by
@@ -219,9 +263,23 @@ function summarizeModelRequest(
 
 interface PreparedToolExecution {
 	toolCall: AgentToolCallPart;
+	callIndex: number;
+	stepId: string;
 	tool?: AgentTool;
 	input: unknown;
 	skipReason?: string;
+	denialReason?: string;
+}
+
+interface ResumeToolCallState {
+	assistantMessage: AgentMessage;
+	toolCall: AgentToolCallPart;
+	tool: AgentTool;
+}
+
+interface ResumeToolBatchState {
+	assistantMessage: AgentMessage;
+	entries: ResumeToolCallState[];
 }
 
 interface HookBag {
@@ -241,6 +299,19 @@ class ControlledStopError extends Error {
 		super(reason ?? "Run stopped by runtime control");
 		this.name = "ControlledStopError";
 		this.reason = reason;
+	}
+}
+
+const MAX_TOOL_RETRIES = 10;
+const MAX_TOOL_RETRY_DELAY_MS = 2_000;
+
+class AgentToolTimeoutError extends Error {
+	constructor(
+		readonly toolName: string,
+		readonly timeoutMs: number,
+	) {
+		super(`Tool ${toolName} timed out after ${timeoutMs}ms`);
+		this.name = "AgentToolTimeoutError";
 	}
 }
 
@@ -420,6 +491,19 @@ export class AgentRuntime {
 	};
 	private initialization?: Promise<void>;
 	private abortController?: AbortController;
+	private configuredRunId?: string;
+	/**
+	 * Stable run id of the agent chain that owns this runtime. Only set for
+	 * delegated agents; a lead agent's own run id changes per run. Carried on
+	 * the config rather than read from state so it survives a resume that
+	 * renumbers `state.runId`.
+	 */
+	private readonly chainRootRunId: string | undefined;
+	/**
+	 * Validated, frozen run budget. Undefined when the caller set no caps, in
+	 * which case the loop is never gated on spend.
+	 */
+	private readonly runBudget: AgentRunBudget | undefined;
 
 	constructor(config: AgentRuntimeConfig) {
 		const resolved = resolveRuntimeConfig(config);
@@ -430,6 +514,9 @@ export class AgentRuntime {
 		this.state.agentId = resolved.agentId ?? createUID("agent");
 		this.state.agentRole = resolved.agentRole;
 		this.state.parentAgentId = resolved.parentAgentId;
+		this.chainRootRunId = trimNonEmpty(resolved.rootRunId);
+		this.runBudget = normalizeAgentRunBudget(resolved.budget);
+		this.configuredRunId = resolved.runId;
 		this.state.messages = cloneMessages(resolved.initialMessages ?? []);
 	}
 
@@ -439,6 +526,31 @@ export class AgentRuntime {
 
 	async continue(input?: AgentRunInput): Promise<AgentRunResult> {
 		return this.execute(input);
+	}
+
+	async resumePendingToolCall(
+		input: AgentRuntimeResumeToolCall,
+	): Promise<AgentRunResult> {
+		return this.execute(undefined, {
+			runId: input.runId,
+			iteration: input.iteration,
+			assistantMessageId: input.assistantMessageId,
+			calls: [
+				{
+					...(input.stepId ? { stepId: input.stepId } : {}),
+					toolCallId: input.toolCallId,
+					toolName: input.toolName,
+					preparedInput: input.preparedInput,
+					approval: input.approval,
+				},
+			],
+		});
+	}
+
+	async resumePendingToolBatch(
+		input: AgentRuntimeResumeToolBatch,
+	): Promise<AgentRunResult> {
+		return this.execute(undefined, input);
 	}
 
 	abort(reason?: unknown): void {
@@ -538,6 +650,214 @@ export class AgentRuntime {
 		if (hooks.onEvent) this.hooks.onEvent.push(hooks.onEvent);
 	}
 
+	private validateResumeToolBatch(
+		input: AgentRuntimeResumeToolBatch,
+		previousRunId: string | undefined,
+		previousIteration: number,
+	): ResumeToolBatchState {
+		if (!isRecord(input)) {
+			throw new Error(
+				"Cannot resume pending tool call: malformed resume input",
+			);
+		}
+		const runId = requireResumeString(input.runId, "runId");
+		const assistantMessageId = requireResumeString(
+			input.assistantMessageId,
+			"assistantMessageId",
+		);
+		if (!Number.isSafeInteger(input.iteration) || input.iteration < 1) {
+			throw new Error(
+				"Cannot resume pending tool call: iteration must be a positive integer",
+			);
+		}
+		if (
+			!Array.isArray(input.calls) ||
+			input.calls.length < 1 ||
+			input.calls.length > MAX_RESUME_TOOL_BATCH
+		) {
+			throw new Error(
+				`Cannot resume pending tool call: calls must contain 1 to ${MAX_RESUME_TOOL_BATCH} entries`,
+			);
+		}
+		if (
+			this.config.toolExecution !== "sequential" &&
+			this.config.toolExecution !== "parallel"
+		) {
+			throw new Error(
+				"Cannot resume pending tool call: unsupported tool execution",
+			);
+		}
+		if (this.state.parentAgentId != null) {
+			throw new Error(
+				"Cannot resume pending tool call: only a root run can be resumed",
+			);
+		}
+		if (
+			(previousRunId !== undefined && previousRunId !== runId) ||
+			(previousIteration !== 0 && previousIteration !== input.iteration)
+		) {
+			throw new Error(
+				"Cannot resume pending tool call: run identity does not match runtime state",
+			);
+		}
+
+		const initialMessages = this.config.initialMessages;
+		if (!Array.isArray(initialMessages) || initialMessages.length === 0) {
+			throw new Error(
+				"Cannot resume pending tool call: initialMessages must contain the persisted assistant message",
+			);
+		}
+		if (!areEquivalentValues(this.state.messages, initialMessages)) {
+			throw new Error(
+				"Cannot resume pending tool call: runtime conversation does not match initialMessages",
+			);
+		}
+
+		const assistantMessage = initialMessages.at(-1);
+		if (!assistantMessage || assistantMessage.role !== "assistant") {
+			throw new Error(
+				"Cannot resume pending tool call: persisted assistant message must be the last message",
+			);
+		}
+		if (assistantMessage.id !== assistantMessageId) {
+			throw new Error(
+				"Cannot resume pending tool call: assistant message identity mismatch",
+			);
+		}
+		if (!Array.isArray(assistantMessage.content)) {
+			throw new Error(
+				"Cannot resume pending tool call: persisted assistant message is malformed",
+			);
+		}
+
+		const toolCalls: AgentToolCallPart[] = [];
+		for (const part of assistantMessage.content) {
+			if (!isRecord(part) || typeof part.type !== "string") {
+				throw new Error(
+					"Cannot resume pending tool call: persisted assistant message is malformed",
+				);
+			}
+			if (part.type === "tool-result") {
+				throw new Error(
+					"Cannot resume pending tool call: persisted assistant message already contains a tool result",
+				);
+			}
+			if (part.type === "tool-call") {
+				if (
+					typeof part.toolCallId !== "string" ||
+					typeof part.toolName !== "string" ||
+					!Object.hasOwn(part, "input")
+				) {
+					throw new Error(
+						"Cannot resume pending tool call: persisted tool call is malformed",
+					);
+				}
+				toolCalls.push(part as unknown as AgentToolCallPart);
+			}
+		}
+		if (toolCalls.length !== input.calls.length) {
+			throw new Error(
+				"Cannot resume pending tool call: persisted assistant message tool calls do not match the resume batch",
+			);
+		}
+
+		const resumedToolCallIds = new Set<string>();
+		const entries: ResumeToolCallState[] = [];
+		for (const [index, call] of input.calls.entries()) {
+			if (!isRecord(call)) {
+				throw new Error(
+					"Cannot resume pending tool call: malformed resume batch entry",
+				);
+			}
+			const toolCallId = requireResumeString(call.toolCallId, "toolCallId");
+			const toolName = requireResumeString(call.toolName, "toolName");
+			if (resumedToolCallIds.has(toolCallId)) {
+				throw new Error(
+					"Cannot resume pending tool call: duplicate tool call id in resume batch",
+				);
+			}
+			resumedToolCallIds.add(toolCallId);
+			if (
+				!Object.hasOwn(call, "preparedInput") ||
+				call.preparedInput === undefined
+			) {
+				throw new Error(
+					"Cannot resume pending tool call: preparedInput is required",
+				);
+			}
+			if (
+				!isRecord(call.approval) ||
+				typeof call.approval.approved !== "boolean" ||
+				(call.approval.reason !== undefined &&
+					typeof call.approval.reason !== "string")
+			) {
+				throw new Error(
+					"Cannot resume pending tool call: malformed approval result",
+				);
+			}
+			if (call.stepId !== undefined && typeof call.stepId !== "string") {
+				throw new Error(
+					"Cannot resume pending tool call: step identity must be a string",
+				);
+			}
+			const toolCall = toolCalls[index] as AgentToolCallPart;
+			if (
+				toolCall.toolCallId !== toolCallId ||
+				toolCall.toolName !== toolName
+			) {
+				throw new Error(
+					"Cannot resume pending tool call: tool call identity mismatch",
+				);
+			}
+			if (!areEquivalentValues(toolCall.input, call.preparedInput)) {
+				throw new Error(
+					"Cannot resume pending tool call: prepared input does not match persisted tool call",
+				);
+			}
+			const tool = this.tools.get(toolName);
+			if (!tool) {
+				throw new Error(
+					`Cannot resume pending tool call: unknown tool "${toolName}"`,
+				);
+			}
+			entries.push({ assistantMessage, toolCall, tool });
+		}
+
+		for (const [messageIndex, message] of initialMessages.entries()) {
+			if (messageIndex === initialMessages.length - 1) {
+				continue;
+			}
+			if (isRecord(message) && message.id === assistantMessageId) {
+				throw new Error(
+					"Cannot resume pending tool call: assistant message has already been persisted",
+				);
+			}
+			if (!isRecord(message) || !Array.isArray(message.content)) {
+				throw new Error(
+					"Cannot resume pending tool call: initialMessages are malformed",
+				);
+			}
+			for (const part of message.content) {
+				if (!isRecord(part)) {
+					throw new Error(
+						"Cannot resume pending tool call: initialMessages are malformed",
+					);
+				}
+				if (
+					(part.type === "tool-call" || part.type === "tool-result") &&
+					typeof part.toolCallId === "string" &&
+					resumedToolCallIds.has(part.toolCallId)
+				) {
+					throw new Error(
+						"Cannot resume pending tool call: tool call has already been persisted",
+					);
+				}
+			}
+		}
+
+		return { assistantMessage, entries };
+	}
+
 	private getRequiredCompletionToolNames(): string[] {
 		if (this.config.completionPolicy?.requireCompletionTool !== true) {
 			return [];
@@ -576,20 +896,30 @@ export class AgentRuntime {
 		return reminderMessage;
 	}
 
-	private async execute(input?: AgentRunInput): Promise<AgentRunResult> {
+	private async execute(
+		input?: AgentRunInput,
+		resume?: AgentRuntimeResumeToolBatch,
+	): Promise<AgentRunResult> {
 		// No-op span unless a TracerProvider is registered. Root of the
 		// agent-layer span tree; "agent.tool" spans below attach as children.
-		const span = agentTracer.startSpan("agent.run", {
-			attributes: {
-				"agent.id": this.state.agentId,
-				"agent.session_id": this.config.sessionId,
-				"agent.parent_agent_id": this.state.parentAgentId ?? undefined,
-				"agent.model_id": this.config.messageModelInfo?.id,
-				"agent.provider_id": this.config.messageModelInfo?.provider,
+		const span = agentTracer.startSpan(
+			"agent.run",
+			{
+				attributes: {
+					"agent.id": this.state.agentId,
+					"agent.session_id": this.config.sessionId,
+					"agent.parent_agent_id": this.state.parentAgentId ?? undefined,
+					"agent.model_id": this.config.messageModelInfo?.id,
+					"agent.provider_id": this.config.messageModelInfo?.provider,
+				},
 			},
-		});
+			context.active(),
+		);
 		try {
-			const result = await this.executeLoop(input);
+			const result = await context.with(
+				trace.setSpan(context.active(), span),
+				() => this.executeLoop(input, resume),
+			);
 			span.setAttribute("agent.status", result.status);
 			span.setAttribute("agent.iterations", result.iterations);
 			span.setAttribute("agent.run_id", result.runId);
@@ -613,45 +943,163 @@ export class AgentRuntime {
 	/** Body of the agent loop, wrapped by the "agent.run" span in execute(). */
 	private async executeLoop(
 		input?: AgentRunInput,
+		resume?: AgentRuntimeResumeToolBatch,
 	): Promise<AgentRunResult> {
 		await this.ensureInitialized();
 		if (this.state.status === "running") {
 			throw new Error("Agent runtime is already running");
 		}
 
+		const previousRunId = this.state.runId;
+		const previousIteration = this.state.iteration;
+		const isResume = resume !== undefined;
+		const resumeRunId =
+			typeof resume?.runId === "string" ? resume.runId : createUID("run");
+		const resumeIteration =
+			typeof resume?.iteration === "number" && Number.isFinite(resume.iteration)
+				? resume.iteration
+				: 0;
 		this.abortController = new AbortController();
-		this.state.runId = createUID("run");
+		this.state.runId = isResume
+			? resumeRunId
+			: (this.configuredRunId ?? createUID("run"));
+		this.configuredRunId = undefined;
 		this.state.status = "running";
-		this.state.iteration = 0;
+		this.state.iteration = isResume ? resumeIteration : 0;
 		this.state.pendingToolCalls = [];
 		this.state.lastError = undefined;
-		this.state.usage = cloneUsage(DEFAULT_USAGE);
+		if (!isResume) {
+			this.state.usage = cloneUsage(DEFAULT_USAGE);
+		}
 
 		try {
 			await this.callBeforeRunHooks();
 			await this.emit({ type: "run-started", snapshot: this.snapshot() });
 
-			for (const message of input ? normalizeInput(input) : []) {
-				this.state.messages.push(message);
-				await this.emit({
-					type: "message-added",
-					snapshot: this.snapshot(),
-					message,
-				});
-			}
-
-			const completionToolReminder = this.getCompletionToolReminderMessage();
-			if (completionToolReminder) {
-				await this.addUserReminderMessage(completionToolReminder);
-			}
-
 			let finalAssistantMessage: AgentMessage | undefined;
+			if (resume !== undefined) {
+				const resumed = this.validateResumeToolBatch(
+					resume,
+					previousRunId,
+					previousIteration,
+				);
+				this.state.pendingToolCalls = resumed.entries.map(
+					(entry) => entry.toolCall.toolCallId,
+				);
+				await this.emit({
+					type: "turn-started",
+					snapshot: this.snapshot(),
+					iteration: this.state.iteration,
+				});
+				const resumedPrepared: PreparedToolExecution[] = resumed.entries.map(
+					(entry, callIndex) => {
+						const call = resume.calls[
+							callIndex
+						] as AgentRuntimeResumeToolCallEntry;
+						return {
+							toolCall: {
+								...entry.toolCall,
+								input: call.preparedInput,
+							},
+							callIndex,
+							stepId:
+								call.stepId ??
+								createToolStepId(
+									this.state.runId,
+									this.state.iteration,
+									callIndex,
+								),
+							tool: entry.tool,
+							input: call.preparedInput,
+							denialReason: call.approval.approved
+								? undefined
+								: call.approval.reason ||
+									`Tool "${entry.toolCall.toolName}" was not approved`,
+						};
+					},
+				);
+				const resumedToolMessages =
+					this.config.toolExecution === "parallel"
+						? (await this.executePreparedToolsInParallel(resumedPrepared)).map(
+								(outcome, index) =>
+									outcome.status === "fulfilled"
+										? outcome.value
+										: this.createToolFailureMessage(
+												resumedPrepared[index] as PreparedToolExecution,
+												outcome.reason,
+											),
+							)
+						: await this.executeResumeToolCallsSequentially(resumedPrepared);
+				this.state.pendingToolCalls = [];
+				for (const toolMessage of resumedToolMessages) {
+					this.state.messages.push(toolMessage);
+					await this.emit({
+						type: "message-added",
+						snapshot: this.snapshot(),
+						message: toolMessage,
+					});
+				}
+				await this.emit({
+					type: "turn-finished",
+					snapshot: this.snapshot(),
+					iteration: this.state.iteration,
+					toolCallCount: resumedToolMessages.length,
+				});
+				finalAssistantMessage = resumed.assistantMessage;
+				const terminalToolMessage = this.findCompletingToolMessage(
+					resumed.entries.map((entry) => entry.toolCall),
+					resumedToolMessages,
+				);
+				if (terminalToolMessage) {
+					const result = this.finishRun(
+						"completed",
+						finalAssistantMessage,
+						textFromToolMessage(terminalToolMessage) || undefined,
+					);
+					await this.callAfterRunHooks(result);
+					await this.emit({
+						type: "run-finished",
+						snapshot: this.snapshot(),
+						result,
+					});
+					return result;
+				}
+				const completionToolReminder = this.getCompletionToolReminderMessage();
+				if (completionToolReminder) {
+					await this.addUserReminderMessage(completionToolReminder);
+				}
+			} else {
+				for (const message of input ? normalizeInput(input) : []) {
+					this.state.messages.push(message);
+					await this.emit({
+						type: "message-added",
+						snapshot: this.snapshot(),
+						message,
+					});
+				}
+
+				const completionToolReminder = this.getCompletionToolReminderMessage();
+				if (completionToolReminder) {
+					await this.addUserReminderMessage(completionToolReminder);
+				}
+			}
 
 			while (
 				this.config.maxIterations === undefined ||
 				this.state.iteration < this.config.maxIterations
 			) {
 				this.throwIfAborted();
+
+				// Budget is a pre-request gate: the in-flight turn always finishes so
+				// every tool call keeps a tool result, and the run stops here instead
+				// of paying for another model call.
+				const budgetStop = this.resolveBudgetStop();
+				if (budgetStop) {
+					return await this.finishBudgetExhausted(
+						budgetStop,
+						finalAssistantMessage,
+					);
+				}
 
 				this.state.iteration += 1;
 				await this.emit({
@@ -1192,25 +1640,224 @@ export class AgentRuntime {
 		});
 	}
 
+	/**
+	 * Resolve the run budget against cumulative usage, or `undefined` when the
+	 * run may continue. The comparison is `>=` on purpose: a cap is a ceiling
+	 * the run must not cross, and a provider that reports zero tokens (usage
+	 * unavailable) must not silently disable a cost guardrail.
+	 */
+	private resolveBudgetStop(): AgentRunBudgetStatus | undefined {
+		const budget = this.runBudget;
+		if (!budget) {
+			return undefined;
+		}
+		const usage = this.state.usage;
+		const totalTokens = usage.inputTokens + usage.outputTokens;
+		const totalCost = usage.totalCost ?? 0;
+		const checks: Array<{
+			limit: AgentRunBudgetStatus["limit"];
+			cap: number | undefined;
+			used: number;
+		}> = [
+			{
+				limit: "maxInputTokens",
+				cap: budget.maxInputTokens,
+				used: usage.inputTokens,
+			},
+			{
+				limit: "maxOutputTokens",
+				cap: budget.maxOutputTokens,
+				used: usage.outputTokens,
+			},
+			{
+				limit: "maxTotalTokens",
+				cap: budget.maxTotalTokens,
+				used: totalTokens,
+			},
+			{ limit: "maxTotalCost", cap: budget.maxTotalCost, used: totalCost },
+		];
+		for (const check of checks) {
+			if (check.cap !== undefined && check.used >= check.cap) {
+				return {
+					limit: check.limit,
+					cap: check.cap,
+					used: check.used,
+					usage: cloneUsage(usage),
+				};
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Stop the run because a budget cap was reached. The in-flight turn has
+	 * already produced valid tool results, so the transcript stays valid and the
+	 * run ends with a controlled `budget_exhausted` status rather than a thrown
+	 * error — an exhausted budget is a policy outcome, not a failure.
+	 */
+	private async finishBudgetExhausted(
+		status: AgentRunBudgetStatus,
+		assistantMessage?: AgentMessage,
+	): Promise<AgentRunResult> {
+		await this.emit({
+			type: "status-notice",
+			snapshot: this.snapshot(),
+			message: `Run budget exhausted: ${status.limit} reached ${status.used} of ${status.cap}`,
+			metadata: { kind: "budget_exhausted", ...status },
+		});
+		const result = this.finishRun(
+			"budget_exhausted",
+			assistantMessage,
+			undefined,
+		);
+		await this.callAfterRunHooks(result);
+		await this.emit({
+			type: "run-finished",
+			snapshot: this.snapshot(),
+			result,
+		});
+		return result;
+	}
+
+	private async executeResumeToolCall(
+		prepared: PreparedToolExecution,
+	): Promise<AgentMessage> {
+		try {
+			return await this.executePreparedTool(prepared);
+		} catch (error) {
+			if (
+				this.abortController?.signal.aborted ||
+				error instanceof AgentRuntimeAbortError
+			) {
+				throw error;
+			}
+			return this.createToolFailureMessage(prepared, error);
+		}
+	}
+
+	private async executeResumeToolCallsSequentially(
+		prepared: PreparedToolExecution[],
+	): Promise<AgentMessage[]> {
+		const messages: AgentMessage[] = [];
+		for (const execution of prepared) {
+			messages.push(await this.executeResumeToolCall(execution));
+		}
+		return messages;
+	}
+
 	private async executeToolCalls(
 		toolCalls: AgentToolCallPart[],
 	): Promise<AgentMessage[]> {
 		const prepared: PreparedToolExecution[] = [];
-		for (const toolCall of toolCalls) {
-			prepared.push(await this.prepareToolExecution(toolCall));
+		for (const [callIndex, toolCall] of toolCalls.entries()) {
+			try {
+				prepared.push(await this.prepareToolExecution(toolCall, callIndex));
+			} catch (error) {
+				this.throwIfAborted();
+				prepared.push({
+					toolCall,
+					callIndex,
+					stepId: createToolStepId(
+						this.state.runId,
+						this.state.iteration,
+						callIndex,
+					),
+					tool: this.tools.get(toolCall.toolName),
+					input: toolCall.input,
+					skipReason: `Tool "${toolCall.toolName}" preparation failed: ${this.toolErrorText(error)}`,
+				});
+			}
 		}
 
 		if (this.config.toolExecution === "parallel") {
-			return Promise.all(
-				prepared.map((execution) => this.executePreparedTool(execution)),
+			const settled = await this.executePreparedToolsInParallel(prepared);
+			this.throwIfAborted();
+			return settled.map((outcome, index) =>
+				outcome.status === "fulfilled"
+					? outcome.value
+					: this.createToolFailureMessage(
+							prepared[index] as PreparedToolExecution,
+							outcome.reason,
+						),
 			);
 		}
 
 		const results: AgentMessage[] = [];
 		for (const execution of prepared) {
-			results.push(await this.executePreparedTool(execution));
+			try {
+				results.push(await this.executePreparedTool(execution));
+			} catch (error) {
+				if (
+					this.abortController?.signal.aborted ||
+					error instanceof AgentRuntimeAbortError
+				) {
+					throw error;
+				}
+				results.push(this.createToolFailureMessage(execution, error));
+			}
 		}
 		return results;
+	}
+
+	private async executePreparedToolsInParallel(
+		prepared: PreparedToolExecution[],
+	): Promise<PromiseSettledResult<AgentMessage>[]> {
+		if (prepared.length < 2) {
+			return Promise.allSettled(
+				prepared.map((execution) => this.executePreparedTool(execution)),
+			);
+		}
+		const configuredLimit = this.config.maxParallelToolCalls;
+		const workerCount =
+			typeof configuredLimit === "number" &&
+			Number.isFinite(configuredLimit) &&
+			configuredLimit > 0
+				? Math.min(prepared.length, Math.floor(configuredLimit))
+				: prepared.length;
+		const results = new Array<PromiseSettledResult<AgentMessage>>(
+			prepared.length,
+		);
+		let nextIndex = 0;
+		const worker = async (): Promise<void> => {
+			while (true) {
+				const index = nextIndex;
+				nextIndex += 1;
+				if (index >= prepared.length) {
+					return;
+				}
+				try {
+					results[index] = {
+						status: "fulfilled",
+						value: await this.executePreparedTool(
+							prepared[index] as PreparedToolExecution,
+						),
+					};
+				} catch (reason) {
+					results[index] = { status: "rejected", reason };
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: workerCount }, () => worker()));
+		return results;
+	}
+
+	private createToolFailureMessage(
+		prepared: PreparedToolExecution,
+		error: unknown,
+	): AgentMessage {
+		return createMessage("tool", [
+			{
+				type: "tool-result",
+				toolCallId: prepared.toolCall.toolCallId,
+				toolName: prepared.toolCall.toolName,
+				output: { error: this.toolErrorText(error) },
+				isError: true,
+			},
+		]);
+	}
+
+	private toolErrorText(error: unknown): string {
+		return error instanceof Error ? error.message : String(error);
 	}
 
 	private findCompletingToolMessage(
@@ -1237,8 +1884,14 @@ export class AgentRuntime {
 
 	private async prepareToolExecution(
 		toolCall: AgentToolCallPart,
+		callIndex: number,
 	): Promise<PreparedToolExecution> {
 		const tool = this.tools.get(toolCall.toolName);
+		const stepId = createToolStepId(
+			this.state.runId,
+			this.state.iteration,
+			callIndex,
+		);
 		let input = toolCall.input;
 		let skipReason: string | undefined;
 		const metadata =
@@ -1277,6 +1930,7 @@ export class AgentRuntime {
 					snapshot: this.snapshot(),
 					tool,
 					toolCall: { ...toolCall, input },
+					stepId,
 					input,
 				})) as AgentBeforeToolResult | undefined;
 				if (result?.input !== undefined) {
@@ -1297,6 +1951,14 @@ export class AgentRuntime {
 			}
 		}
 
+		if (tool?.validateInput && !skipReason) {
+			try {
+				input = tool.validateInput(input);
+			} catch (error) {
+				skipReason = `Tool "${tool.name}" input validation failed: ${this.toolErrorText(error)}`;
+			}
+		}
+
 		if (tool && !skipReason) {
 			const policy = {
 				...resolveToolPolicy(toolCall.toolName, this.config.toolPolicies),
@@ -1309,6 +1971,8 @@ export class AgentRuntime {
 					toolCall,
 					input,
 					policy,
+					callIndex,
+					stepId,
 				);
 				if (!approval.approved) {
 					skipReason =
@@ -1319,6 +1983,8 @@ export class AgentRuntime {
 
 		return {
 			toolCall: { ...toolCall, input },
+			callIndex,
+			stepId,
 			tool,
 			input,
 			skipReason,
@@ -1329,6 +1995,8 @@ export class AgentRuntime {
 		toolCall: AgentToolCallPart,
 		input: unknown,
 		policy: ToolPolicy,
+		toolCallIndex: number,
+		stepId: string,
 	): Promise<ToolApprovalResult> {
 		const requestApproval = this.config.requestToolApproval;
 		if (!requestApproval) {
@@ -1349,11 +2017,20 @@ export class AgentRuntime {
 					this.config.conversationId?.trim() ||
 					this.state.runId ||
 					this.state.agentId,
+				...(this.state.parentAgentId
+					? { parentAgentId: this.state.parentAgentId }
+					: {}),
+				...(this.chainRootRunId ? { rootRunId: this.chainRootRunId } : {}),
 				iteration: this.state.iteration,
+				stepId,
+				runId: this.state.runId,
+				toolCallIndex,
+				assistantMessageId: this.findLastAssistantMessage()?.id,
 				toolCallId: toolCall.toolCallId,
 				toolName: toolCall.toolName,
 				input,
 				policy,
+				signal: this.abortController?.signal,
 			});
 		} catch (error) {
 			return {
@@ -1370,21 +2047,27 @@ export class AgentRuntime {
 	): Promise<AgentMessage> {
 		// No-op span unless a TracerProvider is registered. Child of the
 		// surrounding "agent.run" span via the active context.
-		const span = agentTracer.startSpan("agent.tool", {
-			attributes: {
-				"agent.tool.name": prepared.toolCall.toolName,
-				"agent.tool.call_id": prepared.toolCall.toolCallId,
-				"agent.iteration": this.state.iteration,
-				"agent.id": this.state.agentId,
-				"agent.session_id": this.config.sessionId,
+		const span = agentTracer.startSpan(
+			"agent.tool",
+			{
+				attributes: {
+					"agent.tool.name": prepared.toolCall.toolName,
+					"agent.tool.call_id": prepared.toolCall.toolCallId,
+					"agent.tool.step_id": prepared.stepId,
+					"agent.iteration": this.state.iteration,
+					"agent.id": this.state.agentId,
+					"agent.session_id": this.config.sessionId,
+				},
 			},
-		});
+			context.active(),
+		);
 		try {
-			const message = await this.runPreparedTool(prepared);
+			const message = await context.with(
+				trace.setSpan(context.active(), span),
+				() => this.runPreparedTool(prepared),
+			);
 			const toolResult = message.content.find(
-				(
-					part,
-				): part is Extract<AgentMessagePart, { type: "tool-result" }> =>
+				(part): part is Extract<AgentMessagePart, { type: "tool-result" }> =>
 					part.type === "tool-result" &&
 					part.toolCallId === prepared.toolCall.toolCallId,
 			);
@@ -1422,7 +2105,12 @@ export class AgentRuntime {
 		});
 
 		let result: AgentToolResult;
-		if (prepared.skipReason) {
+		if (prepared.denialReason !== undefined) {
+			result = {
+				output: { denied: true, reason: prepared.denialReason },
+				isError: true,
+			};
+		} else if (prepared.skipReason) {
 			result = {
 				output: { error: prepared.skipReason },
 				isError: true,
@@ -1434,32 +2122,16 @@ export class AgentRuntime {
 			};
 		} else {
 			try {
-				const output = await prepared.tool.execute(prepared.input, {
-					sessionId: this.config.sessionId,
-					agentId: this.state.agentId,
-					conversationId: this.config.conversationId,
-					runId: this.state.runId ?? createUID("run"),
-					iteration: this.state.iteration,
-					toolCallId: prepared.toolCall.toolCallId,
-					signal: this.abortController?.signal,
-					metadata: this.config.toolContextMetadata,
-					snapshot: this.snapshot(),
-					emitUpdate: (update: unknown) => {
-						void this.emit({
-							type: "tool-updated",
-							snapshot: this.snapshot(),
-							iteration: this.state.iteration,
-							toolCall: prepared.toolCall,
-							update,
-						});
-					},
-				});
-				result = { output };
+				result = { output: await this.executeToolWithRetries(prepared) };
 			} catch (error) {
+				if (
+					this.abortController?.signal.aborted ||
+					error instanceof AgentRuntimeAbortError
+				) {
+					throw error;
+				}
 				result = {
-					output: {
-						error: error instanceof Error ? error.message : String(error),
-					},
+					output: { error: this.toolErrorText(error) },
 					isError: true,
 				};
 			}
@@ -1474,6 +2146,7 @@ export class AgentRuntime {
 					snapshot: this.snapshot(),
 					tool: prepared.tool,
 					toolCall: prepared.toolCall,
+					stepId: prepared.stepId,
 					input: prepared.input,
 					result,
 					startedAt,
@@ -1506,6 +2179,166 @@ export class AgentRuntime {
 		});
 
 		return message;
+	}
+
+	private async executeToolWithRetries(
+		prepared: PreparedToolExecution,
+	): Promise<unknown> {
+		const tool = prepared.tool;
+		if (!tool) {
+			throw new Error(`Unknown tool: ${prepared.toolCall.toolName}`);
+		}
+		const maxRetries = this.resolveToolMaxRetries(tool);
+		let attempt = 0;
+		while (true) {
+			try {
+				return await this.executeToolAttempt(tool, prepared);
+			} catch (error) {
+				if (
+					this.abortController?.signal.aborted ||
+					error instanceof AgentRuntimeAbortError
+				) {
+					throw error;
+				}
+				if (attempt >= maxRetries) {
+					throw error;
+				}
+				await this.waitForToolRetry(this.toolRetryDelayMs(attempt));
+				attempt += 1;
+			}
+		}
+	}
+
+	private async executeToolAttempt(
+		tool: AgentTool,
+		prepared: PreparedToolExecution,
+	): Promise<unknown> {
+		this.throwIfAborted();
+		const runSignal = this.abortController?.signal;
+		const controller = new AbortController();
+		const timeoutMs =
+			typeof tool.timeoutMs === "number" &&
+			Number.isFinite(tool.timeoutMs) &&
+			tool.timeoutMs > 0
+				? Math.floor(tool.timeoutMs)
+				: undefined;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let onRunAbort: (() => void) | undefined;
+		const abortPromise = new Promise<never>((_resolve, reject) => {
+			onRunAbort = () => {
+				const error = this.normalizeAbortError();
+				controller.abort(error);
+				reject(error);
+			};
+			if (runSignal?.aborted) {
+				onRunAbort();
+			} else {
+				runSignal?.addEventListener("abort", onRunAbort, { once: true });
+			}
+		});
+		const execution = Promise.resolve().then(() => {
+			if (controller.signal.aborted) {
+				throw controller.signal.reason;
+			}
+			return tool.execute(prepared.input, {
+				sessionId: this.config.sessionId,
+				agentId: this.state.agentId,
+				conversationId: this.config.conversationId,
+				runId: this.state.runId ?? createUID("run"),
+				...(this.state.parentAgentId
+					? { parentAgentId: this.state.parentAgentId }
+					: {}),
+				...(this.chainRootRunId ? { rootRunId: this.chainRootRunId } : {}),
+				iteration: this.state.iteration,
+				stepId: prepared.stepId,
+				toolCallId: prepared.toolCall.toolCallId,
+				toolCallIndex: prepared.callIndex,
+				signal: controller.signal,
+				metadata: this.config.toolContextMetadata,
+				snapshot: this.snapshot(),
+				emitUpdate: (update: unknown) => {
+					void this.emit({
+						type: "tool-updated",
+						snapshot: this.snapshot(),
+						iteration: this.state.iteration,
+						toolCall: prepared.toolCall,
+						update,
+					});
+				},
+			});
+		});
+		const timeoutPromise =
+			timeoutMs === undefined
+				? undefined
+				: new Promise<never>((_resolve, reject) => {
+						timeout = setTimeout(() => {
+							const error = new AgentToolTimeoutError(tool.name, timeoutMs);
+							controller.abort(error);
+							reject(error);
+						}, timeoutMs);
+					});
+		const contenders: Promise<unknown>[] = [execution, abortPromise];
+		if (timeoutPromise) {
+			contenders.push(timeoutPromise);
+		}
+		try {
+			return await Promise.race(contenders);
+		} finally {
+			if (timeout) {
+				clearTimeout(timeout);
+			}
+			if (onRunAbort) {
+				runSignal?.removeEventListener("abort", onRunAbort);
+			}
+		}
+	}
+
+	private resolveToolMaxRetries(tool: AgentTool): number {
+		if (tool.retryable !== true) {
+			return 0;
+		}
+		if (
+			typeof tool.maxRetries !== "number" ||
+			!Number.isFinite(tool.maxRetries) ||
+			tool.maxRetries <= 0
+		) {
+			return 0;
+		}
+		return Math.min(MAX_TOOL_RETRIES, Math.floor(tool.maxRetries));
+	}
+
+	private toolRetryDelayMs(attempt: number): number {
+		const configured = this.config.toolRetryDelayMs;
+		const baseDelayMs =
+			typeof configured === "number" &&
+			Number.isFinite(configured) &&
+			configured >= 0
+				? configured
+				: 100;
+		return Math.min(MAX_TOOL_RETRY_DELAY_MS, baseDelayMs * 2 ** attempt);
+	}
+
+	private async waitForToolRetry(delayMs: number): Promise<void> {
+		this.throwIfAborted();
+		if (delayMs <= 0) {
+			return;
+		}
+		const signal = this.abortController?.signal;
+		await new Promise<void>((resolve, reject) => {
+			const onAbort = (): void => {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				reject(this.normalizeAbortError());
+			};
+			const timer = setTimeout(() => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve();
+			}, delayMs);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) {
+				onAbort();
+			}
+		});
 	}
 
 	private finishRun(
@@ -1629,6 +2462,76 @@ function buildEventMetadata(event: AgentRuntimeEvent): Record<string, unknown> {
 		iteration: event.snapshot.iteration,
 		eventType: event.type,
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireResumeString(value: unknown, field: string): string {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw new Error(`Invalid resume ${field}`);
+	}
+	return value;
+}
+
+function areEquivalentValues(
+	left: unknown,
+	right: unknown,
+	seen = new WeakMap<object, object>(),
+): boolean {
+	if (Object.is(left, right)) {
+		return true;
+	}
+	if (
+		typeof left !== typeof right ||
+		left === null ||
+		right === null ||
+		typeof left !== "object"
+	) {
+		return false;
+	}
+
+	const leftObject = left as object;
+	const rightObject = right as object;
+	if (seen.has(leftObject)) {
+		return seen.get(leftObject) === rightObject;
+	}
+	seen.set(leftObject, rightObject);
+
+	if (Array.isArray(left) || Array.isArray(right)) {
+		if (
+			!Array.isArray(left) ||
+			!Array.isArray(right) ||
+			left.length !== right.length
+		) {
+			return false;
+		}
+		return left.every((value, index) =>
+			areEquivalentValues(value, right[index], seen),
+		);
+	}
+
+	if (left instanceof Date || right instanceof Date) {
+		return (
+			left instanceof Date &&
+			right instanceof Date &&
+			left.getTime() === right.getTime()
+		);
+	}
+
+	const leftRecord = left as Record<string, unknown>;
+	const rightRecord = right as Record<string, unknown>;
+	const keys = new Set([
+		...Object.keys(leftRecord),
+		...Object.keys(rightRecord),
+	]);
+	for (const key of keys) {
+		if (!areEquivalentValues(leftRecord[key], rightRecord[key], seen)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 function mergeToolMetadata(current: unknown, patch: unknown): unknown {

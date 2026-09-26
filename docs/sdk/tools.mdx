@@ -72,6 +72,11 @@ const searchDatabase = createTool({
 })
 ```
 
+Zod tool inputs are validated before execution. For raw JSON Schema, pass a
+`validateInput` function when runtime validation is required. Tool execution
+defaults to a 30-second timeout with retries disabled; enable retries only for
+idempotent operations.
+
 For complete examples of tools in action, see the [cli-agent](https://github.com/cline/cline/tree/main/apps/examples/cli-agent) (shell tool) and [code-review-bot](https://github.com/cline/cline/tree/main/apps/examples/code-review-bot) (multiple tools with completion lifecycle).
 
 For a full tutorial, see [Creating Custom Tools](/sdk/guides/creating-custom-tools). For exact types, see [Tools API](/sdk/reference/tools-api).

@@ -23,7 +23,10 @@ const tool = createTool({
 })
 ```
 
-`inputSchema` can be either JSON Schema or a Zod schema.
+`inputSchema` can be either JSON Schema or a Zod schema. Zod schemas are also
+used for runtime input validation. Raw JSON Schema tools can provide
+`validateInput(input)` to return validated or transformed input, or throw to
+return a model-visible tool error.
 
 ## AgentTool
 
@@ -32,7 +35,8 @@ interface AgentTool<TInput = unknown, TOutput = unknown> {
   name: string
   description: string
   inputSchema: Record<string, unknown>
-  execute: (input: TInput, context: AgentToolContext, onChange?: (update: unknown) => void) => Promise<TOutput>
+  validateInput?: (input: unknown) => unknown
+  execute: (input: TInput, context: AgentToolContext) => Promise<TOutput> | TOutput
   timeoutMs?: number
   retryable?: boolean
   maxRetries?: number
@@ -44,18 +48,36 @@ Defaults from `createTool`:
 | Field | Default |
 |-------|---------|
 | `timeoutMs` | `30000` |
-| `retryable` | `true` |
-| `maxRetries` | `3` |
+| `retryable` | `false` |
+| `maxRetries` | `0` |
+
+Each execution attempt receives a tool-scoped abort signal and is bounded by
+`timeoutMs`. A timeout becomes a structured tool error so the model can recover.
+Retries occur only when `retryable` is explicitly `true`; they use bounded
+exponential backoff controlled by the runtime's `toolRetryDelayMs` setting.
+Retries should therefore be enabled only for idempotent or effectively
+idempotent operations.
+
+Parallel batches use a bounded worker pool and wait for every call to settle
+before continuing. A successful `lifecycle.completesRun` tool completes the run
+after the rest of its batch has settled, so every emitted tool call retains a
+matching tool result.
 
 ## AgentToolContext
 
 ```typescript
 interface AgentToolContext {
+  sessionId?: string
   agentId: string
-  conversationId: string
+  conversationId?: string
+  runId?: string
   iteration: number
-  abortSignal?: AbortSignal
+  toolCallId?: string
+  toolCallIndex?: number
+  signal?: AbortSignal
   metadata?: Record<string, unknown>
+  snapshot?: AgentRuntimeStateSnapshot
+  emitUpdate?: (update: unknown) => void
 }
 ```
 
@@ -69,6 +91,16 @@ interface ToolPolicy {
 ```
 
 Tool names not listed in a policy map default to enabled and auto-approved.
+
+## Tool Approval
+
+When `autoApprove` is `false`, the runtime sends a `ToolApprovalRequest` through
+its host callback. The request includes the durable `runId`,
+`toolCallIndex`, and `assistantMessageId`, and its optional `signal` is
+cancelled when the run aborts. Local and hub hosts persist the request and
+decision through `DurableToolApprovalCoordinator`; a client response is
+accepted only for the assigned approval principal. Pending requests are
+replayed when the client attaches to the session.
 
 ## ToolCallRecord
 

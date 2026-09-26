@@ -392,6 +392,7 @@ function isAgentFinishReason(value: unknown): value is AgentFinishReason {
 	return (
 		value === "completed" ||
 		value === "max_iterations" ||
+		value === "budget_exhausted" ||
 		value === "aborted" ||
 		value === "mistake_limit" ||
 		value === "error"
@@ -548,6 +549,7 @@ function hubReplyErrorMessage(
 
 export interface HubRuntimeHostOptions {
 	url: string;
+	clientId?: string;
 	authToken?: string;
 	clientType?: string;
 	displayName?: string;
@@ -748,6 +750,7 @@ export class HubRuntimeHost implements RuntimeHost {
 	) {
 		this.clientContext = clientContext;
 		this.clientOptions = {
+			clientId: options.clientId,
 			authToken: options.authToken,
 			clientType: options.clientType ?? "core-hub-runtime",
 			displayName: options.displayName ?? "core hub runtime",
@@ -1130,6 +1133,57 @@ export class HubRuntimeHost implements RuntimeHost {
 			{ timeoutMs: null },
 		);
 		return reply.payload?.result as AgentResult | undefined;
+	}
+
+	async resumePendingRun(input: {
+		continuationKey: string;
+		start: StartSessionInput;
+		ownerToken?: string;
+		leaseDurationMs?: number;
+		reclaimExecuting?: boolean;
+	}): Promise<AgentResult> {
+		return this.resumePendingRunBatch({
+			continuationKeys: [input.continuationKey],
+			start: input.start,
+			ownerToken: input.ownerToken,
+			leaseDurationMs: input.leaseDurationMs,
+			reclaimExecuting: input.reclaimExecuting,
+		});
+	}
+
+	async resumePendingRunBatch(input: {
+		continuationKeys: string[];
+		start: StartSessionInput;
+		ownerToken?: string;
+		leaseDurationMs?: number;
+		reclaimExecuting?: boolean;
+	}): Promise<AgentResult> {
+		const sessionId = input.start.config.sessionId?.trim();
+		if (!sessionId) {
+			throw new Error("Durable run resume requires start.config.sessionId");
+		}
+		if (input.continuationKeys.length < 1) {
+			throw new Error("Durable run resume requires at least one continuation");
+		}
+		this.ensureSessionSubscription(sessionId);
+		const reply = await this.client.command(
+			"session.resume",
+			{
+				...(input.continuationKeys.length === 1
+					? { continuationKey: input.continuationKeys[0] }
+					: { continuationKeys: input.continuationKeys }),
+				start: input.start,
+				ownerToken: input.ownerToken,
+				leaseDurationMs: input.leaseDurationMs,
+				reclaimExecuting: input.reclaimExecuting,
+			},
+			sessionId,
+			{ timeoutMs: null },
+		);
+		if (!reply.ok) {
+			throw new Error(reply.error?.message ?? "Hub run resume failed");
+		}
+		return reply.payload?.result as AgentResult;
 	}
 
 	private async requestPendingPromptsList(
@@ -2066,6 +2120,13 @@ export class HubRuntimeHost implements RuntimeHost {
 			typeof event.payload?.approvalId === "string"
 				? event.payload.approvalId.trim()
 				: "";
+		const targetClientId =
+			typeof event.payload?.targetClientId === "string"
+				? event.payload.targetClientId.trim()
+				: "";
+		if (targetClientId && targetClientId !== this.client.getClientId()) {
+			return;
+		}
 		const toolCallId =
 			typeof event.payload?.toolCallId === "string"
 				? event.payload.toolCallId
@@ -2100,10 +2161,23 @@ export class HubRuntimeHost implements RuntimeHost {
 					typeof event.payload?.conversationId === "string"
 						? event.payload.conversationId
 						: sessionId,
+				runId:
+					typeof event.payload?.runId === "string"
+						? event.payload.runId
+						: undefined,
+				assistantMessageId:
+					typeof event.payload?.assistantMessageId === "string"
+						? event.payload.assistantMessageId
+						: undefined,
+				approvalId,
 				iteration:
 					typeof event.payload?.iteration === "number"
 						? event.payload.iteration
 						: 0,
+				toolCallIndex:
+					typeof event.payload?.toolCallIndex === "number"
+						? event.payload.toolCallIndex
+						: undefined,
 				toolCallId,
 				toolName,
 				input,

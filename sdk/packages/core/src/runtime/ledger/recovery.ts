@@ -1,44 +1,46 @@
-/**
- * Effect-ledger recovery — replay-or-fork across session restore [P2-2
- * wiring, roadmap].
- *
- * Gap D1: checkpoint ≠ 断点续跑 — restore rebuilds the conversation but tool
- * side effects are outside the recovery semantics. This module completes the
- * durable-execution story: after a restore creates a new session id, the
- * source session's *succeeded* effect records are re-keyed into the new
- * session, so the idempotency middleware in the recovered session replays
- * the recorded outcomes instead of double-applying effects. Failed records
- * are skipped (no recorded effect — re-execution is safe, per the ledger's
- * fork semantics).
- */
+import type { EffectLedger, EffectLedgerRecord } from "./effect-ledger";
+import { deriveIdempotencyKey } from "./idempotency-key";
 
-import type { EffectLedger } from "./effect-ledger";
+function rekeyEffect(
+	record: EffectLedgerRecord,
+	fromSessionId: string,
+	toSessionId: string,
+	runId?: string,
+): string {
+	const prefix = `${fromSessionId}:`;
+	const suffix = record.idempotencyKey.slice(prefix.length);
+	const segments = suffix.split(":");
+	const iterationSegment = record.runId ? undefined : (segments[0] ?? "-");
+	const iteration =
+		record.iteration ??
+		(iterationSegment && /^\d+$/.test(iterationSegment)
+			? Number(iterationSegment)
+			: undefined);
+	const inputHash = record.inputHash ?? segments.at(-1) ?? "none";
+	return deriveIdempotencyKey({
+		sessionId: toSessionId,
+		toolName: record.toolName,
+		runId: runId ?? record.runId,
+		iteration,
+		toolCallIndex:
+			record.toolCallIndex ?? (!record.runId && runId ? 0 : undefined),
+		inputHash,
+	});
+}
 
 export interface ReplayEffectsIntoSessionInput {
-	/** Source session whose effects are replayed. */
 	fromSessionId: string;
-	/** Recovered session receiving the re-keyed records. */
 	toSessionId: string;
-	/**
-	 * Only replay effects created at/before this ISO timestamp (e.g. the
-	 * checkpoint cutoff). When absent, all succeeded effects are replayed.
-	 */
+	runId?: string;
 	createdBefore?: string;
 }
 
 export interface EffectReplayOutcome {
-	/** Succeeded effects re-keyed into the recovered session. */
 	replayed: number;
-	/** Records skipped: failed (re-executable) or already present. */
+	inDoubt: number;
 	skipped: number;
 }
 
-/**
- * Re-keys the source session's succeeded effect records into the recovered
- * session so the idempotency middleware replays them. The key prefix swap
- * (`<fromSessionId>:...` → `<toSessionId>:...`) preserves the deterministic
- * derivation (iteration/tool/toolCallId/inputHash segments untouched).
- */
 export async function replayEffectsIntoSession(
 	ledger: EffectLedger,
 	input: ReplayEffectsIntoSessionInput,
@@ -46,16 +48,22 @@ export async function replayEffectsIntoSession(
 	const records = await ledger.list(input.fromSessionId);
 	const prefix = `${input.fromSessionId}:`;
 	let replayed = 0;
+	let inDoubt = 0;
 	let skipped = 0;
 	for (const record of records) {
-		if (record.status !== "succeeded") {
-			// Failed effects have no recorded side effect — re-execution is safe.
+		if (
+			input.runId &&
+			record.runId !== input.runId &&
+			(record.runId || !input.runId.startsWith("legacy_"))
+		) {
+			skipped += 1;
+			continue;
+		}
+		if (record.status === "failed") {
 			skipped += 1;
 			continue;
 		}
 		if (input.createdBefore && record.createdAt > input.createdBefore) {
-			// Effect postdates the checkpoint cutoff — it belongs to work the
-			// recovered session will redo naturally.
 			skipped += 1;
 			continue;
 		}
@@ -63,23 +71,35 @@ export async function replayEffectsIntoSession(
 			skipped += 1;
 			continue;
 		}
-		const reKeyed = `${input.toSessionId}:${record.idempotencyKey.slice(prefix.length)}`;
-		const existing = await ledger.get(reKeyed);
-		if (existing && existing.status === "succeeded") {
-			skipped += 1;
-			continue;
-		}
-		await ledger.claim({
-			idempotencyKey: reKeyed,
+		const source: EffectLedgerRecord =
+			record.status === "pending"
+				? {
+						...record,
+						status: "in_doubt",
+						completedAt: record.completedAt ?? new Date().toISOString(),
+						ownerId: undefined,
+						leaseExpiresAt: undefined,
+						error: "Source effect was pending when recovery started",
+					}
+				: record;
+		const idempotencyKey = rekeyEffect(
+			record,
+			input.fromSessionId,
+			input.toSessionId,
+			input.runId,
+		);
+		const result = await ledger.import({
+			idempotencyKey,
 			sessionId: input.toSessionId,
-			toolName: record.toolName,
-			toolCallId: record.toolCallId,
+			source,
 		});
-		await ledger.complete(reKeyed, {
-			status: "succeeded",
-			result: record.result,
-		});
-		replayed += 1;
+		if (result === "existing") {
+			skipped += 1;
+		} else if (source.status === "in_doubt") {
+			inDoubt += 1;
+		} else {
+			replayed += 1;
+		}
 	}
-	return { replayed, skipped };
+	return { replayed, inDoubt, skipped };
 }

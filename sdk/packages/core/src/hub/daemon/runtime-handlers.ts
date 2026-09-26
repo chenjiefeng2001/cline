@@ -67,16 +67,19 @@ export interface CreateLocalHubScheduleRuntimeHandlersOptions
 	 */
 	fetch?: typeof fetch;
 	telemetry?: ITelemetryService;
+	sessionHost?: LocalRuntimeHost;
 }
 
 export function createLocalHubScheduleRuntimeHandlers(
 	options: CreateLocalHubScheduleRuntimeHandlersOptions = {},
 ): HubScheduleRuntimeHandlers {
-	const sessionHost = new LocalRuntimeHost({
-		sessionService: new CoreSessionService(new SqliteSessionStore()),
-		fetch: options.fetch,
-		telemetry: options.telemetry,
-	});
+	const sessionHost =
+		options.sessionHost ??
+		new LocalRuntimeHost({
+			sessionService: new CoreSessionService(new SqliteSessionStore()),
+			fetch: options.fetch,
+			telemetry: options.telemetry,
+		});
 
 	return {
 		async startSession(request) {

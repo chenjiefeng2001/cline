@@ -2,9 +2,19 @@ export type {
 	EffectLedger,
 	EffectLedgerClaim,
 	EffectLedgerClaimInput,
+	EffectLedgerImportInput,
+	EffectLedgerImportResult,
+	EffectLedgerLease,
 	EffectLedgerOutcome,
 	EffectLedgerRecord,
 	EffectLedgerStatus,
+	EffectLedgerTerminalStatus,
+} from "./effect-ledger";
+export {
+	DEFAULT_EFFECT_LEASE_MS,
+	EffectLedgerCollisionError,
+	EffectLedgerLeaseLostError,
+	EffectLedgerUnavailableError,
 } from "./effect-ledger";
 export {
 	deriveIdempotencyKey,

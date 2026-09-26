@@ -150,7 +150,7 @@ async function runTurnWithRuntimeHealth(
 						...baseContext,
 						elapsedMs: Math.round(performance.now() - startedAt),
 					});
-					cancelPendingApprovals(
+					void cancelPendingApprovals(
 						ctx,
 						(approval) => approval.sessionId === input.sessionId,
 						reason,
@@ -295,7 +295,7 @@ export async function handleRunAbort(
 		typeof envelope.payload?.reason === "string"
 			? envelope.payload.reason
 			: "Run was aborted before pending approval or capability request was resolved.";
-	cancelPendingApprovals(
+	await cancelPendingApprovals(
 		ctx,
 		(approval) => approval.sessionId === sessionId,
 		reason,

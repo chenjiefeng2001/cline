@@ -114,7 +114,6 @@ export {
 	SDK_ERROR_TELEMETRY_EVENT,
 	stripUtf8Bom,
 } from "@cline/shared";
-export { CronUsageAggregator } from "./cron/service/usage-aggregator";
 export * from "@cline/shared/storage";
 export {
 	type ClineAccountBalance,
@@ -220,6 +219,7 @@ export type {
 	RestoreOptions,
 	RestoreResult,
 } from "./cline-core/types";
+export { CronUsageAggregator } from "./cron/service/usage-aggregator";
 export type {
 	LoadAgentPluginFromPathOptions,
 	PluginInitializationFailure,
@@ -257,6 +257,11 @@ export type {
 	UserInstructionConfigRecord,
 	UserInstructionConfigService,
 	UserInstructionConfigType,
+	UserInstructionSourceItem,
+	UserInstructionSourceReader,
+	UserInstructionSourceRecord,
+	UserInstructionSourceReference,
+	UserInstructionSourceSnapshot,
 	WorkflowConfig,
 } from "./extensions/config";
 export {
@@ -462,6 +467,21 @@ export {
 	readRemoteConfigSessionBlobUploadMetadata,
 	registerRemoteConfigSessionBlobUpload,
 } from "./remote-config/integration";
+export type {
+	CreateDurableToolApprovalInput,
+	DurableToolApprovalDecision,
+	DurableToolApprovalDecisionOutcome,
+	DurableToolApprovalDecisionResult,
+	DurableToolApprovalRecord,
+	DurableToolApprovalRequestOptions,
+	DurableToolApprovalStatus,
+	DurableToolApprovalStore,
+	SqliteDurableToolApprovalStoreOptions,
+} from "./runtime/approval/durable-tool-approval";
+export {
+	DurableToolApprovalCoordinator,
+	SqliteDurableToolApprovalStore,
+} from "./runtime/approval/durable-tool-approval";
 export type { RuntimeCapabilities } from "./runtime/capabilities";
 export { normalizeRuntimeCapabilities } from "./runtime/capabilities";
 export type {
@@ -469,6 +489,7 @@ export type {
 	ConnectionUpdateInput,
 } from "./runtime/config/connection-update";
 export { buildConnectionUpdate } from "./runtime/config/connection-update";
+export * from "./runtime/continuation/index";
 export { listSessionHistoryFromBackend } from "./runtime/host/history";
 export type { SessionBackend } from "./runtime/host/host";
 export {
@@ -476,7 +497,13 @@ export {
 	createRuntimeHost as createSessionHost,
 	resolveSessionBackend,
 } from "./runtime/host/host";
-export { LocalRuntimeHost } from "./runtime/host/local-runtime-host";
+export {
+	LocalRuntimeHost,
+	type RecoverPendingRunContinuationsOptions,
+	type ResumePendingRunInput,
+	type ResumePendingRunResult,
+	type RunContinuationRecoveryReport,
+} from "./runtime/host/local-runtime-host";
 export type {
 	PendingPromptMutationResult,
 	PendingPromptsDeleteInput,
@@ -506,9 +533,19 @@ export type {
 	EffectLedger,
 	EffectLedgerClaim,
 	EffectLedgerClaimInput,
+	EffectLedgerImportInput,
+	EffectLedgerImportResult,
+	EffectLedgerLease,
 	EffectLedgerOutcome,
 	EffectLedgerRecord,
 	EffectLedgerStatus,
+	EffectLedgerTerminalStatus,
+} from "./runtime/ledger/effect-ledger";
+export {
+	DEFAULT_EFFECT_LEASE_MS,
+	EffectLedgerCollisionError,
+	EffectLedgerLeaseLostError,
+	EffectLedgerUnavailableError,
 } from "./runtime/ledger/effect-ledger";
 export {
 	deriveIdempotencyKey,

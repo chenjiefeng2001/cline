@@ -19,6 +19,7 @@ import {
 	resolveWorkflowsConfigSearchPaths,
 	type UserInstructionConfigWatcherEvent,
 } from "./user-instruction-config-loader";
+import { createUserInstructionConfigService } from "./user-instruction-service";
 
 const WAIT_TIMEOUT_MS = 4_000;
 const WAIT_INTERVAL_MS = 25;
@@ -437,5 +438,102 @@ New release workflow.`,
 		expect(release?.filePath).toBe(
 			join(tempRoot, ".cline", "workflows", "release.md"),
 		);
+	});
+
+	it("creates a deterministic source reference without exposing source paths", async () => {
+		const tempRoot = await mkdtemp(
+			join(tmpdir(), "core-user-instructions-reference-"),
+		);
+		tempRoots.push(tempRoot);
+		const rulesDir = join(tempRoot, "rules");
+		const skillsDir = join(tempRoot, "skills");
+		const workflowsDir = join(tempRoot, "workflows");
+		await mkdir(rulesDir, { recursive: true });
+		await mkdir(join(skillsDir, "review"), { recursive: true });
+		await mkdir(workflowsDir, { recursive: true });
+		await writeFile(
+			join(rulesDir, "policy.md"),
+			"---\nname: policy\n---\nKeep policy stable.",
+		);
+		await writeFile(
+			join(skillsDir, "review", "SKILL.md"),
+			"---\nname: review\n---\nReview carefully.",
+		);
+		await writeFile(
+			join(workflowsDir, "release.md"),
+			"---\nname: release\n---\nRelease carefully.",
+		);
+		const service = createUserInstructionConfigService({
+			rules: { directories: [rulesDir] },
+			skills: { directories: [skillsDir] },
+			workflows: { directories: [workflowsDir] },
+		});
+		try {
+			await service.start();
+			const first = service.getSourceReference?.(["rule", "skill", "workflow"]);
+			expect(first).toMatchObject({ version: 1, algorithm: "sha256" });
+			expect(first?.digest).toMatch(/^[a-f0-9]{64}$/);
+			expect(JSON.stringify(first)).not.toContain(tempRoot);
+			await writeFile(
+				join(rulesDir, "policy.md"),
+				"---\nname: policy\n---\nChanged policy.",
+			);
+			await service.refreshType("rule");
+			const second = service.getSourceReference?.([
+				"rule",
+				"skill",
+				"workflow",
+			]);
+			expect(second?.digest).not.toBe(first?.digest);
+		} finally {
+			service.stop();
+		}
+	});
+
+	it("captures detached immutable source records", async () => {
+		const tempRoot = await mkdtemp(
+			join(tmpdir(), "core-user-instructions-snapshot-"),
+		);
+		tempRoots.push(tempRoot);
+		const rulesDir = join(tempRoot, "rules");
+		await mkdir(rulesDir, { recursive: true });
+		await writeFile(
+			join(rulesDir, "policy.md"),
+			"---\nname: policy\n---\nStable policy.",
+		);
+		const service = createUserInstructionConfigService({
+			rules: { directories: [rulesDir] },
+		});
+		try {
+			await service.start();
+			const snapshot = service.captureSourceSnapshot?.(["rule"]);
+			expect(snapshot).toBeDefined();
+			const record = snapshot?.getSnapshot("rule").get("policy");
+			expect(record?.contentHash).toMatch(/^[a-f0-9]{64}$/);
+			expect(Object.isFrozen(record)).toBe(true);
+			expect(Object.isFrozen(record?.item)).toBe(true);
+			expect("frontmatter" in (record?.item ?? {})).toBe(false);
+			const mutableMap = snapshot?.getSnapshot("rule") as Map<
+				string,
+				NonNullable<typeof record>
+			>;
+			mutableMap.clear();
+			expect(
+				snapshot?.getSnapshot("rule").get("policy")?.item.instructions,
+			).toBe("Stable policy.");
+			await writeFile(
+				join(rulesDir, "policy.md"),
+				"---\nname: policy\n---\nChanged policy.",
+			);
+			await service.refreshType("rule");
+			expect(
+				snapshot?.getSnapshot("rule").get("policy")?.item.instructions,
+			).toBe("Stable policy.");
+			expect(service.listRecords("rule")[0]?.item.instructions).toBe(
+				"Changed policy.",
+			);
+		} finally {
+			service.stop();
+		}
 	});
 });

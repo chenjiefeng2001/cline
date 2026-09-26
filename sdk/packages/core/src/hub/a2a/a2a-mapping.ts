@@ -11,6 +11,7 @@ import type {
 	A2AAgentCard,
 	A2AAgentInterface,
 	A2AAgentSkill,
+	A2AApprovalDescriptor,
 	A2ATask,
 	A2ATaskState,
 } from "./a2a-types";
@@ -26,6 +27,7 @@ export interface A2ASessionProjectionInput {
 export interface MapSessionToTaskOptions {
 	/** Whether an approval.requested is pending for this session. */
 	hasPendingApproval?: boolean;
+	approval?: A2AApprovalDescriptor;
 }
 
 /**
@@ -86,6 +88,7 @@ export function mapSessionToTask(
 			sessionId,
 			source: asString(record?.source),
 			pendingApproval: options.hasPendingApproval,
+			...(options.approval ? { approval: options.approval } : {}),
 		},
 	};
 }
@@ -118,7 +121,7 @@ export function buildAgentCard(input: {
 			streaming: input.streaming ?? true,
 			pushNotifications: false,
 		},
-		defaultInputModes: ["text"],
+		defaultInputModes: ["text", "application/json"],
 		defaultOutputModes: ["text"],
 		skills: input.skills ?? [],
 	};

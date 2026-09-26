@@ -252,6 +252,97 @@ describe("HubRuntimeHost", () => {
 		expect(sent).toEqual(result);
 	});
 
+	it("sends durable run resume commands to the hub", async () => {
+		subscribeMock.mockReturnValue(() => {});
+		const result = {
+			text: "resumed",
+			usage: {
+				inputTokens: 1,
+				outputTokens: 1,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalCost: 0,
+			},
+			messages: [],
+			toolCalls: [],
+			iterations: 1,
+			finishReason: "completed",
+			model: { id: "model", provider: "cline", info: {} },
+			startedAt: new Date("2026-04-21T00:00:00.000Z"),
+			endedAt: new Date("2026-04-21T00:00:01.000Z"),
+			durationMs: 1000,
+		};
+		commandMock.mockResolvedValue({ ok: true, payload: { result } });
+		const { HubRuntimeHost } = await import("./hub-runtime-host");
+		const host = new HubRuntimeHost({ url: "ws://127.0.0.1:25463/hub" });
+		const start = {
+			config: {
+				providerId: "cline",
+				modelId: "model",
+				systemPrompt: "system",
+				cwd: "/tmp/project",
+				workspaceRoot: "/tmp/project",
+				sessionId: "sess-resume",
+				enableTools: true,
+				enableSpawnAgent: false,
+				enableAgentTeams: false,
+				tools: [],
+			},
+		};
+
+		const sent = await host.resumePendingRun({
+			continuationKey: "approval:approval-1",
+			start,
+		});
+
+		expect(commandMock).toHaveBeenCalledWith(
+			"session.resume",
+			expect.objectContaining({
+				continuationKey: "approval:approval-1",
+				start,
+			}),
+			"sess-resume",
+			{ timeoutMs: null },
+		);
+		expect(sent).toEqual(result);
+	});
+
+	it("sends every continuation key for a durable run batch resume", async () => {
+		subscribeMock.mockReturnValue(() => {});
+		commandMock.mockResolvedValue({ ok: true, payload: {} });
+		const { HubRuntimeHost } = await import("./hub-runtime-host");
+		const host = new HubRuntimeHost({ url: "ws://127.0.0.1:25463/hub" });
+		const start = {
+			config: {
+				providerId: "cline",
+				modelId: "model",
+				systemPrompt: "system",
+				cwd: "/tmp/project",
+				workspaceRoot: "/tmp/project",
+				sessionId: "sess-resume-batch",
+				enableTools: true,
+				enableSpawnAgent: false,
+				enableAgentTeams: false,
+				tools: [],
+			},
+		};
+
+		await host.resumePendingRunBatch({
+			continuationKeys: ["approval:approval-1", "approval:approval-2"],
+			start,
+		});
+
+		expect(commandMock).toHaveBeenCalledWith(
+			"session.resume",
+			expect.objectContaining({
+				continuationKeys: ["approval:approval-1", "approval:approval-2"],
+				start,
+			}),
+			"sess-resume-batch",
+			{ timeoutMs: null },
+		);
+	});
+
 	it("projects canonical hub snapshots from replies and lifecycle events", async () => {
 		let onEvent: ((event: HubEventEnvelope) => void) | undefined;
 		subscribeMock.mockImplementation((listener) => {
@@ -426,16 +517,21 @@ describe("HubRuntimeHost", () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		expect(eventOrder).toEqual(["tool-started", "approval-requested"]);
-		expect(requestToolApproval).toHaveBeenCalledWith({
-			sessionId: "sess-1",
-			agentId: "agent-1",
-			conversationId: "conversation-1",
-			iteration: 2,
-			toolCallId: "call-1",
-			toolName: "run_commands",
-			input: { commands: ["echo hi"] },
-			policy: { autoApprove: false },
-		});
+		expect(requestToolApproval).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sessionId: "sess-1",
+				agentId: "agent-1",
+				conversationId: "conversation-1",
+				approvalId: "approval-1",
+				runId: undefined,
+				iteration: 2,
+				toolCallIndex: undefined,
+				toolCallId: "call-1",
+				toolName: "run_commands",
+				input: { commands: ["echo hi"] },
+				policy: { autoApprove: false },
+			}),
+		);
 		expect(commandMock).toHaveBeenLastCalledWith(
 			"approval.respond",
 			{ approvalId: "approval-1", approved: true, reason: "ok" },
@@ -575,16 +671,21 @@ describe("HubRuntimeHost", () => {
 		});
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
-		expect(requestToolApproval).toHaveBeenCalledWith({
-			sessionId: "sess-1",
-			agentId: "agent-1",
-			conversationId: "conversation-1",
-			iteration: 2,
-			toolCallId: "call-approval-1",
-			toolName: "run_commands",
-			input: { commands: ["echo hi"] },
-			policy: { autoApprove: false },
-		});
+		expect(requestToolApproval).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sessionId: "sess-1",
+				agentId: "agent-1",
+				conversationId: "conversation-1",
+				approvalId: "approval-1",
+				runId: undefined,
+				iteration: 2,
+				toolCallIndex: undefined,
+				toolCallId: "call-approval-1",
+				toolName: "run_commands",
+				input: { commands: ["echo hi"] },
+				policy: { autoApprove: false },
+			}),
+		);
 		expect(commandMock).toHaveBeenLastCalledWith(
 			"approval.respond",
 			{

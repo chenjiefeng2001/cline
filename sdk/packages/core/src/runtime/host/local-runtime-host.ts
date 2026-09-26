@@ -1,16 +1,22 @@
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { createToolStepId } from "@cline/agents";
 import type * as LlmsProviders from "@cline/llms";
 import {
 	type AgentConfig,
 	type AgentEvent,
 	type AgentResult,
+	type AgentTool,
 	captureSdkError,
 	createSessionId,
 	type ITelemetryService,
 	isLikelyAuthError,
+	type MessageWithMetadata,
 	normalizeUserInput,
+	type ToolApprovalRequest,
+	type ToolApprovalResult,
+	type ToolPolicy,
 } from "@cline/shared";
 import { setHomeDirIfUnset } from "@cline/shared/storage";
 import { isOAuthProvider } from "../../auth/provider-auth-registry";
@@ -22,6 +28,7 @@ import type { ToolExecutors } from "../../extensions/tools";
 import { DefaultToolNames } from "../../extensions/tools";
 import type { TeamEvent } from "../../extensions/tools/team";
 import type { HookEventPayload } from "../../hooks";
+import { wrapToolsWithMiddleware } from "../../middleware/wrap-tools";
 import { buildTelemetryAgentIdentity } from "../../services/agent-events";
 import { resolveWorkspacePath } from "../../services/config";
 import { prepareLocalRuntimeBootstrap } from "../../services/local-runtime-bootstrap";
@@ -85,9 +92,50 @@ import type { CoreSessionConfig } from "../../types/config";
 import type { CoreSessionEvent } from "../../types/events";
 import type { ActiveSession, PreparedTurnInput } from "../../types/session";
 import type { SessionRecord } from "../../types/sessions";
+import {
+	DurableToolApprovalCoordinator,
+	type DurableToolApprovalDecisionResult,
+	type DurableToolApprovalRecord,
+} from "../approval/durable-tool-approval";
 import type { RuntimeCapabilities } from "../capabilities";
 import { normalizeRuntimeCapabilities } from "../capabilities";
+import { resolveToolExecution } from "../config/agent-runtime-config-builder";
 import { normalizeConnectionUpdate } from "../config/connection-update";
+import {
+	DurableRunContinuationCoordinator,
+	type RunContinuationAgentChain,
+	type RunContinuationRecord,
+} from "../continuation/durable-run-continuation";
+import {
+	MAX_RECOVERY_SYSTEM_PROMPT_LENGTH,
+	parseRunRecoveryServerRuntime,
+	RUN_RECOVERY_SNAPSHOT_KIND,
+	RUN_RECOVERY_SNAPSHOT_VERSION,
+	type RunRecoveryIneligibilityReason,
+	type RunRecoveryServerRuntime,
+	type RunRecoverySnapshot,
+	snapshotSystemPromptHash,
+	snapshotTranscriptHash,
+} from "../continuation/recovery-snapshot";
+import {
+	createRunStateBatchResume,
+	isRunStateBatchResume,
+	MAX_RUN_STATE_RESUME_STEPS,
+	RUN_STATE_KIND,
+	RUN_STATE_VERSION,
+	type RunState,
+	type RunStateAgent,
+	type RunStateToolCallBatchResume,
+	type RunStateToolCallBatchStep,
+	runStateResumeSteps,
+	runStateResumeTurn,
+	runStateStepForRecord,
+} from "../continuation/run-state";
+import type { EffectLedger } from "../ledger/effect-ledger";
+import { hashToolInput } from "../ledger/idempotency-key";
+import { createIdempotencyMiddleware } from "../ledger/idempotency-middleware";
+import { replayEffectsIntoSession } from "../ledger/recovery";
+import { SqliteEffectLedger } from "../ledger/stores/sqlite-effect-ledger";
 import { DefaultRuntimeBuilder } from "../orchestration/runtime-builder";
 import {
 	OAuthReauthRequiredError,
@@ -95,7 +143,10 @@ import {
 	RuntimeOAuthTokenManager,
 } from "../orchestration/runtime-oauth-token-manager";
 import type { RuntimeBuilder } from "../orchestration/session-runtime";
-import { SessionRuntime } from "../orchestration/session-runtime-orchestrator";
+import {
+	SessionRuntime,
+	type SessionRuntimeOrchestratorDeps,
+} from "../orchestration/session-runtime-orchestrator";
 import { PendingPromptsController } from "../turn-queue/pending-prompt-service";
 import { manifestToSessionRecord } from "./history";
 import { AgentEventBridge } from "./local/agent-event-bridge";
@@ -127,7 +178,10 @@ import type {
 	StartSessionInput,
 	StartSessionResult,
 } from "./runtime-host";
-import { SessionNotFoundError } from "./runtime-host";
+import {
+	RUNTIME_INTERNAL_RECOVERY_OWNER,
+	SessionNotFoundError,
+} from "./runtime-host";
 import {
 	cloneAccumulatedUsage,
 	RuntimeHostEventBus,
@@ -186,6 +240,39 @@ function maxAccumulatedUsage(
 	};
 }
 
+function readCheckpointRunId(
+	metadata: Record<string, unknown> | undefined,
+): string | undefined {
+	if (
+		typeof metadata?.restoredFromSessionId !== "string" ||
+		!metadata.restoredFromSessionId.trim()
+	) {
+		return undefined;
+	}
+	const checkpoint = metadata.checkpoint;
+	if (
+		!checkpoint ||
+		typeof checkpoint !== "object" ||
+		Array.isArray(checkpoint)
+	) {
+		return undefined;
+	}
+	const latest = (checkpoint as { latest?: unknown }).latest;
+	if (!latest || typeof latest !== "object" || Array.isArray(latest)) {
+		return undefined;
+	}
+	const runId = (latest as { runId?: unknown }).runId;
+	return typeof runId === "string" && runId.trim() ? runId : undefined;
+}
+
+function resolveCheckpointRunId(checkpoint: {
+	ref: string;
+	runCount: number;
+	runId?: string;
+}): string {
+	return checkpoint.runId ?? `legacy_${checkpoint.runCount}_${checkpoint.ref}`;
+}
+
 function isIncomingCompactionStateStale(
 	incoming: SessionCompactionState,
 	current: SessionCompactionState | undefined,
@@ -203,7 +290,14 @@ export interface LocalRuntimeHostOptions {
 	distinctId?: string;
 	sessionService: SessionBackend;
 	runtimeBuilder?: RuntimeBuilder;
-	createAgent?: (config: AgentConfig) => SessionRuntime;
+	createAgent?: (
+		config: AgentConfig,
+		deps?: SessionRuntimeOrchestratorDeps,
+	) => SessionRuntime;
+	effectLedger?: EffectLedger;
+	approvalCoordinator?: DurableToolApprovalCoordinator;
+	continuationCoordinator?: DurableRunContinuationCoordinator;
+	preservePendingApprovalsOnDispose?: boolean;
 	capabilities?: RuntimeCapabilities;
 	toolPolicies?: AgentConfig["toolPolicies"];
 	providerSettingsManager?: ProviderSettingsManager;
@@ -215,6 +309,693 @@ export interface LocalRuntimeHostOptions {
 	 * the AI gateway providers when issuing HTTP requests.
 	 */
 	fetch?: typeof fetch;
+	recoveryOwner?: string;
+}
+
+export interface ResumePendingRunInput {
+	continuationKey: string;
+	start: StartSessionInput;
+	ownerToken?: string;
+	leaseDurationMs?: number;
+	reclaimExecuting?: boolean;
+}
+
+export interface ResumePendingRunResult {
+	result: AgentResult;
+	record: RunContinuationRecord;
+}
+
+export interface ResumePendingRunBatchInput {
+	/** Every decided continuation recorded for one assistant tool-call turn. */
+	continuationKeys: string[];
+	start: StartSessionInput;
+	ownerToken?: string;
+	leaseDurationMs?: number;
+	reclaimExecuting?: boolean;
+}
+
+export interface ResumePendingRunBatchResult {
+	result: AgentResult;
+	records: RunContinuationRecord[];
+}
+
+export interface RecoverPendingRunContinuationsOptions {
+	background?: boolean;
+	maxCandidates?: number;
+	sessionId?: string;
+}
+
+export interface RunContinuationRecoveryReport {
+	scanned: number;
+	eligible: number;
+	scheduled: number;
+	resumed: number;
+	skipped: number;
+	failed: number;
+	truncated: boolean;
+}
+
+interface RunContinuationRecoveryCandidate {
+	record: RunContinuationRecord;
+	continuationKeys: string[];
+	snapshot: RunRecoverySnapshot;
+	start: StartSessionInput;
+}
+
+const MAX_RESUME_TOOL_BATCH = 16;
+
+const RECOVERY_BUILTIN_TOOL_NAMES = new Set<string>([
+	DefaultToolNames.READ_FILES,
+	DefaultToolNames.SEARCH_CODEBASE,
+	DefaultToolNames.RUN_COMMANDS,
+	DefaultToolNames.FETCH_WEB_CONTENT,
+	DefaultToolNames.APPLY_PATCH,
+	DefaultToolNames.EDITOR,
+]);
+const RECOVERY_ALLOWED_SESSION_SOURCES = new Set<string>([
+	SessionSource.CORE,
+	SessionSource.CLI,
+	SessionSource.DESKTOP,
+	SessionSource.KANBAN,
+	SessionSource.API,
+	SessionSource.WEB,
+	SessionSource.VSCODE,
+	SessionSource.ENTERPRISE,
+	SessionSource.IDE,
+	SessionSource.JETBRAINS,
+	SessionSource.NEOVIM,
+]);
+
+function buildRecoverySnapshot(
+	session: ActiveSession,
+	request: ToolApprovalRequest,
+	expectedRecoveryOwner?: string,
+	persistedMessages?: readonly MessageWithMetadata[],
+): RunRecoverySnapshot | undefined {
+	const config = session.config;
+	const source = session.source || "unknown";
+	if (
+		!request.runId ||
+		!request.approvalId ||
+		!request.assistantMessageId ||
+		config.systemPrompt.length > MAX_RECOVERY_SYSTEM_PROMPT_LENGTH
+	) {
+		return undefined;
+	}
+	const messages = persistedMessages ?? session.agent.getMessages();
+	const lastMessage = messages.at(-1);
+	const assistantToolCallCount =
+		lastMessage?.role === "assistant" && Array.isArray(lastMessage.content)
+			? lastMessage.content.filter((part) => {
+					const type = (part as { type?: unknown }).type;
+					return type === "tool-call" || type === "tool_use";
+				}).length
+			: 0;
+	const toolOrigin = RECOVERY_BUILTIN_TOOL_NAMES.has(request.toolName)
+		? "core-builtin"
+		: "unknown";
+	const clientContributionsPresent = Boolean(
+		session.hasClientContributions ||
+			(config.extraTools?.length ?? 0) > 0 ||
+			(config.extensions?.some(
+				(extension) => extension.name !== "core.hook_config_files",
+			) ??
+				false) ||
+			(config.pluginPaths?.length ?? 0) > 0 ||
+			(config.toolRoutingRules?.length ?? 0) > 0 ||
+			config.onTeamEvent ||
+			config.onConsecutiveMistakeLimitReached ||
+			config.checkpoint?.createCheckpoint ||
+			config.compaction?.compact,
+	);
+	let reason: RunRecoveryIneligibilityReason = "eligible";
+	if (!session.serverRuntimePolicyPresent) {
+		reason = "config_unavailable";
+	} else if (clientContributionsPresent) {
+		reason = "client_contribution";
+	} else if (
+		source === "a2a" &&
+		(!session.recoveryOwner ||
+			!expectedRecoveryOwner ||
+			session.recoveryOwner !== expectedRecoveryOwner)
+	) {
+		reason = "a2a";
+	} else if (
+		source !== "a2a" &&
+		!RECOVERY_ALLOWED_SESSION_SOURCES.has(source)
+	) {
+		reason = "unknown_origin";
+	} else if (
+		source === SessionSource.SUBAGENT ||
+		config.teamName?.trim() ||
+		config.enableSpawnAgent ||
+		config.enableAgentTeams
+	) {
+		reason = "team_or_subagent";
+	} else if (request.toolCallIndex !== 0 || assistantToolCallCount !== 1) {
+		// A parallel session still replays a single-tool turn unchanged, so only
+		// multi-tool turns stay ambiguous here; the turn-level cursor plus the
+		// persisted assistant turn decide whether the batch is complete.
+		reason = "parallel_or_ambiguous";
+	} else if (toolOrigin === "unknown") {
+		reason = "custom_tool";
+	} else if (
+		messages.length === 0 ||
+		messages.at(-1)?.id !== request.assistantMessageId
+	) {
+		reason = "config_unavailable";
+	} else if (config.systemPrompt.length > MAX_RECOVERY_SYSTEM_PROMPT_LENGTH) {
+		reason = "config_unavailable";
+	}
+	let toolPolicies: Record<string, ToolPolicy> | undefined;
+	if (config.toolPolicies) {
+		try {
+			toolPolicies = JSON.parse(JSON.stringify(config.toolPolicies)) as Record<
+				string,
+				ToolPolicy
+			>;
+		} catch {
+			reason = "config_unavailable";
+		}
+	}
+	let serverRuntime: RunRecoveryServerRuntime | undefined;
+	if (
+		session.serverRuntimeSources !== undefined ||
+		config.skills !== undefined
+	) {
+		try {
+			serverRuntime = parseRunRecoveryServerRuntime({
+				configExtensions: session.serverRuntimeSources ?? [],
+				...(config.skills !== undefined ? { skills: config.skills } : {}),
+			});
+			if (serverRuntime) {
+				const sourceReference =
+					session.runtime.getServerRuntimeSourceReference?.();
+				if (!sourceReference) {
+					reason = "config_unavailable";
+				} else {
+					serverRuntime = {
+						...serverRuntime,
+						sourceReference,
+					};
+				}
+			}
+		} catch {
+			reason = "config_unavailable";
+		}
+	}
+	return {
+		kind: RUN_RECOVERY_SNAPSHOT_KIND,
+		version: RUN_RECOVERY_SNAPSHOT_VERSION,
+		capturedAt: new Date().toISOString(),
+		sessionId: session.sessionId,
+		source,
+		...(session.recoveryOwner ? { recoveryOwner: session.recoveryOwner } : {}),
+		interactive: session.interactive,
+		toolName: request.toolName,
+		toolOrigin,
+		clientContributionsPresent,
+		run: {
+			runId: request.runId ?? "",
+			agentId: request.agentId,
+			conversationId: request.conversationId,
+			iteration: request.iteration,
+			toolCallIndex: request.toolCallIndex ?? 0,
+			assistantMessageId: request.assistantMessageId ?? "",
+			toolCallId: request.toolCallId,
+			approvalId: request.approvalId ?? "",
+		},
+		preparedInputHash: hashToolInput(request.input),
+		transcript: {
+			messageCount: messages.length,
+			lastMessageId: messages.at(-1)?.id ?? "",
+			transcriptHash: snapshotTranscriptHash(messages),
+			systemPromptHash: snapshotSystemPromptHash(config.systemPrompt),
+		},
+		config: {
+			providerId: config.providerId,
+			modelId: config.modelId,
+			cwd: config.cwd,
+			workspaceRoot: config.workspaceRoot ?? config.cwd,
+			systemPrompt: config.systemPrompt,
+			mode: config.mode ?? "act",
+			enableTools: config.enableTools,
+			enableSpawnAgent: config.enableSpawnAgent,
+			enableAgentTeams: config.enableAgentTeams,
+			maxIterations: config.maxIterations,
+			budget: config.budget,
+			toolExecution:
+				resolveToolExecution(config.maxParallelToolCalls) === "parallel"
+					? "parallel"
+					: "sequential",
+			...(config.maxParallelToolCalls === undefined
+				? {}
+				: { maxParallelToolCalls: config.maxParallelToolCalls }),
+			toolPolicies,
+		},
+		...(serverRuntime ? { serverRuntime } : {}),
+		eligibility: {
+			autoRecover: reason === "eligible",
+			reason,
+		},
+	};
+}
+
+function buildRunStateAgent(session: ActiveSession): RunStateAgent {
+	const agentId = session.agent.getAgentId();
+	const parentAgentId = session.agent.getParentAgentId?.();
+	if (!parentAgentId) {
+		return { agentId };
+	}
+	const rootRunId = session.agent.getRootRunId?.();
+	return {
+		agentId,
+		parentAgentId,
+		...(rootRunId ? { rootRunId } : {}),
+	};
+}
+
+/**
+ * Agent chain that owns a tool approval request. A delegated (sub-agent or
+ * teammate) tool call is made by an agent other than the session's own agent,
+ * so the chain is derived from the request rather than from the host session:
+ * the host only owns the lead agent and cannot see the child's transcript.
+ */
+function buildApprovalAgentChain(
+	session: ActiveSession,
+	request: ToolApprovalRequest,
+): RunContinuationAgentChain {
+	const sessionAgentId = session.agent.getAgentId();
+	const requestingAgentId = request.agentId;
+	const parentAgentId =
+		request.parentAgentId ??
+		(requestingAgentId === sessionAgentId
+			? session.agent.getParentAgentId?.()
+			: sessionAgentId);
+	if (!parentAgentId) {
+		return { agentId: requestingAgentId };
+	}
+	const rootRunId = request.rootRunId ?? session.agent.getRootRunId?.();
+	return {
+		agentId: requestingAgentId,
+		parentAgentId,
+		...(rootRunId ? { rootRunId } : {}),
+	};
+}
+
+function buildRunStateFromSnapshot(
+	snapshot: RunRecoverySnapshot,
+	agent?: RunStateAgent,
+): RunState {
+	return {
+		kind: RUN_STATE_KIND,
+		version: RUN_STATE_VERSION,
+		capturedAt: snapshot.capturedAt,
+		source: snapshot.source,
+		...(snapshot.recoveryOwner
+			? { recoveryOwner: snapshot.recoveryOwner }
+			: {}),
+		interactive: snapshot.interactive,
+		resume: {
+			type: "tool_call",
+			sessionId: snapshot.sessionId,
+			...snapshot.run,
+			stepId: createToolStepId(
+				snapshot.run.runId,
+				snapshot.run.iteration,
+				snapshot.run.toolCallIndex,
+			),
+			toolName: snapshot.toolName,
+			preparedInputHash: snapshot.preparedInputHash,
+		},
+		...(agent ? { agent } : {}),
+		transcript: snapshot.transcript,
+		config: {
+			providerId: snapshot.config.providerId,
+			modelId: snapshot.config.modelId,
+			cwd: snapshot.config.cwd,
+			workspaceRoot: snapshot.config.workspaceRoot,
+			systemPrompt: snapshot.config.systemPrompt,
+			mode: snapshot.config.mode,
+			enableTools: snapshot.config.enableTools,
+			enableSpawnAgent: snapshot.config.enableSpawnAgent,
+			enableAgentTeams: snapshot.config.enableAgentTeams,
+			...(snapshot.config.maxIterations === undefined
+				? {}
+				: { maxIterations: snapshot.config.maxIterations }),
+			...(snapshot.config.budget === undefined
+				? {}
+				: { budget: snapshot.config.budget }),
+			toolExecution: snapshot.config.toolExecution,
+			...(snapshot.config.maxParallelToolCalls === undefined
+				? {}
+				: {
+						maxParallelToolCalls: snapshot.config.maxParallelToolCalls,
+					}),
+			...(snapshot.config.toolPolicies === undefined
+				? {}
+				: { toolPolicies: snapshot.config.toolPolicies }),
+		},
+		...(snapshot.serverRuntime
+			? { serverRuntime: snapshot.serverRuntime }
+			: {}),
+	};
+}
+
+function isRecoveryProcessAlive(pid: number): boolean {
+	if (!Number.isFinite(pid) || pid <= 0) {
+		return false;
+	}
+	try {
+		process.kill(Math.floor(pid), 0);
+		return true;
+	} catch (error) {
+		return (
+			typeof error === "object" &&
+			error !== null &&
+			"code" in error &&
+			(error as { code?: string }).code === "EPERM"
+		);
+	}
+}
+
+function isStaleRecoverySession(row: SessionRow): boolean {
+	return (
+		row.status === "failed" &&
+		row.metadata?.terminal_marker === "failed_external_process_exit" &&
+		row.metadata?.terminal_marker_source === "stale_session_reconciler"
+	);
+}
+
+function readPersistedMessageId(message: unknown): string | undefined {
+	if (typeof message !== "object" || message === null) {
+		return undefined;
+	}
+	const id = (message as { id?: unknown }).id;
+	return typeof id === "string" ? id : undefined;
+}
+
+function buildRunStateStartInput(state: RunState): StartSessionInput {
+	const start: StartSessionInput = {
+		source: state.source as SessionSource,
+		interactive: state.interactive,
+		config: {
+			sessionId: state.resume.sessionId,
+			providerId: state.config.providerId,
+			modelId: state.config.modelId,
+			cwd: state.config.cwd,
+			workspaceRoot: state.config.workspaceRoot,
+			systemPrompt: state.config.systemPrompt,
+			mode: state.config.mode,
+			enableTools: state.config.enableTools,
+			enableSpawnAgent: state.config.enableSpawnAgent,
+			enableAgentTeams: state.config.enableAgentTeams,
+			maxIterations: state.config.maxIterations,
+			...(state.config.budget === undefined
+				? {}
+				: { budget: state.config.budget }),
+			maxParallelToolCalls: state.config.maxParallelToolCalls,
+			toolPolicies: state.config.toolPolicies,
+			...(state.serverRuntime?.skills
+				? { skills: [...state.serverRuntime.skills] }
+				: {}),
+		},
+		...(state.serverRuntime
+			? {
+					localRuntime: {
+						configExtensions: [...state.serverRuntime.configExtensions],
+					},
+				}
+			: {}),
+		toolPolicies: state.config.toolPolicies,
+	};
+	if (state.recoveryOwner) {
+		start[RUNTIME_INTERNAL_RECOVERY_OWNER] = state.recoveryOwner;
+	}
+	return start;
+}
+
+function assertRunStateMatchesRecord(
+	state: RunState,
+	record: RunContinuationRecord,
+): void {
+	const turn = runStateResumeTurn(state.resume);
+	if (
+		turn.sessionId !== record.sessionId ||
+		turn.runId !== record.runId ||
+		turn.agentId !== record.agentId ||
+		turn.conversationId !== record.conversationId ||
+		turn.iteration !== record.iteration ||
+		turn.assistantMessageId !== record.assistantMessageId
+	) {
+		throw new Error(
+			`Run state identity does not match durable continuation: ${record.continuationKey}`,
+		);
+	}
+	if (state.agent && state.agent.agentId !== record.agentId) {
+		throw new Error(
+			`Run state agent identity does not match durable continuation: ${record.continuationKey}`,
+		);
+	}
+	if (
+		record.agentChain &&
+		state.agent &&
+		(state.agent.parentAgentId !== record.agentChain.parentAgentId ||
+			state.agent.rootRunId !== record.agentChain.rootRunId)
+	) {
+		throw new Error(
+			`Run state agent chain does not match durable continuation: ${record.continuationKey}`,
+		);
+	}
+	const step = runStateStepForRecord(state, record);
+	if (!step) {
+		throw new Error(
+			`Run state does not cover durable continuation step: ${record.continuationKey}`,
+		);
+	}
+	if (
+		step.stepId !== undefined &&
+		step.stepId !==
+			createToolStepId(record.runId, record.iteration, record.toolCallIndex)
+	) {
+		throw new Error(
+			`Run state step identity does not match durable continuation: ${record.continuationKey}`,
+		);
+	}
+}
+
+function readPersistedToolCalls(
+	message: MessageWithMetadata | undefined,
+): { toolCallId: string; toolName: string }[] | undefined {
+	if (
+		!message ||
+		message.role !== "assistant" ||
+		!Array.isArray(message.content)
+	) {
+		return undefined;
+	}
+	const calls: { toolCallId: string; toolName: string }[] = [];
+	for (const part of message.content) {
+		const type = (part as { type?: unknown }).type;
+		if (type !== "tool-call" && type !== "tool_use") {
+			continue;
+		}
+		const toolCallId =
+			(part as { toolCallId?: unknown }).toolCallId ??
+			(part as { call_id?: unknown }).call_id;
+		const toolName =
+			(part as { toolName?: unknown }).toolName ??
+			(part as { name?: unknown }).name;
+		if (typeof toolCallId !== "string" || typeof toolName !== "string") {
+			return undefined;
+		}
+		calls.push({ toolCallId, toolName });
+	}
+	return calls;
+}
+
+/**
+ * Prove that a persisted batch resume describes exactly the assistant turn that
+ * is on disk: same message, same tool-call count, same call order. Any drift
+ * between the recorded turn and the replayed batch keeps the run on the manual
+ * recovery path. Unknown persisted part shapes are left to the agent runtime,
+ * which validates the replayed batch against the transcript it actually runs.
+ */
+function assertRunStateBatchMatchesTranscript(
+	batch: RunStateToolCallBatchResume,
+	persistedMessages: readonly MessageWithMetadata[],
+): void {
+	const message = persistedMessages.at(-1);
+	if (readPersistedMessageId(message) !== batch.assistantMessageId) {
+		throw new Error(
+			`Run state batch does not match the persisted assistant turn: ${batch.assistantMessageId}`,
+		);
+	}
+	const calls = readPersistedToolCalls(message);
+	if (!calls) {
+		return;
+	}
+	if (calls.length !== batch.steps.length) {
+		throw new Error(
+			`Run state batch does not cover every persisted tool call: ${batch.assistantMessageId}`,
+		);
+	}
+	for (const [index, step] of batch.steps.entries()) {
+		const call = calls[index] as { toolCallId: string; toolName: string };
+		if (
+			call.toolCallId !== step.toolCallId ||
+			call.toolName !== step.toolName
+		) {
+			throw new Error(
+				`Run state batch step does not match the persisted assistant turn: ${batch.assistantMessageId}`,
+			);
+		}
+	}
+}
+
+/**
+ * Prove that the replayed continuations are exactly the persisted assistant
+ * turn: same message, same tool-call count, same call order. Continuations that
+ * only carry legacy per-step run states rely on this transcript proof, and a
+ * single-tool resume uses it to reject multi-tool turns before any lease is
+ * claimed.
+ */
+function assertPersistedTurnCoversContinuations(
+	records: readonly RunContinuationRecord[],
+	persistedMessages: readonly MessageWithMetadata[],
+): void {
+	const first = records[0] as RunContinuationRecord;
+	const message = persistedMessages.at(-1);
+	if (readPersistedMessageId(message) !== first.assistantMessageId) {
+		throw new Error(
+			`Run continuation replay does not match the persisted assistant turn: ${first.continuationKey}`,
+		);
+	}
+	const calls = readPersistedToolCalls(message);
+	if (!calls) {
+		return;
+	}
+	if (calls.length !== records.length) {
+		throw new Error(
+			`Run continuation replay does not cover every persisted tool call: ${first.continuationKey}`,
+		);
+	}
+	for (const [index, record] of records.entries()) {
+		const call = calls[index] as { toolCallId: string; toolName: string };
+		if (
+			call.toolCallId !== record.toolCallId ||
+			call.toolName !== record.toolName
+		) {
+			throw new Error(
+				`Run continuation replay does not match the persisted tool call: ${record.continuationKey}`,
+			);
+		}
+	}
+}
+
+/**
+ * Require the recorded batch cursor to cover exactly the continuations being
+ * replayed, in persisted order.
+ */
+function assertRunStateBatchCoversRecords(
+	batch: RunStateToolCallBatchResume,
+	records: readonly RunContinuationRecord[],
+): void {
+	if (batch.steps.length !== records.length) {
+		throw new Error(
+			`Run state batch does not cover every durable continuation: ${batch.assistantMessageId}`,
+		);
+	}
+	for (const [index, record] of records.entries()) {
+		const step = batch.steps[index] as RunStateToolCallBatchStep;
+		if (
+			step.toolCallIndex !== index ||
+			record.toolCallIndex !== index ||
+			record.toolCallId !== step.toolCallId ||
+			record.toolName !== step.toolName ||
+			record.approvalId !== step.approvalId ||
+			record.preparedInputHash !== step.preparedInputHash
+		) {
+			throw new Error(
+				`Run state batch step does not match durable continuation: ${record.continuationKey}`,
+			);
+		}
+	}
+}
+
+/**
+ * Locate the turn-level batch cursor for a group of continuations. Returns
+ * `undefined` when no member carries one (legacy per-step states).
+ */
+function findRunStateBatch(
+	records: readonly RunContinuationRecord[],
+): RunStateToolCallBatchResume | undefined {
+	const batches = records
+		.map((record) => record.runState?.resume)
+		.filter((resume): resume is RunStateToolCallBatchResume =>
+			Boolean(resume && isRunStateBatchResume(resume)),
+		);
+	if (batches.length === 0) {
+		return undefined;
+	}
+	const first = batches[0] as RunStateToolCallBatchResume;
+	if (
+		batches.some((batch) => JSON.stringify(batch) !== JSON.stringify(first))
+	) {
+		throw new Error(
+			"Run continuation batch states disagree on the assistant turn",
+		);
+	}
+	return first;
+}
+
+function resolveRunStateStepId(
+	state: RunState | undefined,
+	record: RunContinuationRecord,
+): string | undefined {
+	return state ? runStateStepForRecord(state, record)?.stepId : undefined;
+}
+
+function buildRecoveryStartInput(
+	snapshot: RunRecoverySnapshot,
+): StartSessionInput {
+	const start: StartSessionInput = {
+		source: snapshot.source as SessionSource,
+		interactive: snapshot.interactive,
+		config: {
+			sessionId: snapshot.sessionId,
+			providerId: snapshot.config.providerId,
+			modelId: snapshot.config.modelId,
+			cwd: snapshot.config.cwd,
+			workspaceRoot: snapshot.config.workspaceRoot,
+			systemPrompt: snapshot.config.systemPrompt,
+			mode: snapshot.config.mode,
+			enableTools: snapshot.config.enableTools,
+			enableSpawnAgent: snapshot.config.enableSpawnAgent,
+			enableAgentTeams: snapshot.config.enableAgentTeams,
+			maxIterations: snapshot.config.maxIterations,
+			...(snapshot.config.budget === undefined
+				? {}
+				: { budget: snapshot.config.budget }),
+			maxParallelToolCalls: snapshot.config.maxParallelToolCalls,
+			toolPolicies: snapshot.config.toolPolicies,
+			...(snapshot.serverRuntime?.skills
+				? { skills: [...snapshot.serverRuntime.skills] }
+				: {}),
+		},
+		...(snapshot.serverRuntime
+			? {
+					localRuntime: {
+						configExtensions: [...snapshot.serverRuntime.configExtensions],
+					},
+				}
+			: {}),
+		toolPolicies: snapshot.config.toolPolicies,
+	};
+	if (snapshot.recoveryOwner) {
+		start[RUNTIME_INTERNAL_RECOVERY_OWNER] = snapshot.recoveryOwner;
+	}
+	return start;
 }
 
 export class LocalRuntimeHost implements RuntimeHost {
@@ -222,7 +1003,20 @@ export class LocalRuntimeHost implements RuntimeHost {
 	public readonly pendingPrompts: PendingPromptsServiceApi;
 	private readonly sessionService: SessionBackend;
 	private readonly runtimeBuilder: RuntimeBuilder;
-	private readonly createAgentInstance: (config: AgentConfig) => SessionRuntime;
+	private readonly createAgentInstance: (
+		config: AgentConfig,
+		deps?: SessionRuntimeOrchestratorDeps,
+	) => SessionRuntime;
+	private readonly effectLedger: EffectLedger;
+	private readonly ownsEffectLedger: boolean;
+	private effectLedgerInit: Promise<void> | undefined;
+	private readonly approvalCoordinator: DurableToolApprovalCoordinator;
+	private readonly ownsApprovalCoordinator: boolean;
+	private readonly continuationCoordinator: DurableRunContinuationCoordinator;
+	private readonly ownsContinuationCoordinator: boolean;
+	private readonly preservePendingApprovalsOnDispose: boolean;
+	private readonly recoveryOwner?: string;
+	private disposed = false;
 	private readonly toolExecutors?: Partial<ToolExecutors>;
 	private readonly defaultCapabilities?: RuntimeCapabilities;
 	private readonly defaultToolPolicies?: AgentConfig["toolPolicies"];
@@ -232,6 +1026,8 @@ export class LocalRuntimeHost implements RuntimeHost {
 	private readonly defaultFetch?: typeof fetch;
 	private readonly events = new RuntimeHostEventBus();
 	private readonly sessions = new Map<string, ActiveSession>();
+	private readonly recoveryTasks = new Set<Promise<unknown>>();
+	private readonly restoringSessionIds = new Set<string>();
 	// Serializes manifest read-modify-writes per session; see mutateSessionManifest.
 	private readonly manifestMutationQueues = new Map<string, Promise<void>>();
 	private readonly usageBySession = new Map<string, SessionAccumulatedUsage>();
@@ -251,7 +1047,21 @@ export class LocalRuntimeHost implements RuntimeHost {
 		this.sessionService = options.sessionService;
 		this.runtimeBuilder = options.runtimeBuilder ?? new DefaultRuntimeBuilder();
 		this.createAgentInstance =
-			options.createAgent ?? ((config) => new SessionRuntime(config));
+			options.createAgent ??
+			((config, deps) => new SessionRuntime(config, deps));
+		this.effectLedger = options.effectLedger ?? new SqliteEffectLedger();
+		this.ownsEffectLedger = options.effectLedger === undefined;
+		this.approvalCoordinator =
+			options.approvalCoordinator ?? new DurableToolApprovalCoordinator();
+		this.ownsApprovalCoordinator = options.approvalCoordinator === undefined;
+		this.continuationCoordinator =
+			options.continuationCoordinator ??
+			new DurableRunContinuationCoordinator();
+		this.ownsContinuationCoordinator =
+			options.continuationCoordinator === undefined;
+		this.preservePendingApprovalsOnDispose =
+			options.preservePendingApprovalsOnDispose === true;
+		this.recoveryOwner = options.recoveryOwner?.trim() || undefined;
 		this.defaultCapabilities = normalizeRuntimeCapabilities(
 			options.capabilities,
 		);
@@ -300,6 +1110,238 @@ export class LocalRuntimeHost implements RuntimeHost {
 		});
 	}
 
+	private assertNotDisposed(): void {
+		if (this.disposed) {
+			throw new Error("LocalRuntimeHost has been disposed");
+		}
+	}
+
+	private async ensureEffectLedger(): Promise<void> {
+		this.assertNotDisposed();
+		if (!this.effectLedgerInit) {
+			this.effectLedgerInit = Promise.resolve()
+				.then(async () => {
+					await this.effectLedger.init();
+				})
+				.catch((error) => {
+					this.effectLedgerInit = undefined;
+					throw error;
+				});
+		}
+		await this.effectLedgerInit;
+	}
+
+	private createToolWrapper(
+		sessionId: string,
+	): (tools: AgentTool[]) => AgentTool[] {
+		const resolveSessionId = (context: { sessionId?: string }): string =>
+			context.sessionId?.trim() || sessionId;
+		const middleware = createIdempotencyMiddleware({
+			ledger: this.effectLedger,
+			sessionId: resolveSessionId,
+		});
+		return (tools) =>
+			wrapToolsWithMiddleware(tools, {
+				chain: [middleware],
+				sessionId: resolveSessionId,
+			});
+	}
+
+	private async prepareApprovalContinuation(
+		session: ActiveSession,
+		request: ToolApprovalRequest,
+	): Promise<{ record?: RunContinuationRecord; error?: string }> {
+		const assistantMessageId = request.assistantMessageId?.trim();
+		if (!assistantMessageId) {
+			return {};
+		}
+		const agentChain = buildApprovalAgentChain(session, request);
+		try {
+			// A delegated tool call belongs to the child's own conversation, which
+			// the host cannot see: only the session transcript and system prompt
+			// are available here. Persisting them as if they described the child
+			// would produce a recovery state that silently replays the wrong turn,
+			// so a delegated run records its chain and nothing else. The resume
+			// boundary then refuses it until agent chain recovery exists.
+			if (agentChain.parentAgentId === undefined) {
+				await this.invoke<void>(
+					"persistSessionMessages",
+					session.sessionId,
+					session.agent.getMessages(),
+					session.config.systemPrompt,
+				);
+			}
+			const persistedMessages = agentChain.parentAgentId
+				? undefined
+				: await this.readSessionMessages(session.sessionId);
+			const recoverySnapshot =
+				persistedMessages === undefined
+					? undefined
+					: buildRecoverySnapshot(
+							session,
+							request,
+							this.recoveryOwner,
+							persistedMessages,
+						);
+			const baseRunState = recoverySnapshot
+				? buildRunStateFromSnapshot(
+						recoverySnapshot,
+						buildRunStateAgent(session),
+					)
+				: undefined;
+			const runState =
+				baseRunState && persistedMessages
+					? await this.withTurnBatchRunState(
+							baseRunState,
+							session,
+							request,
+							persistedMessages,
+						)
+					: undefined;
+			const record = await this.continuationCoordinator.recordApprovalRequest({
+				request,
+				assistantMessageId,
+				// The durable record describes the agent that actually requested
+				// approval, not the session's lead agent.
+				agentId: agentChain.agentId,
+				conversationId: request.conversationId,
+				recoverySnapshot,
+				runState,
+				agentChain,
+			});
+			return record ? { record } : {};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			session.config.logger?.error?.(
+				"Failed to persist tool approval continuation",
+				{ sessionId: session.sessionId, error },
+			);
+			captureSdkError(session.config.telemetry, {
+				component: "core",
+				operation: "session.persist_tool_approval_continuation",
+				severity: "error",
+				handled: true,
+				error,
+				context: { sessionId: session.sessionId },
+			});
+			return { error: message };
+		}
+	}
+
+	/**
+	 * Upgrade a per-step run state to the turn-level batch cursor once every
+	 * tool call of the persisted assistant turn has a durable continuation.
+	 * Partial turns keep the per-step cursor, so an interrupted turn can never
+	 * be replayed as if it were complete. Sequential and parallel sessions are
+	 * both eligible: the cursor only records the turn, while the recorded
+	 * `toolExecution` decides how the replay executes it.
+	 */
+	private async withTurnBatchRunState(
+		state: RunState,
+		session: ActiveSession,
+		request: ToolApprovalRequest,
+		persistedMessages: readonly MessageWithMetadata[],
+	): Promise<RunState> {
+		try {
+			const turn = runStateResumeTurn(state.resume);
+			const message = persistedMessages.at(-1);
+			if (readPersistedMessageId(message) !== turn.assistantMessageId) {
+				return state;
+			}
+			const calls = readPersistedToolCalls(message);
+			if (
+				!calls ||
+				calls.length < 2 ||
+				calls.length > MAX_RUN_STATE_RESUME_STEPS
+			) {
+				return state;
+			}
+			const siblings = (
+				await this.continuationCoordinator.listRecoverable(
+					session.sessionId,
+					MAX_RUN_STATE_RESUME_STEPS * 4,
+				)
+			).filter(
+				(record) =>
+					record.runId === turn.runId &&
+					record.agentId === turn.agentId &&
+					record.conversationId === turn.conversationId &&
+					record.iteration === turn.iteration &&
+					record.assistantMessageId === turn.assistantMessageId &&
+					record.toolCallIndex < calls.length,
+			);
+			const cursors = new Map<number, RunStateToolCallBatchStep>();
+			for (const record of siblings) {
+				cursors.set(record.toolCallIndex, {
+					stepId: createToolStepId(
+						turn.runId,
+						turn.iteration,
+						record.toolCallIndex,
+					),
+					toolCallIndex: record.toolCallIndex,
+					toolCallId: record.toolCallId,
+					toolName: record.toolName,
+					approvalId: record.approvalId,
+					preparedInputHash: record.preparedInputHash,
+				});
+			}
+			if (request.toolCallIndex === undefined) {
+				return state;
+			}
+			cursors.set(request.toolCallIndex, {
+				stepId: createToolStepId(
+					turn.runId,
+					turn.iteration,
+					request.toolCallIndex,
+				),
+				toolCallIndex: request.toolCallIndex,
+				toolCallId: request.toolCallId,
+				toolName: request.toolName,
+				approvalId: request.approvalId ?? "",
+				preparedInputHash: hashToolInput(request.input),
+			});
+			if (cursors.size !== calls.length) {
+				return state;
+			}
+			const steps: RunStateToolCallBatchStep[] = [];
+			for (const [index, call] of calls.entries()) {
+				const cursor = cursors.get(index);
+				if (
+					!cursor ||
+					cursor.toolCallId !== call.toolCallId ||
+					cursor.toolName !== call.toolName
+				) {
+					return state;
+				}
+				steps.push(cursor);
+			}
+			return {
+				...state,
+				resume: createRunStateBatchResume(state.resume, steps),
+			};
+		} catch (error) {
+			session.config.logger?.debug?.(
+				"Kept per-step run state because the turn batch cursor could not be built",
+				{
+					sessionId: session.sessionId,
+					assistantMessageId: request.assistantMessageId,
+					error,
+				},
+			);
+			return state;
+		}
+	}
+
+	private async cancelRunContinuations(
+		sessionId: string,
+		reason: string,
+	): Promise<void> {
+		if (this.preservePendingApprovalsOnDispose) {
+			return;
+		}
+		await this.continuationCoordinator.cancelSession(sessionId, reason);
+	}
+
 	private async applyInitialOAuthCredentials(
 		input: StartSessionInput,
 	): Promise<StartSessionInput> {
@@ -325,13 +1367,932 @@ export class LocalRuntimeHost implements RuntimeHost {
 
 	// ── Public API ──────────────────────────────────────────────────────
 
+	getToolApprovalCoordinator(): DurableToolApprovalCoordinator {
+		return this.approvalCoordinator;
+	}
+
+	getRunContinuationCoordinator(): DurableRunContinuationCoordinator {
+		return this.continuationCoordinator;
+	}
+
+	async respondToToolApproval(
+		approvalId: string,
+		result: ToolApprovalResult,
+		decidedByClientId?: string,
+		sessionId?: string,
+	): Promise<DurableToolApprovalDecisionResult> {
+		return this.approvalCoordinator.respond(
+			approvalId,
+			result,
+			decidedByClientId,
+			sessionId,
+		);
+	}
+
+	async bindToolApprovalPrincipal(
+		approvalId: string,
+		requestedByClientId: string,
+		targetClientId?: string,
+	): Promise<DurableToolApprovalRecord> {
+		return this.approvalCoordinator.bindPrincipal(
+			approvalId,
+			requestedByClientId,
+			targetClientId,
+		);
+	}
+
+	async listPendingToolApprovals(
+		sessionId?: string,
+	): Promise<DurableToolApprovalRecord[]> {
+		return this.approvalCoordinator.listPending(sessionId);
+	}
+
+	async cancelToolApprovals(
+		sessionId: string,
+		reason: string,
+	): Promise<DurableToolApprovalRecord[]> {
+		return this.approvalCoordinator.cancelSession(sessionId, reason);
+	}
+
+	private async assertContinuationResumable(
+		continuation: RunContinuationRecord,
+		reclaimExecuting: boolean | undefined,
+	) {
+		const recoverySource =
+			continuation.runState?.source ?? continuation.recoverySnapshot?.source;
+		const recoveryOwner =
+			continuation.runState?.recoveryOwner ??
+			continuation.recoverySnapshot?.recoveryOwner;
+		if (recoverySource === "a2a" && recoveryOwner !== this.recoveryOwner) {
+			throw new Error(
+				`A2A run continuation recovery owner is not available: ${continuation.continuationKey}`,
+			);
+		}
+		const sourceRuntime = continuation.runState
+			? continuation.runState.serverRuntime
+			: continuation.recoverySnapshot?.serverRuntime;
+		if (sourceRuntime && !sourceRuntime.sourceReference) {
+			throw new Error(
+				`Run continuation source reference is unavailable: ${continuation.continuationKey}`,
+			);
+		}
+		const approval = await this.approvalCoordinator.get(
+			continuation.approvalId,
+		);
+		if (!approval) {
+			throw new Error(
+				`Missing durable approval for run continuation: ${continuation.approvalId}`,
+			);
+		}
+		if (
+			approval.sessionId !== continuation.sessionId ||
+			approval.runId !== continuation.runId ||
+			approval.toolCallId !== continuation.toolCallId ||
+			approval.inputHash !== continuation.preparedInputHash
+		) {
+			throw new Error(
+				`Run continuation identity does not match durable approval: ${continuation.continuationKey}`,
+			);
+		}
+		if (continuation.runState) {
+			assertRunStateMatchesRecord(continuation.runState, continuation);
+		}
+		if (continuation.agentChain?.parentAgentId) {
+			// A delegated run's transcript is the child's own conversation, which
+			// the host cannot rebuild from the session store. Until the parent
+			// agent chain and the child tool set are recoverable it must not pass
+			// as a root run.
+			throw new Error(
+				`Delegated run continuation requires agent chain recovery: ${continuation.continuationKey}`,
+			);
+		}
+		if (approval.status === "pending") {
+			throw new Error(
+				`Run continuation is still awaiting approval: ${continuation.approvalId}`,
+			);
+		}
+		if (continuation.phase === "executing" && !reclaimExecuting) {
+			throw new Error(
+				`Run continuation is already executing and requires explicit reclaim: ${continuation.continuationKey}`,
+			);
+		}
+		if (approval.status === "expired" || approval.status === "cancelled") {
+			await this.continuationCoordinator.cancel(
+				continuation.continuationKey,
+				`Approval ${approval.status}`,
+			);
+			throw new Error(
+				`Run continuation cannot resume after approval ${approval.status}`,
+			);
+		}
+		if (continuation.phase === "awaiting_approval") {
+			await this.continuationCoordinator.markApprovalDecision(
+				continuation.continuationKey,
+			);
+		}
+		return approval;
+	}
+
+	async resumePendingRunBatch(
+		input: ResumePendingRunBatchInput,
+	): Promise<ResumePendingRunBatchResult> {
+		this.assertNotDisposed();
+		if (
+			input.continuationKeys.length < 1 ||
+			input.continuationKeys.length > MAX_RESUME_TOOL_BATCH
+		) {
+			throw new Error(
+				`Run continuation batch must contain 1 to ${MAX_RESUME_TOOL_BATCH} continuations`,
+			);
+		}
+		const continuations: RunContinuationRecord[] = [];
+		for (const continuationKey of input.continuationKeys) {
+			const continuation =
+				await this.continuationCoordinator.get(continuationKey);
+			if (!continuation) {
+				throw new Error(`Unknown run continuation: ${continuationKey}`);
+			}
+			if (
+				continuations.some((item) => item.continuationKey === continuationKey)
+			) {
+				throw new Error(
+					`Duplicate run continuation in batch: ${continuationKey}`,
+				);
+			}
+			continuations.push(continuation);
+		}
+		if (
+			this.sessions.has((continuations[0] as RunContinuationRecord).sessionId)
+		) {
+			throw new Error(
+				`Cannot resume run continuation while session ${(continuations[0] as RunContinuationRecord).sessionId} is active`,
+			);
+		}
+		const first = continuations[0] as RunContinuationRecord;
+		for (const continuation of continuations) {
+			if (
+				continuation.sessionId !== first.sessionId ||
+				continuation.runId !== first.runId ||
+				continuation.agentId !== first.agentId ||
+				continuation.conversationId !== first.conversationId ||
+				continuation.iteration !== first.iteration ||
+				continuation.assistantMessageId !== first.assistantMessageId
+			) {
+				throw new Error(
+					`Run continuation batch does not share one assistant turn: ${continuation.continuationKey}`,
+				);
+			}
+		}
+		continuations.sort((a, b) => a.toolCallIndex - b.toolCallIndex);
+		for (const [index, continuation] of continuations.entries()) {
+			if (continuation.toolCallIndex !== index) {
+				throw new Error(
+					`Run continuation batch is missing tool call ${index}: ${continuation.continuationKey}`,
+				);
+			}
+		}
+		const approvals: Awaited<
+			ReturnType<DurableToolApprovalCoordinator["get"]>
+		>[] = [];
+		for (const continuation of continuations) {
+			approvals.push(
+				await this.assertContinuationResumable(
+					continuation,
+					input.reclaimExecuting,
+				),
+			);
+		}
+		const ownerToken = input.ownerToken ?? createSessionId("resume_");
+		const claimed: RunContinuationRecord[] = [];
+		try {
+			for (const continuation of continuations) {
+				const claim = await this.continuationCoordinator.claim(
+					continuation.continuationKey,
+					ownerToken,
+					input.leaseDurationMs,
+				);
+				if (claim.outcome !== "claimed") {
+					throw new Error(
+						`Run continuation is already owned by ${claim.record.ownerToken ?? "another process"}`,
+					);
+				}
+				claimed.push(
+					claim.record.phase === "approved"
+						? await this.continuationCoordinator.markExecuting(
+								claim.record.continuationKey,
+								ownerToken,
+							)
+						: claim.record,
+				);
+			}
+		} catch (error) {
+			for (const continuation of claimed) {
+				try {
+					await this.continuationCoordinator.closeTerminal(
+						continuation.continuationKey,
+						ownerToken,
+						{
+							approved: false,
+							reason: error instanceof Error ? error.message : String(error),
+							status: "failed",
+						},
+					);
+				} catch {}
+			}
+			throw error;
+		}
+		const persistedMessages = await this.readSessionMessages(first.sessionId);
+		// Prove the recorded turn shape before any lease is claimed: a batch that
+		// does not describe the persisted assistant turn must never execute.
+		const runStateBatch = findRunStateBatch(continuations);
+		if (runStateBatch) {
+			assertRunStateBatchCoversRecords(runStateBatch, continuations);
+			assertRunStateBatchMatchesTranscript(runStateBatch, persistedMessages);
+		} else if (continuations.length > 1) {
+			// Without a turn-level cursor the batch is only as complete as the
+			// caller asked for, so prove it against the persisted turn instead.
+			assertPersistedTurnCoversContinuations(continuations, persistedMessages);
+		}
+		if (
+			first.runState &&
+			(first.runState.transcript.messageCount !== persistedMessages.length ||
+				first.runState.transcript.lastMessageId !==
+					readPersistedMessageId(persistedMessages.at(-1)) ||
+				first.runState.transcript.transcriptHash !==
+					snapshotTranscriptHash(persistedMessages) ||
+				first.runState.transcript.systemPromptHash !==
+					snapshotSystemPromptHash(first.runState.config.systemPrompt))
+		) {
+			throw new Error(
+				`Run state transcript does not match durable continuation: ${first.continuationKey}`,
+			);
+		}
+		for (const continuation of continuations) {
+			if (
+				continuation.runState &&
+				JSON.stringify(continuation.runState.transcript) !==
+					JSON.stringify(first.runState?.transcript)
+			) {
+				throw new Error(
+					`Run continuation batch transcript mismatch: ${continuation.continuationKey}`,
+				);
+			}
+		}
+		const trustedStart = first.runState
+			? buildRunStateStartInput(first.runState)
+			: first.recoverySnapshot
+				? buildRecoveryStartInput(first.recoverySnapshot)
+				: input.start;
+		const startInput = {
+			...trustedStart,
+			prompt: undefined,
+			initialMessages: persistedMessages,
+			config: {
+				...trustedStart.config,
+				sessionId: first.sessionId,
+			},
+			runtimeIdentity: {
+				agentId: first.agentId,
+				conversationId: first.conversationId,
+			},
+		};
+		let releaseUserInstructionRun: (() => void) | undefined;
+		try {
+			await this.startSession(startInput);
+			const active = this.sessions.get(first.sessionId);
+			if (!active) {
+				throw new Error(
+					`Run continuation session did not start: ${first.sessionId}`,
+				);
+			}
+			releaseUserInstructionRun = active.runtime.acquireUserInstructionRun?.();
+			const expectedSourceReference = first.runState
+				? first.runState.serverRuntime?.sourceReference
+				: first.recoverySnapshot?.serverRuntime?.sourceReference;
+			if (expectedSourceReference) {
+				const actualSourceReference =
+					active.runtime.getServerRuntimeSourceReference?.();
+				if (
+					!actualSourceReference ||
+					actualSourceReference.version !== expectedSourceReference.version ||
+					actualSourceReference.algorithm !==
+						expectedSourceReference.algorithm ||
+					actualSourceReference.digest !== expectedSourceReference.digest
+				) {
+					throw new Error(
+						`Run continuation source configuration changed: ${first.continuationKey}`,
+					);
+				}
+			}
+			await this.markTurnRunning(active);
+			const result = await active.agent.resumePendingToolBatch({
+				runId: first.runId,
+				iteration: first.iteration,
+				assistantMessageId: first.assistantMessageId,
+				calls: continuations.map((continuation, index) => ({
+					...(resolveRunStateStepId(continuation.runState, continuation)
+						? {
+								stepId: resolveRunStateStepId(
+									continuation.runState,
+									continuation,
+								) as string,
+							}
+						: {}),
+					toolCallId: continuation.toolCallId,
+					toolName: continuation.toolName,
+					preparedInput: JSON.parse(continuation.preparedInputJson),
+					approval: {
+						approved:
+							(approvals[index] as { status: string }).status === "approved",
+						reason: (approvals[index] as { reason?: string }).reason,
+					},
+				})),
+			});
+			await this.invoke<void>(
+				"persistSessionMessages",
+				first.sessionId,
+				active.agent.getMessages(),
+				active.config.systemPrompt,
+			);
+			const terminalStatus =
+				result.finishReason === "aborted"
+					? "cancelled"
+					: result.finishReason === "error"
+						? "failed"
+						: "completed";
+			const terminal: RunContinuationRecord[] = [];
+			for (const continuation of continuations) {
+				terminal.push(
+					await this.continuationCoordinator.closeTerminal(
+						continuation.continuationKey,
+						ownerToken,
+						{
+							approved:
+								(
+									approvals[continuations.indexOf(continuation)] as {
+										status: string;
+									}
+								).status === "approved",
+							reason:
+								result.finishReason === "error"
+									? result.text || "Run continuation failed"
+									: undefined,
+							status: terminalStatus,
+						},
+					),
+				);
+			}
+			if (active.interactive) {
+				await this.completeInteractiveTurn(active, result.finishReason);
+			} else {
+				await this.finalizeSingleRun(active, result.finishReason);
+			}
+			return { result, records: terminal };
+		} catch (error) {
+			for (const continuation of continuations) {
+				try {
+					await this.continuationCoordinator.closeTerminal(
+						continuation.continuationKey,
+						ownerToken,
+						{
+							approved: false,
+							reason: error instanceof Error ? error.message : String(error),
+							status: "failed",
+						},
+					);
+				} catch {}
+			}
+			const active = this.sessions.get(first.sessionId);
+			if (active) {
+				try {
+					await this.shutdownSession(active, {
+						status: "failed",
+						exitCode: 1,
+						shutdownReason: "session_resume_failed",
+						endReason: "error",
+					});
+				} catch {}
+			}
+			throw error;
+		} finally {
+			releaseUserInstructionRun?.();
+		}
+	}
+
+	async resumePendingRun(
+		input: ResumePendingRunInput,
+	): Promise<ResumePendingRunResult> {
+		this.assertNotDisposed();
+		const continuation = await this.continuationCoordinator.get(
+			input.continuationKey,
+		);
+		if (!continuation) {
+			throw new Error(`Unknown run continuation: ${input.continuationKey}`);
+		}
+		if (this.sessions.has(continuation.sessionId)) {
+			throw new Error(
+				`Cannot resume run continuation while session ${continuation.sessionId} is active`,
+			);
+		}
+		const approval = await this.assertContinuationResumable(
+			continuation,
+			input.reclaimExecuting,
+		);
+		if (
+			continuation.runState &&
+			runStateResumeSteps(continuation.runState.resume).length > 1
+		) {
+			throw new Error(
+				`Run continuation is one step of a multi-tool assistant turn: ${continuation.continuationKey}`,
+			);
+		}
+		// Read the transcript before claiming: a single-tool resume is only
+		// replayable when the persisted assistant turn really has one tool call,
+		// and a rejected replay must not burn the continuation lease.
+		const persistedMessages = await this.readSessionMessages(
+			continuation.sessionId,
+		);
+		assertPersistedTurnCoversContinuations([continuation], persistedMessages);
+		if (
+			continuation.runState &&
+			(continuation.runState.transcript.messageCount !==
+				persistedMessages.length ||
+				continuation.runState.transcript.lastMessageId !==
+					readPersistedMessageId(persistedMessages.at(-1)) ||
+				continuation.runState.transcript.transcriptHash !==
+					snapshotTranscriptHash(persistedMessages) ||
+				continuation.runState.transcript.systemPromptHash !==
+					snapshotSystemPromptHash(continuation.runState.config.systemPrompt))
+		) {
+			throw new Error(
+				`Run state transcript does not match durable continuation: ${continuation.continuationKey}`,
+			);
+		}
+		const ownerToken = input.ownerToken ?? createSessionId("resume_");
+		const claim = await this.continuationCoordinator.claim(
+			continuation.continuationKey,
+			ownerToken,
+			input.leaseDurationMs,
+		);
+		if (claim.outcome !== "claimed") {
+			throw new Error(
+				`Run continuation is already owned by ${claim.record.ownerToken ?? "another process"}`,
+			);
+		}
+		let claimed = claim.record;
+		if (claimed.phase === "approved") {
+			claimed = await this.continuationCoordinator.markExecuting(
+				continuation.continuationKey,
+				ownerToken,
+			);
+		}
+		const trustedStart = continuation.runState
+			? buildRunStateStartInput(continuation.runState)
+			: continuation.recoverySnapshot
+				? buildRecoveryStartInput(continuation.recoverySnapshot)
+				: input.start;
+		const startInput = {
+			...trustedStart,
+			prompt: undefined,
+			initialMessages: persistedMessages,
+			config: {
+				...trustedStart.config,
+				sessionId: continuation.sessionId,
+			},
+			runtimeIdentity: {
+				agentId: continuation.agentId,
+				conversationId: continuation.conversationId,
+			},
+		};
+		let releaseUserInstructionRun: (() => void) | undefined;
+		try {
+			await this.startSession(startInput);
+			const active = this.sessions.get(continuation.sessionId);
+			if (!active) {
+				throw new Error(
+					`Run continuation session did not start: ${continuation.sessionId}`,
+				);
+			}
+			releaseUserInstructionRun = active.runtime.acquireUserInstructionRun?.();
+			const expectedSourceReference = continuation.runState
+				? continuation.runState.serverRuntime?.sourceReference
+				: continuation.recoverySnapshot?.serverRuntime?.sourceReference;
+			if (expectedSourceReference) {
+				const actualSourceReference =
+					active.runtime.getServerRuntimeSourceReference?.();
+				if (
+					!actualSourceReference ||
+					actualSourceReference.version !== expectedSourceReference.version ||
+					actualSourceReference.algorithm !==
+						expectedSourceReference.algorithm ||
+					actualSourceReference.digest !== expectedSourceReference.digest
+				) {
+					throw new Error(
+						`Run continuation source configuration changed: ${continuation.continuationKey}`,
+					);
+				}
+			}
+			await this.markTurnRunning(active);
+			const resumeStepId = resolveRunStateStepId(
+				continuation.runState,
+				continuation,
+			);
+			const result = await active.agent.resumePendingToolCall({
+				runId: continuation.runId,
+				iteration: continuation.iteration,
+				...(resumeStepId ? { stepId: resumeStepId } : {}),
+				assistantMessageId: continuation.assistantMessageId,
+				toolCallId: continuation.toolCallId,
+				toolName: continuation.toolName,
+				preparedInput: JSON.parse(continuation.preparedInputJson),
+				approval: {
+					approved: approval.status === "approved",
+					reason: approval.reason,
+				},
+			});
+			await this.invoke<void>(
+				"persistSessionMessages",
+				continuation.sessionId,
+				active.agent.getMessages(),
+				active.config.systemPrompt,
+			);
+			const terminalStatus =
+				result.finishReason === "aborted"
+					? "cancelled"
+					: result.finishReason === "error"
+						? "failed"
+						: "completed";
+			const terminal = await this.continuationCoordinator.closeTerminal(
+				continuation.continuationKey,
+				ownerToken,
+				{
+					approved: approval.status === "approved",
+					reason:
+						result.finishReason === "error"
+							? result.text || "Run continuation failed"
+							: undefined,
+					status: terminalStatus,
+				},
+			);
+			if (active.interactive) {
+				await this.completeInteractiveTurn(active, result.finishReason);
+			} else {
+				await this.finalizeSingleRun(active, result.finishReason);
+			}
+			return { result, record: terminal };
+		} catch (error) {
+			try {
+				await this.continuationCoordinator.closeTerminal(
+					continuation.continuationKey,
+					ownerToken,
+					{
+						approved: false,
+						reason: error instanceof Error ? error.message : String(error),
+						status: "failed",
+					},
+				);
+			} catch {}
+			const active = this.sessions.get(continuation.sessionId);
+			if (active) {
+				try {
+					await this.shutdownSession(active, {
+						status: "failed",
+						exitCode: 1,
+						shutdownReason: "session_resume_failed",
+						endReason: "error",
+					});
+				} catch {}
+			}
+			throw error;
+		} finally {
+			releaseUserInstructionRun?.();
+		}
+	}
+
+	private async buildRecoveryCandidate(
+		group: RunContinuationRecord[],
+	): Promise<RunContinuationRecoveryCandidate | undefined> {
+		if (group.length < 1 || group.length > MAX_RESUME_TOOL_BATCH) {
+			return undefined;
+		}
+		const records = [...group].sort(
+			(a, b) => a.toolCallIndex - b.toolCallIndex,
+		);
+		const record = records[0] as RunContinuationRecord;
+		for (const [index, member] of records.entries()) {
+			if (
+				(member.phase !== "awaiting_approval" && member.phase !== "approved") ||
+				member.ownerToken !== undefined ||
+				member.toolCallIndex !== index ||
+				member.sessionId !== record.sessionId ||
+				member.runId !== record.runId ||
+				member.agentId !== record.agentId ||
+				member.conversationId !== record.conversationId ||
+				member.iteration !== record.iteration ||
+				member.assistantMessageId !== record.assistantMessageId
+			) {
+				return undefined;
+			}
+		}
+		const snapshot = record.recoverySnapshot;
+		const eligibilityReason = snapshot?.eligibility.reason;
+		const eligibilityAllowed =
+			records.length === 1
+				? snapshot?.eligibility.autoRecover === true
+				: eligibilityReason === "parallel_or_ambiguous" ||
+					eligibilityReason === "eligible";
+		if (
+			!snapshot ||
+			// A delegated run never carries a recovery snapshot: the host only
+			// sees the lead agent's transcript, so there is nothing truthful to
+			// replay. Keep the skip explicit instead of relying on the snapshot.
+			record.agentChain?.parentAgentId !== undefined ||
+			!eligibilityAllowed ||
+			snapshot.toolOrigin !== "core-builtin" ||
+			snapshot.clientContributionsPresent ||
+			!snapshot.config.enableTools ||
+			snapshot.config.enableSpawnAgent ||
+			snapshot.config.enableAgentTeams ||
+			(snapshot.serverRuntime !== undefined &&
+				!snapshot.serverRuntime.sourceReference) ||
+			!RECOVERY_BUILTIN_TOOL_NAMES.has(snapshot.toolName)
+		) {
+			return undefined;
+		}
+		if (
+			snapshot.source === "a2a" &&
+			snapshot.recoveryOwner !== this.recoveryOwner
+		) {
+			return undefined;
+		}
+		for (const member of records) {
+			const approval = await this.approvalCoordinator.get(member.approvalId);
+			if (!approval) {
+				return undefined;
+			}
+			if (approval.status === "expired" || approval.status === "cancelled") {
+				await this.continuationCoordinator.cancel(
+					member.continuationKey,
+					`Approval ${approval.status}`,
+				);
+				return undefined;
+			}
+			if (approval.status !== "approved" && approval.status !== "denied") {
+				return undefined;
+			}
+			if (
+				approval.sessionId !== member.sessionId ||
+				approval.runId !== member.runId ||
+				approval.toolCallId !== member.toolCallId ||
+				approval.inputHash !== member.preparedInputHash
+			) {
+				return undefined;
+			}
+		}
+		if (
+			snapshot.sessionId !== record.sessionId ||
+			snapshot.run.runId !== record.runId ||
+			snapshot.run.agentId !== record.agentId ||
+			snapshot.run.conversationId !== record.conversationId ||
+			snapshot.run.iteration !== record.iteration ||
+			snapshot.run.assistantMessageId !== record.assistantMessageId
+		) {
+			return undefined;
+		}
+		for (const member of records) {
+			const memberSnapshot = member.recoverySnapshot;
+			if (
+				!memberSnapshot ||
+				memberSnapshot.toolName !== member.toolName ||
+				memberSnapshot.run.runId !== member.runId ||
+				memberSnapshot.run.agentId !== member.agentId ||
+				memberSnapshot.run.conversationId !== member.conversationId ||
+				memberSnapshot.run.iteration !== member.iteration ||
+				memberSnapshot.run.toolCallIndex !== member.toolCallIndex ||
+				memberSnapshot.run.assistantMessageId !== member.assistantMessageId ||
+				memberSnapshot.run.toolCallId !== member.toolCallId ||
+				memberSnapshot.run.approvalId !== member.approvalId ||
+				memberSnapshot.preparedInputHash !== member.preparedInputHash
+			) {
+				return undefined;
+			}
+		}
+		const row = await this.sessionService.getSession(record.sessionId);
+		if (!row || isRecoveryProcessAlive(row.pid)) {
+			return undefined;
+		}
+		if (
+			row.isSubagent ||
+			row.parentSessionId ||
+			row.parentAgentId ||
+			!isStaleRecoverySession(row) ||
+			row.source !== snapshot.source ||
+			row.interactive !== snapshot.interactive ||
+			row.provider !== snapshot.config.providerId ||
+			row.model !== snapshot.config.modelId ||
+			row.cwd !== snapshot.config.cwd ||
+			row.workspaceRoot !== snapshot.config.workspaceRoot ||
+			row.enableTools !== snapshot.config.enableTools ||
+			row.enableSpawn ||
+			row.enableTeams
+		) {
+			return undefined;
+		}
+		const messages = await this.readSessionMessages(record.sessionId);
+		if (
+			messages.length !== snapshot.transcript.messageCount ||
+			readPersistedMessageId(messages.at(-1)) !==
+				snapshot.transcript.lastMessageId ||
+			snapshotTranscriptHash(messages) !== snapshot.transcript.transcriptHash ||
+			snapshotSystemPromptHash(snapshot.config.systemPrompt) !==
+				snapshot.transcript.systemPromptHash
+		) {
+			return undefined;
+		}
+		for (const member of records) {
+			if (member.runState) {
+				assertRunStateMatchesRecord(member.runState, member);
+			}
+		}
+		try {
+			const runStateBatch = findRunStateBatch(records);
+			if (runStateBatch) {
+				assertRunStateBatchCoversRecords(runStateBatch, records);
+				assertRunStateBatchMatchesTranscript(runStateBatch, messages);
+			} else if (records.length > 1) {
+				assertPersistedTurnCoversContinuations(records, messages);
+			}
+		} catch {
+			return undefined;
+		}
+		return {
+			record,
+			continuationKeys: records.map((member) => member.continuationKey),
+			snapshot,
+			start: record.runState
+				? buildRunStateStartInput(record.runState)
+				: buildRecoveryStartInput(snapshot),
+		};
+	}
+
+	private async collectRecoveryCandidates(
+		maxCandidates: number,
+		sessionId?: string,
+	): Promise<{
+		candidates: RunContinuationRecoveryCandidate[];
+		report: RunContinuationRecoveryReport;
+	}> {
+		const report: RunContinuationRecoveryReport = {
+			scanned: 0,
+			eligible: 0,
+			scheduled: 0,
+			resumed: 0,
+			skipped: 0,
+			failed: 0,
+			truncated: false,
+		};
+		const reconcile = (
+			this.sessionService as SessionBackend & {
+				reconcileDeadSessions?: (limit?: number) => Promise<number>;
+			}
+		).reconcileDeadSessions;
+		if (reconcile) {
+			try {
+				await reconcile.call(this.sessionService, 500);
+			} catch {
+				report.failed += 1;
+			}
+		}
+		const scanLimit = Math.max(100, maxCandidates * 10);
+		const records = await this.continuationCoordinator.listRecoverable(
+			sessionId,
+			scanLimit,
+		);
+		report.scanned = records.length;
+		report.truncated = records.length >= scanLimit;
+		const grouped = new Map<string, RunContinuationRecord[]>();
+		for (const record of records) {
+			const groupKey = [
+				record.sessionId,
+				record.runId,
+				record.iteration,
+				record.assistantMessageId,
+			].join(":");
+			const group = grouped.get(groupKey) ?? [];
+			group.push(record);
+			grouped.set(groupKey, group);
+		}
+		const candidates: RunContinuationRecoveryCandidate[] = [];
+		for (const group of grouped.values()) {
+			try {
+				const candidate = await this.buildRecoveryCandidate(group);
+				if (!candidate) {
+					report.skipped += group.length;
+					continue;
+				}
+				if (candidates.length >= maxCandidates) {
+					report.skipped += group.length;
+					report.truncated = true;
+					continue;
+				}
+				candidates.push(candidate);
+				report.eligible += 1;
+			} catch {
+				report.failed += 1;
+			}
+		}
+		return { candidates, report };
+	}
+
+	async recoverPendingRunContinuations(
+		options: RecoverPendingRunContinuationsOptions = {},
+	): Promise<RunContinuationRecoveryReport> {
+		this.assertNotDisposed();
+		const requestedMaxCandidates = options.maxCandidates ?? 50;
+		const maxCandidates = Number.isFinite(requestedMaxCandidates)
+			? Math.max(1, Math.floor(requestedMaxCandidates))
+			: 50;
+		const { candidates, report } = await this.collectRecoveryCandidates(
+			maxCandidates,
+			options.sessionId,
+		);
+		if (options.background) {
+			for (const candidate of candidates) {
+				const task = (
+					candidate.continuationKeys.length > 1
+						? this.resumePendingRunBatch({
+								continuationKeys: candidate.continuationKeys,
+								start: candidate.start,
+								ownerToken: createSessionId("recovery_"),
+							})
+						: this.resumePendingRun({
+								continuationKey: candidate.record.continuationKey,
+								start: candidate.start,
+								ownerToken: createSessionId("recovery_"),
+							})
+				)
+					.then(() => {
+						report.resumed += 1;
+					})
+					.catch(() => {
+						report.failed += 1;
+					})
+					.finally(() => {
+						this.recoveryTasks.delete(task);
+					});
+				this.recoveryTasks.add(task);
+				report.scheduled += 1;
+			}
+			return report;
+		}
+		for (const candidate of candidates) {
+			try {
+				if (candidate.continuationKeys.length > 1) {
+					await this.resumePendingRunBatch({
+						continuationKeys: candidate.continuationKeys,
+						start: candidate.start,
+						ownerToken: createSessionId("recovery_"),
+					});
+				} else {
+					await this.resumePendingRun({
+						continuationKey: candidate.record.continuationKey,
+						start: candidate.start,
+						ownerToken: createSessionId("recovery_"),
+					});
+				}
+				report.resumed += 1;
+			} catch {
+				report.failed += 1;
+			}
+		}
+		return report;
+	}
+
+	async listRecoverableRunContinuations(
+		sessionId?: string,
+	): Promise<RunContinuationRecord[]> {
+		return this.continuationCoordinator.listRecoverable(sessionId);
+	}
+
 	async startSession(input: StartSessionInput): Promise<StartSessionResult> {
+		this.assertNotDisposed();
 		const source = input.source ?? SessionSource.CLI;
 		const startedAt = nowIso();
 		const requestedSessionId = input.config.sessionId?.trim() ?? "";
 		const sessionId = requestedSessionId || createSessionId();
+		const restoringCheckpoint = this.restoringSessionIds.has(sessionId);
+		const wrapTools = this.createToolWrapper(sessionId);
 		const startInput: StartSessionInput =
 			await this.applyInitialOAuthCredentials(input);
+		const recoveryOwner =
+			startInput[RUNTIME_INTERNAL_RECOVERY_OWNER]?.trim() ||
+			startInput.recoveryOwner?.trim() ||
+			undefined;
+		const serverRuntimePolicyPresent =
+			startInput.localRuntime?.configExtensions !== undefined;
+		const serverRuntimeSources = startInput.localRuntime?.configExtensions
+			? [...new Set(startInput.localRuntime.configExtensions)]
+			: undefined;
 		const initialMessages = startInput.initialMessages ?? [];
 		const initialUsage =
 			initialMessages.length > 0
@@ -431,6 +2392,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 			) => this.eventBridge.dispatchAgentEvent(rootSessionId, config, event),
 			invokeBackendOptional: (method: string, ...args: unknown[]) =>
 				this.invokeOptional(method, ...args),
+			wrapTools,
 		};
 		bootstrap = await prepareLocalRuntimeBootstrap({
 			input: startInput,
@@ -486,10 +2448,12 @@ export class LocalRuntimeHost implements RuntimeHost {
 			bootstrap.gitState,
 		);
 		if (!resumedArtifacts) manifest.metadata = initialSessionMetadata;
-		const runtime = await this.runtimeBuilder.build(
-			bootstrap.runtimeBuilderInput,
-		);
+		const runtime = await this.runtimeBuilder.build({
+			...bootstrap.runtimeBuilderInput,
+			wrapTools,
+		});
 		const configWithProvider = bootstrap.config;
+		configWithProvider.toolPolicies = bootstrap.toolPolicies;
 		const providerConfig = bootstrap.providerConfig;
 		if (runtime.teamRuntime && !configWithProvider.teamName?.trim()) {
 			configWithProvider.teamName = runtime.teamRuntime.getTeamName();
@@ -574,6 +2538,13 @@ export class LocalRuntimeHost implements RuntimeHost {
 			temperature: configWithProvider.temperature,
 			systemPrompt: configWithProvider.systemPrompt,
 			maxIterations: configWithProvider.maxIterations,
+			// Run budget is a session-level guardrail: it must reach the runtime
+			// so a runaway turn is stopped instead of only being reported.
+			budget: configWithProvider.budget,
+			// Tool execution mode is part of the session contract: dropping it
+			// here would silently turn a parallel session (and any recovered
+			// continuation that recorded one) into sequential execution.
+			maxParallelToolCalls: configWithProvider.maxParallelToolCalls,
 			execution: configWithProvider.execution,
 			prepareTurn,
 			tools,
@@ -581,29 +2552,81 @@ export class LocalRuntimeHost implements RuntimeHost {
 			extensions,
 			hookErrorMode: configWithProvider.hookErrorMode,
 			initialMessages: bootstrap.effectiveInput.initialMessages,
-			userFileContentLoader: loadUserFileContent,
+			// `userFiles` is client-supplied, so the loader is confined to the
+			// session workspace: without this a remote client could attach any
+			// readable path on the host and have its contents injected into the
+			// model context.
+			userFileContentLoader: (filePath: string) =>
+				loadUserFileContent(filePath, {
+					workspaceRoot: configWithProvider.workspaceRoot ?? configWithProvider.cwd,
+				}),
 			toolPolicies: bootstrap.toolPolicies,
 			requestToolApproval: bootstrap.requestToolApproval
 				? async (request) => {
 						const requestToolApproval = bootstrap.requestToolApproval;
-						const liveSession = this.sessions.get(sessionId);
-						if (liveSession) {
-							await this.markTurnPending(liveSession);
-						}
-						try {
-							if (!requestToolApproval) {
-								return {
-									approved: false,
-									reason: "Tool approval callback is not configured.",
-								};
-							}
-							return await requestToolApproval(request);
-						} finally {
-							const currentSession = this.sessions.get(sessionId);
-							if (currentSession?.status === "pending") {
-								await this.markTurnRunning(currentSession);
-							}
-						}
+						return this.approvalCoordinator.request(
+							request,
+							async (durableRequest) => {
+								const liveSession = this.sessions.get(sessionId);
+								if (!liveSession) {
+									return {
+										approved: false,
+										reason: "Tool approval session is no longer active.",
+									};
+								}
+								const continuation = await this.prepareApprovalContinuation(
+									liveSession,
+									durableRequest,
+								);
+								if (continuation.error) {
+									return {
+										approved: false,
+										reason: `Tool approval continuation could not be persisted: ${continuation.error}`,
+									};
+								}
+								if (durableRequest.signal?.aborted) {
+									return {
+										approved: false,
+										reason: "Tool approval was aborted before delivery.",
+									};
+								}
+								await this.markTurnPending(liveSession);
+								if (durableRequest.signal?.aborted) {
+									return {
+										approved: false,
+										reason: "Tool approval was aborted before delivery.",
+									};
+								}
+								try {
+									if (!requestToolApproval) {
+										return {
+											approved: false,
+											reason: "Tool approval callback is not configured.",
+										};
+									}
+									const result = await requestToolApproval(durableRequest);
+									if (continuation.record) {
+										await this.continuationCoordinator.markApprovalDecision(
+											continuation.record.continuationKey,
+										);
+									}
+									return result;
+								} catch (error) {
+									if (continuation.record) {
+										await this.continuationCoordinator.cancel(
+											continuation.record.continuationKey,
+											error instanceof Error ? error.message : String(error),
+										);
+									}
+									throw error;
+								} finally {
+									const currentSession = this.sessions.get(sessionId);
+									if (currentSession?.status === "pending") {
+										await this.markTurnRunning(currentSession);
+									}
+								}
+							},
+						);
 					}
 				: undefined,
 			telemetry: configWithProvider.telemetry,
@@ -663,7 +2686,13 @@ export class LocalRuntimeHost implements RuntimeHost {
 				}
 			},
 		};
-		const agent = this.createAgentInstance(agentConfig);
+		const agent = this.createAgentInstance(agentConfig, {
+			wrapTools,
+			runtimeIdentity: startInput.runtimeIdentity,
+			initialRunId: restoringCheckpoint
+				? readCheckpointRunId(initialSessionMetadata)
+				: undefined,
+		});
 		if (agentConfig.onEvent) {
 			agent.subscribeEvents(agentConfig.onEvent);
 		}
@@ -718,6 +2747,15 @@ export class LocalRuntimeHost implements RuntimeHost {
 			status: resumedArtifacts?.manifest.status ?? "running",
 			aborting: false,
 			interactive: input.interactive === true,
+			...(recoveryOwner ? { recoveryOwner } : {}),
+			serverRuntimePolicyPresent,
+			...(serverRuntimeSources ? { serverRuntimeSources } : {}),
+			hasClientContributions: Boolean(
+				Object.keys(startInput.capabilities?.toolExecutors ?? {}).length > 0 ||
+					Boolean(startInput.localRuntime?.userInstructionService) ||
+					(startInput.localRuntime?.extraTools?.length ?? 0) > 0 ||
+					(startInput.localRuntime?.extensions?.length ?? 0) > 0,
+			),
 			persistedMessages: initialMessages,
 			compactionState: initialCompactionState,
 			activeTeamRunIds: new Set<string>(),
@@ -831,27 +2869,74 @@ export class LocalRuntimeHost implements RuntimeHost {
 	async restoreSession(
 		input: RestoreSessionInput,
 	): Promise<RestoreSessionResult> {
-		return this.sessionVersioning.restoreCheckpoint({
-			...input,
-			getSession: (sessionId) => this.getSession(sessionId),
-			readMessages: (sessionId) => this.readSessionMessages(sessionId),
-			buildStartInput: (context, startInput) => {
-				const sessionMetadata = context.restoredCheckpointMetadata
-					? {
-							...(startInput.sessionMetadata ?? {}),
-							checkpoint: context.restoredCheckpointMetadata,
-						}
-					: startInput.sessionMetadata;
-				return {
-					...startInput,
-					...(sessionMetadata ? { sessionMetadata } : {}),
-					initialMessages: context.initialMessages,
-				};
-			},
-			startSession: (startInput) => this.startSession(startInput),
-			getStartedSessionId: (startResult) => startResult.sessionId,
-			readRestoredSession: (sessionId) => this.getSession(sessionId),
-		});
+		this.assertNotDisposed();
+		const sourceSessionId = input.sessionId.trim();
+		const activeSource = this.sessions.get(sourceSessionId);
+		if (activeSource && isNonTerminalSessionStatus(activeSource.status)) {
+			throw new Error(
+				`Cannot restore session ${sourceSessionId} while it is active`,
+			);
+		}
+		const restoredSessionId =
+			input.start?.config.sessionId?.trim() || createSessionId();
+		this.restoringSessionIds.add(restoredSessionId);
+		try {
+			return await this.sessionVersioning.restoreCheckpoint({
+				...input,
+				getSession: (sessionId) => this.getSession(sessionId),
+				readMessages: (sessionId) => this.readSessionMessages(sessionId),
+				buildStartInput: async (context, startInput) => {
+					const prepared = input.buildStartInput
+						? await input.buildStartInput(context, startInput)
+						: startInput;
+					const restoredRunId = resolveCheckpointRunId(context.plan.checkpoint);
+					const restoredCheckpoint = context.restoredCheckpointMetadata
+						? {
+								...context.restoredCheckpointMetadata,
+								latest: {
+									...context.restoredCheckpointMetadata.latest,
+									runId: restoredRunId,
+								},
+								history: context.restoredCheckpointMetadata.history.map(
+									(entry) =>
+										entry.runCount === context.plan.checkpoint.runCount
+											? { ...entry, runId: restoredRunId }
+											: entry,
+								),
+							}
+						: undefined;
+					const sessionMetadata = {
+						...(prepared.sessionMetadata ?? {}),
+						...(restoredCheckpoint ? { checkpoint: restoredCheckpoint } : {}),
+						restoredFromSessionId: sourceSessionId,
+						restoredCheckpointRunCount: context.checkpointRunCount,
+					};
+					return {
+						...prepared,
+						config: {
+							...prepared.config,
+							sessionId: restoredSessionId,
+						},
+						sessionMetadata,
+						initialMessages: context.initialMessages,
+					};
+				},
+				prepareStart: async (context, startInput) => {
+					await this.ensureEffectLedger();
+					await replayEffectsIntoSession(this.effectLedger, {
+						fromSessionId: sourceSessionId,
+						toSessionId: restoredSessionId,
+						runId: resolveCheckpointRunId(context.plan.checkpoint),
+					});
+					return startInput;
+				},
+				startSession: (startInput) => this.startSession(startInput),
+				getStartedSessionId: (startResult) => startResult.sessionId,
+				readRestoredSession: (sessionId) => this.getSession(sessionId),
+			});
+		} finally {
+			this.restoringSessionIds.delete(restoredSessionId);
+		}
 	}
 
 	async runTurn(input: SendSessionInput): Promise<AgentResult | undefined> {
@@ -943,11 +3028,25 @@ export class LocalRuntimeHost implements RuntimeHost {
 		session.aborting = true;
 		this.pendingPromptsController.clearAborted(session);
 		session.agent.abort(reason);
+		await this.approvalCoordinator.cancelSession(
+			sessionId,
+			reason instanceof Error
+				? reason.message
+				: typeof reason === "string"
+					? reason
+					: "Session aborted",
+		);
+		await this.cancelRunContinuations(
+			sessionId,
+			reason instanceof Error ? reason.message : "Session aborted",
+		);
 	}
 
 	async stopSession(sessionId: string): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
+		await this.approvalCoordinator.cancelSession(sessionId, "Session stopped");
+		await this.cancelRunContinuations(sessionId, "Session stopped");
 		session.config.telemetry?.capture({
 			event: "session.stopped",
 			properties: { sessionId },
@@ -977,29 +3076,57 @@ export class LocalRuntimeHost implements RuntimeHost {
 	}
 
 	async dispose(reason = "session_manager_dispose"): Promise<void> {
+		if (this.disposed) {
+			return;
+		}
+		if (this.preservePendingApprovalsOnDispose) {
+			this.approvalCoordinator.setPreservePendingApprovals(true);
+		}
+		this.disposed = true;
 		const sessions = [...this.sessions.values()];
-		if (sessions.length === 0) return;
-		await Promise.allSettled(
-			sessions.map((session) =>
-				session.interactive && !isNonTerminalSessionStatus(session.status)
-					? this.releaseSessionRuntime(session, reason)
-					: session.interactive && session.agent.canStartRun()
-						? this.shutdownSession(session, {
-								status: this.resolveInteractiveStopStatus(session),
-								exitCode: this.resolveInteractiveStopExitCode(session),
-								shutdownReason: reason,
-								endReason: "disposed",
-							})
-						: this.shutdownSession(session, {
-								status: "cancelled",
-								exitCode: 0,
-								shutdownReason: reason,
-								endReason: "disposed",
-							}),
-			),
-		);
+		for (const session of sessions) {
+			if (!session.agent.canStartRun()) {
+				session.aborting = true;
+				try {
+					session.agent.abort(reason);
+				} catch {}
+			}
+		}
+		if (sessions.length > 0) {
+			await Promise.allSettled(
+				sessions.map((session) =>
+					session.interactive && !isNonTerminalSessionStatus(session.status)
+						? this.releaseSessionRuntime(session, reason)
+						: session.interactive && session.agent.canStartRun()
+							? this.shutdownSession(session, {
+									status: this.resolveInteractiveStopStatus(session),
+									exitCode: this.resolveInteractiveStopExitCode(session),
+									shutdownReason: reason,
+									endReason: "disposed",
+								})
+							: this.shutdownSession(session, {
+									status: "cancelled",
+									exitCode: 0,
+									shutdownReason: reason,
+									endReason: "disposed",
+								}),
+				),
+			);
+		}
+		if (this.recoveryTasks.size > 0) {
+			await Promise.allSettled([...this.recoveryTasks]);
+		}
 		this.usageBySession.clear();
 		this.aggregateUsageBySession.clear();
+		if (this.ownsEffectLedger) {
+			await this.effectLedger.close();
+		}
+		if (this.ownsApprovalCoordinator) {
+			await this.approvalCoordinator.close();
+		}
+		if (this.ownsContinuationCoordinator) {
+			await this.continuationCoordinator.close();
+		}
 	}
 
 	async getSession(sessionId: string): Promise<SessionRecord | undefined> {
@@ -1031,6 +3158,12 @@ export class LocalRuntimeHost implements RuntimeHost {
 	async deleteSession(sessionId: string): Promise<boolean> {
 		if (this.sessions.has(sessionId)) {
 			await this.stopSession(sessionId);
+		} else {
+			await this.approvalCoordinator.cancelSession(
+				sessionId,
+				"Session deleted",
+			);
+			await this.cancelRunContinuations(sessionId, "Session deleted");
 		}
 		const result = await this.invoke<{ deleted: boolean }>(
 			"deleteSession",
@@ -1442,9 +3575,11 @@ export class LocalRuntimeHost implements RuntimeHost {
 		await this.ensureSessionPersisted(session);
 		await this.refreshActiveSessionGitMetadata(session);
 		await this.syncOAuthCredentials(session);
-		await this.markTurnRunning(session);
+		let releaseUserInstructionRun: (() => void) | undefined;
 
 		try {
+			releaseUserInstructionRun = session.runtime.acquireUserInstructionRun?.();
+			await this.markTurnRunning(session);
 			let result = await this.executeAgentTurn(
 				session,
 				prompt,
@@ -1464,6 +3599,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 
 			return result;
 		} finally {
+			releaseUserInstructionRun?.();
 			await this.refreshActiveSessionGitMetadata(session);
 		}
 	}
@@ -1489,6 +3625,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 				return "failed";
 			case "aborted":
 			case "max_iterations":
+			case "budget_exhausted":
 			case "mistake_limit":
 				return "cancelled";
 		}
@@ -1868,6 +4005,11 @@ export class LocalRuntimeHost implements RuntimeHost {
 			endReason: string;
 		},
 	): Promise<void> {
+		await this.approvalCoordinator.cancelSession(
+			session.sessionId,
+			input.shutdownReason,
+		);
+		await this.cancelRunContinuations(session.sessionId, input.shutdownReason);
 		// Fallback `task.completed` emission for completed sessions that
 		// did not observe an explicit `submit_and_exit` tool call. The
 		// observer in `executeAgentTurn(...)` already emitted the event in
@@ -1952,6 +4094,8 @@ export class LocalRuntimeHost implements RuntimeHost {
 		session: ActiveSession,
 		reason: string,
 	): Promise<void> {
+		await this.approvalCoordinator.cancelSession(session.sessionId, reason);
+		await this.cancelRunContinuations(session.sessionId, reason);
 		const cleanupErrors: unknown[] = [];
 		const recordCleanupError = (stage: string, error: unknown) => {
 			cleanupErrors.push(error);

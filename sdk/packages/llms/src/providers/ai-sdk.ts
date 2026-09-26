@@ -15,7 +15,11 @@ import {
 	parseJsonStream,
 	sanitizeSurrogates,
 } from "@cline/shared";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
+import {
+	context as otelContext,
+	SpanStatusCode,
+	trace,
+} from "@opentelemetry/api";
 import { type CallSettings, jsonSchema, NoSuchToolError, streamText } from "ai";
 import { nanoid } from "nanoid";
 import { extractErrorMessage } from "./format";
@@ -1164,13 +1168,17 @@ function createAiSdkProvider(kind: ProviderModuleKind): GatewayProviderFactory {
 			// No-op span unless a TracerProvider is registered. Root of the
 			// provider-side trace, parented by the caller's active context
 			// (agent.run/agent.tool spans or cross-process TRACEPARENT).
-			const span = llmTracer.startSpan("llm.request", {
-				attributes: {
-					"llm.provider_id": request.providerId,
-					"llm.model_id": request.modelId,
-					"llm.provider_kind": kind,
+			const span = llmTracer.startSpan(
+				"llm.request",
+				{
+					attributes: {
+						"llm.provider_id": request.providerId,
+						"llm.model_id": request.modelId,
+						"llm.provider_kind": kind,
+					},
 				},
-			});
+				otelContext.active(),
+			);
 			try {
 				const log = context.logger;
 				let stream: AiSdkStreamResult | undefined;

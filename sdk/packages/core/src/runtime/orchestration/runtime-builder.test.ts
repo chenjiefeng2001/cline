@@ -8,7 +8,7 @@ import {
 	type Message,
 } from "@cline/shared";
 import { setHomeDir } from "@cline/shared/storage";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createUserInstructionConfigService } from "../../extensions/config";
 import { TelemetryService } from "../../services/telemetry/TelemetryService";
 import type { CoreSessionConfig } from "../../types/config";
@@ -75,6 +75,108 @@ describe("DefaultRuntimeBuilder", () => {
 		const names = runtime.tools.map((tool) => tool.name);
 		expect(names.length).toBeGreaterThan(0);
 		expect(names).not.toContain("spawn_agent");
+	});
+
+	it("exposes a source reference for an explicit bounded policy", async () => {
+		const tempHome = mkdtempSync(join(tmpdir(), "cline-source-home-"));
+		const workspaceRoot = mkdtempSync(
+			join(tmpdir(), "cline-source-workspace-"),
+		);
+		tempDirs.push(tempHome, workspaceRoot);
+		setHomeDir(tempHome);
+		const rulesDir = join(workspaceRoot, ".cline", "rules");
+		mkdirSync(rulesDir, { recursive: true });
+		writeFileSync(
+			join(rulesDir, "policy.md"),
+			"---\nname: policy\n---\nStable policy.",
+			"utf8",
+		);
+		const runtime = await new DefaultRuntimeBuilder().build({
+			config: makeBaseConfig({ cwd: workspaceRoot, workspaceRoot }),
+			configExtensions: ["rules"],
+		});
+		try {
+			expect(runtime.getServerRuntimeSourceReference?.()).toMatchObject({
+				version: 1,
+				algorithm: "sha256",
+			});
+		} finally {
+			await runtime.shutdown("test");
+		}
+	});
+
+	it("holds a frozen source snapshot for a runtime turn lease", async () => {
+		const tempHome = mkdtempSync(join(tmpdir(), "cline-source-home-"));
+		const workspaceRoot = mkdtempSync(
+			join(tmpdir(), "cline-source-workspace-"),
+		);
+		tempDirs.push(tempHome, workspaceRoot);
+		setHomeDir(tempHome);
+		const rulesDir = join(workspaceRoot, ".cline", "rules");
+		mkdirSync(rulesDir, { recursive: true });
+		const rulePath = join(rulesDir, "policy.md");
+		writeFileSync(rulePath, "---\nname: policy\n---\nStable policy.", "utf8");
+		const runtime = await new DefaultRuntimeBuilder().build({
+			config: makeBaseConfig({ cwd: workspaceRoot, workspaceRoot }),
+			configExtensions: ["rules"],
+		});
+		const registry = createContributionRegistry<
+			AgentExtension,
+			AgentTool,
+			Message[]
+		>({ extensions: runtime.extensions });
+		await registry.initialize();
+		const registeredRule = registry
+			.getRegisteredRules()
+			.find((rule) => rule.id === "cline-user-instructions:rules");
+		const readRule = async (): Promise<string> => {
+			const content = registeredRule?.content;
+			return typeof content === "function" ? await content() : (content ?? "");
+		};
+		let release: (() => void) | undefined;
+		try {
+			expect(await readRule()).toContain("Stable policy.");
+			release = runtime.acquireUserInstructionRun?.();
+			expect(release).toBeDefined();
+			const firstReference = runtime.getServerRuntimeSourceReference?.();
+			expect(firstReference?.digest).toMatch(/^[a-f0-9]{64}$/);
+			writeFileSync(
+				rulePath,
+				"---\nname: policy\n---\nChanged policy.",
+				"utf8",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(runtime.getServerRuntimeSourceReference?.()?.digest).toBe(
+				firstReference?.digest,
+			);
+			expect(await readRule()).toContain("Stable policy.");
+			if (!release) {
+				throw new Error("Expected source lease");
+			}
+			release();
+			release = undefined;
+			await vi.waitFor(
+				async () => {
+					expect(await readRule()).toContain("Changed policy.");
+				},
+				{ timeout: 4_000, interval: 25 },
+			);
+			await vi.waitFor(
+				() => {
+					expect(runtime.getServerRuntimeSourceReference?.()?.digest).not.toBe(
+						firstReference?.digest,
+					);
+				},
+				{ timeout: 4_000, interval: 25 },
+			);
+			release = runtime.acquireUserInstructionRun?.();
+			expect(runtime.getServerRuntimeSourceReference?.()?.digest).not.toBe(
+				firstReference?.digest,
+			);
+		} finally {
+			release?.();
+			await runtime.shutdown("test");
+		}
 	});
 
 	it("forwards runtime logger for downstream agent creation", async () => {

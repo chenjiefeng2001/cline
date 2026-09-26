@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { RUNTIME_INTERNAL_RECOVERY_OWNER } from "../../runtime/host/runtime-host";
 import {
 	buildAgentCard,
 	mapSessionStatusToTaskState,
@@ -86,7 +87,7 @@ describe("buildAgentCard", () => {
 		expect(card.capabilities.streaming).toBe(true);
 		// No push delivery exists, so the card must not claim it (v1.0 §4.4.3).
 		expect(card.capabilities.pushNotifications).toBe(false);
-		expect(card.defaultInputModes).toEqual(["text"]);
+		expect(card.defaultInputModes).toEqual(["text", "application/json"]);
 		expect(card.skills).toHaveLength(1);
 	});
 
@@ -136,30 +137,136 @@ describe("A2AServer", () => {
 		expect(card.capabilities.streaming).toBe(false);
 	});
 
-	it("routes message/send for a new prompt to session.create", async () => {
+	it("creates a new task and starts its first run with the original prompt", async () => {
 		const { client, calls, replies } = makeClient();
 		replies.set("session.create", {
 			ok: true,
 			payload: {
 				session: {
 					sessionId: "new-1",
-					status: "idle",
+					status: "running",
 					metadata: { source: "a2a" },
 				},
 			},
+		});
+		replies.set("run.start", {
+			ok: true,
+			payload: { result: { finishReason: "success" } },
 		});
 		const server = makeServer(client);
 		const task = await server.sendMessage({
 			prompt: "review the diff",
 			source: "a2a",
 		});
-		expect(calls[0]?.command).toBe("session.create");
+		expect(calls.map((call) => call.command)).toEqual([
+			"session.create",
+			"run.start",
+		]);
 		expect(calls[0]?.payload).toMatchObject({
-			metadata: { source: "a2a", prompt: "review the diff" },
+			metadata: { source: "a2a" },
 		});
+		expect(
+			(calls[0]?.payload as Record<string, unknown>).metadata,
+		).not.toHaveProperty("prompt");
+		expect(calls[1]?.payload).toMatchObject({ prompt: "review the diff" });
+		expect(calls[1]?.sessionId).toBe("new-1");
 		expect(task?.id).toBe("new-1");
-		expect(task?.status.state).toBe("TASK_STATE_SUBMITTED");
+		expect(task?.status.state).toBe("TASK_STATE_COMPLETED");
 		expect(task?.metadata?.source).toBe("a2a");
+	});
+
+	it("merges trusted session defaults without copying the prompt into metadata", async () => {
+		const { client, calls, replies } = makeClient();
+		replies.set("session.create", {
+			ok: true,
+			payload: { session: { sessionId: "default-1", status: "idle" } },
+		});
+		const server = new A2AServer(client, {
+			agentCard: { name: "cline-hub", version: "1.0.0" },
+			defaultSessionConfig: {
+				cwd: "/trusted/workspace",
+				metadata: { tenant: "tenant-1", source: "a2a" },
+			},
+		});
+		const prepared = await server.prepareMessage({
+			prompt: "safe prompt",
+			config: { metadata: { prompt: "stale prompt" } },
+		});
+		await prepared?.start();
+		const createPayload = calls[0]?.payload as Record<string, unknown>;
+		expect(createPayload).toMatchObject({
+			cwd: "/trusted/workspace",
+			metadata: { tenant: "tenant-1", source: "a2a" },
+		});
+		expect(createPayload.metadata).not.toHaveProperty("prompt");
+		expect(calls[1]?.payload).toMatchObject({ prompt: "safe prompt" });
+	});
+
+	it("binds a server recovery owner and ignores unsafe client config", async () => {
+		const { client, calls, replies } = makeClient();
+		replies.set("session.create", {
+			ok: true,
+			payload: { session: { sessionId: "owned-1", status: "idle" } },
+		});
+		replies.set("run.start", {
+			ok: true,
+			payload: { result: { finishReason: "success" } },
+		});
+		const server = new A2AServer(client, {
+			agentCard: { name: "cline-hub", version: "1.0.0" },
+			defaultSessionConfig: {
+				cwd: "/trusted/workspace",
+				configExtensions: ["rules", "workflows"],
+				skills: ["trusted-skill"],
+			},
+			recoveryOwner: "a2a-owner-1",
+		});
+		const prepared = await server.prepareMessage({
+			prompt: "safe",
+			config: {
+				cwd: "/outside",
+				workspaceRoot: "/outside",
+				apiKey: "client-secret",
+				extraTools: [{ name: "client-tool" }],
+				configExtensions: ["plugins"],
+				skills: ["client-skill"],
+			},
+		});
+		await prepared?.start();
+		const payload = calls[0]?.payload as Record<string, unknown>;
+		expect(payload.cwd).toBe("/trusted/workspace");
+		expect(payload.workspaceRoot).toBe("/trusted/workspace");
+		expect(payload.apiKey).toBeUndefined();
+		expect(payload.extraTools).toBeUndefined();
+		expect(payload.sessionConfig).toMatchObject({
+			cwd: "/trusted/workspace",
+			workspaceRoot: "/trusted/workspace",
+			enableSpawnAgent: false,
+			enableAgentTeams: false,
+			skills: ["trusted-skill"],
+		});
+		expect(payload.runtimeOptions).toMatchObject({
+			configExtensions: ["rules", "workflows"],
+		});
+		expect(
+			(payload as Record<PropertyKey, unknown>)[
+				RUNTIME_INTERNAL_RECOVERY_OWNER
+			],
+		).toBe("a2a-owner-1");
+		expect(JSON.stringify(payload)).not.toContain("a2a-owner-1");
+	});
+
+	it("does not start a run when task creation fails", async () => {
+		const { client, calls, replies } = makeClient();
+		replies.set("session.create", {
+			ok: false,
+			error: { code: "invalid_session_create", message: "missing cwd" },
+		});
+		const server = makeServer(client);
+		await expect(server.sendMessage({ prompt: "hello" })).rejects.toThrow(
+			"session.create failed: missing cwd",
+		);
+		expect(calls.map((call) => call.command)).toEqual(["session.create"]);
 	});
 
 	it("routes message/send for an existing task to session.send_input", async () => {
@@ -191,6 +298,66 @@ describe("A2AServer", () => {
 		expect(calls[0]?.sessionId).toBe("s2");
 		expect(task?.status.state).toBe("TASK_STATE_INPUT_REQUIRED");
 		expect(task?.metadata?.pendingApproval).toBe(true);
+	});
+
+	it("projects a redacted pending approval descriptor", async () => {
+		const { client, replies } = makeClient();
+		replies.set("session.get", {
+			ok: true,
+			payload: {
+				session: { sessionId: "s2", status: "running" },
+				pendingApproval: true,
+				approval: {
+					approvalId: "approval-1",
+					toolCallId: "call-1",
+					toolName: "run_commands",
+					expiresAt: 1234,
+				},
+			},
+		});
+		const task = await makeServer(client).getTask("s2");
+		expect(task?.metadata?.approval).toEqual({
+			approvalId: "approval-1",
+			toolCallId: "call-1",
+			toolName: "run_commands",
+			expiresAt: 1234,
+		});
+		expect(task?.metadata).not.toHaveProperty("approval.inputJson");
+	});
+
+	it("routes approval decisions through approval.respond and reloads the task", async () => {
+		const { client, calls, replies } = makeClient();
+		replies.set("approval.respond", {
+			ok: true,
+			payload: { approvalId: "approval-1", approved: true },
+		});
+		replies.set("session.get", {
+			ok: true,
+			payload: {
+				session: { sessionId: "s2", status: "running" },
+				pendingApproval: false,
+			},
+		});
+		const task = await makeServer(client).respondToApproval({
+			sessionId: "s2",
+			approvalId: "approval-1",
+			approved: true,
+			reason: "reviewed",
+		});
+		expect(calls.map((call) => call.command)).toEqual([
+			"approval.respond",
+			"session.get",
+		]);
+		expect(calls[0]).toMatchObject({
+			command: "approval.respond",
+			sessionId: "s2",
+			payload: {
+				approvalId: "approval-1",
+				approved: true,
+				reason: "reviewed",
+			},
+		});
+		expect(task?.status.state).toBe("TASK_STATE_WORKING");
 	});
 
 	it("returns undefined for a session.get miss instead of throwing", async () => {

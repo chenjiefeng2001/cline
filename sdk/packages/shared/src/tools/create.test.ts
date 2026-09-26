@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { zodToJsonSchema } from "../parse/zod";
 import { createTool } from "./create";
@@ -41,8 +41,8 @@ describe("createTool", () => {
 		});
 
 		expect(tool.timeoutMs).toBe(30_000);
-		expect(tool.retryable).toBe(true);
-		expect(tool.maxRetries).toBe(3);
+		expect(tool.retryable).toBe(false);
+		expect(tool.maxRetries).toBe(0);
 	});
 
 	it("preserves explicit execution policy fields", () => {
@@ -59,6 +59,31 @@ describe("createTool", () => {
 		expect(tool.timeoutMs).toBe(1_000);
 		expect(tool.retryable).toBe(false);
 		expect(tool.maxRetries).toBe(0);
+	});
+
+	it("derives input validation from Zod schemas", () => {
+		const tool = createTool({
+			name: "validated_tool",
+			description: "Tool with a Zod input schema",
+			inputSchema: z.object({ value: z.string() }),
+			execute: async (input) => input,
+		});
+
+		expect(tool.validateInput?.({ value: "ok" })).toEqual({ value: "ok" });
+		expect(() => tool.validateInput?.({ value: 1 })).toThrow();
+	});
+
+	it("preserves an explicit validator for raw JSON schemas", () => {
+		const validateInput = vi.fn((input: unknown) => input);
+		const tool = createTool({
+			name: "raw_validated_tool",
+			description: "Tool with a custom validator",
+			inputSchema: { type: "object" },
+			validateInput,
+			execute: async () => ({ ok: true }),
+		});
+
+		expect(tool.validateInput).toBe(validateInput);
 	});
 
 	it("strips the $schema meta-key emitted by Zod v4's toJSONSchema", () => {

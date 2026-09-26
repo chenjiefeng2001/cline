@@ -9,6 +9,7 @@ import {
 	resolveClineBuildEnv,
 	resolveHubCommandTimeoutMs,
 } from "@cline/shared";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
 	SESSION_NOT_FOUND_ERROR_CODE,
 	SessionNotFoundError,
@@ -24,7 +25,6 @@ import {
 	resolveProductionHubOwnerContext,
 	resolveSharedHubOwnerContext,
 } from "../discovery/workspace";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
 
 const hubClientTracer = trace.getTracer("cline.hub.client");
 
@@ -475,7 +475,9 @@ export class NodeHubClient {
 	): Promise<HubReplyEnvelope> {
 		let attempt = 0;
 		const canRecoverTransport =
-			command !== "client.register" && command !== "client.unregister";
+			command !== "client.register" &&
+			command !== "client.unregister" &&
+			command !== "session.resume";
 		while (true) {
 			try {
 				return await this.commandOnce(command, payload, sessionId, options);
@@ -565,8 +567,12 @@ export class NodeHubClient {
 		timeoutMs: number | null;
 		payload?: Record<string, unknown>;
 	}): Promise<HubReplyEnvelope> {
-		const { command, requestId, sessionId, timeoutMs: effectiveTimeoutMs } =
-			input;
+		const {
+			command,
+			requestId,
+			sessionId,
+			timeoutMs: effectiveTimeoutMs,
+		} = input;
 		const reply = new Promise<HubReplyEnvelope>((resolve, reject) => {
 			const timeout =
 				effectiveTimeoutMs === null

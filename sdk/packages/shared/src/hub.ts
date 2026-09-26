@@ -382,6 +382,7 @@ export type HubCommandName =
 	| "session.get"
 	| "session.messages"
 	| "session.restore"
+	| "session.resume"
 	| "session.delete"
 	| "session.update"
 	| "session.update_connection"
@@ -438,6 +439,7 @@ export function getDefaultHubCommandTimeoutMs(
 ): number | null {
 	switch (command) {
 		case "run.start":
+		case "session.resume":
 		case "session.send_input":
 			return null;
 		default:
@@ -720,6 +722,15 @@ export interface HubSessionAttachInput {
 export interface HubSessionUpdateInput {
 	sessionId: string;
 	metadata?: Record<string, JsonValue | undefined>;
+}
+
+export interface HubSessionResumeInput {
+	sessionId: string;
+	continuationKey: string;
+	start: Record<string, unknown>;
+	ownerToken?: string;
+	leaseDurationMs?: number;
+	reclaimExecuting?: boolean;
 }
 
 export interface HubSessionDeleteInput {

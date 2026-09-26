@@ -1,5 +1,8 @@
 import type * as LlmsProviders from "@cline/llms";
-import type { AgentFinishReason } from "@cline/shared";
+import type {
+	AgentFinishReason,
+	RuntimeConfigExtensionKind,
+} from "@cline/shared";
 import type { SessionAccumulatedUsage } from "../runtime/host/runtime-host";
 import type { BuiltRuntime } from "../runtime/orchestration/session-runtime";
 import type { SessionRuntime } from "../runtime/orchestration/session-runtime-orchestrator";
@@ -26,6 +29,10 @@ export type ActiveSession = {
 	started: boolean;
 	aborting: boolean;
 	interactive: boolean;
+	recoveryOwner?: string;
+	serverRuntimePolicyPresent: boolean;
+	serverRuntimeSources?: RuntimeConfigExtensionKind[];
+	hasClientContributions: boolean;
 	persistedMessages?: LlmsProviders.MessageWithMetadata[];
 	compactionState?: SessionCompactionState;
 	compactionStateWriteQueue?: Promise<void>;

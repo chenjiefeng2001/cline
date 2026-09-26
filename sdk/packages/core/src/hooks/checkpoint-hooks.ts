@@ -8,6 +8,7 @@ export interface CheckpointEntry {
 	ref: string;
 	createdAt: number;
 	runCount: number;
+	runId?: string;
 	kind?: "stash" | "commit";
 }
 
@@ -33,6 +34,7 @@ type CreateCheckpointHooksOptions = {
 		cwd: string;
 		sessionId: string;
 		runCount: number;
+		runId?: string;
 	}) => Promise<CheckpointEntry | undefined> | CheckpointEntry | undefined;
 	/**
 	 * Starting value for the internal run counter. Use this when a session
@@ -174,12 +176,15 @@ export function createCheckpointHooks(
 		return repoSupported;
 	};
 
-	const createCheckpoint = async (): Promise<CheckpointEntry | undefined> => {
+	const createCheckpoint = async (
+		runId?: string,
+	): Promise<CheckpointEntry | undefined> => {
 		if (options.createCheckpoint) {
 			return await options.createCheckpoint({
 				cwd: options.cwd,
 				sessionId: options.sessionId,
 				runCount,
+				runId,
 			});
 		}
 
@@ -268,13 +273,20 @@ export function createCheckpointHooks(
 			) {
 				return undefined;
 			}
-			const entry = await createCheckpoint();
-			if (!entry) {
+			const created = await createCheckpoint(snapshot.runId ?? undefined);
+			if (!created) {
 				return undefined;
 			}
+			const entry: CheckpointEntry = {
+				...created,
+				runId: created.runId ?? snapshot.runId ?? undefined,
+			};
 			const metadata = await options.readSessionMetadata();
 			const existing = readCheckpointMetadata(metadata);
-			if (existing?.latest.ref === entry.ref) {
+			if (
+				existing?.latest.ref === entry.ref &&
+				existing.latest.runId === entry.runId
+			) {
 				return undefined;
 			}
 			const history = upsertCheckpointHistory(existing?.history ?? [], entry);

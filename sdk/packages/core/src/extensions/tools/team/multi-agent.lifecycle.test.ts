@@ -39,6 +39,29 @@ vi.mock("../../../runtime/orchestration/session-runtime-orchestrator", () => {
 });
 
 describe("AgentTeamsRuntime teammate lifecycle events", () => {
+	it("propagates the tool wrapper to teammate runtimes", () => {
+		const wrapTools = vi.fn((tools) => tools);
+		const runtime = new AgentTeamsRuntime({
+			teamName: "wrapped-team",
+			wrapTools,
+		});
+
+		runtime.spawnTeammate({
+			agentId: "wrapped-teammate",
+			config: {
+				providerId: "anthropic",
+				modelId: "mock-model",
+				systemPrompt: "Work",
+				tools: [],
+			},
+		});
+
+		expect(createSessionRuntimeMock).toHaveBeenCalledWith(
+			expect.objectContaining({ systemPrompt: "Work" }),
+			{ wrapTools },
+		);
+	});
+
 	it("spawns teammates with a 10 minute API timeout", () => {
 		// biome-ignore lint/complexity/useArrowFunction: `new SessionRuntime(...)` requires a non-arrow callable.
 		createSessionRuntimeMock.mockImplementationOnce(function () {

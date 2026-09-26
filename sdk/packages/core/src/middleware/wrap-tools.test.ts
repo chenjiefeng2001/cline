@@ -109,6 +109,25 @@ describe("wrapToolsWithMiddleware", () => {
 		expect(execute).toHaveBeenCalledTimes(1);
 	});
 
+	it("forwards the tool cancellation signal to middleware", async () => {
+		const controller = new AbortController();
+		const observe = vi.fn(
+			async (
+				execute: () => Promise<unknown>,
+				middlewareContext: { signal?: AbortSignal },
+			) => {
+				expect(middlewareContext.signal).toBe(controller.signal);
+				return execute();
+			},
+		);
+		const wrapped = wrapToolsWithMiddleware([makeTool()], {
+			chain: [{ name: "observe-signal", wrap: observe }],
+			sessionId: "s1",
+		});
+		await wrapped[0]?.execute({}, { ...context, signal: controller.signal });
+		expect(observe).toHaveBeenCalledTimes(1);
+	});
+
 	it("resolves the session id per call", async () => {
 		const resolve = vi.fn(() => "resolved-session");
 		const wrapped = wrapToolsWithMiddleware([makeTool()], {
@@ -145,6 +164,41 @@ describe("wrapToolsWithMiddleware + idempotency ledger", () => {
 			expect(execute).toHaveBeenCalledTimes(1);
 			ledger.close();
 		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves explicit retryability for ledger-safe retries", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "cline-wrap-retry-"));
+		const ledger = new SqliteEffectLedger({
+			dbPath: join(dir, "effects.db"),
+		});
+		try {
+			const execute = vi
+				.fn()
+				.mockRejectedValueOnce(new Error("safe failure"))
+				.mockResolvedValueOnce("recovered");
+			const wrapped = wrapToolsWithMiddleware(
+				[
+					makeTool({
+						retryable: true,
+						execute: execute as AgentTool["execute"],
+					}),
+				],
+				{
+					chain: [createIdempotencyMiddleware({ ledger, sessionId: "s1" })],
+					sessionId: "s1",
+				},
+			);
+			await expect(wrapped[0]?.execute({ path: "x" }, context)).rejects.toThrow(
+				"safe failure",
+			);
+			await expect(wrapped[0]?.execute({ path: "x" }, context)).resolves.toBe(
+				"recovered",
+			);
+			expect(execute).toHaveBeenCalledTimes(2);
+		} finally {
+			ledger.close();
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});

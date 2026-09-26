@@ -12,7 +12,6 @@ import type {
 	CronSpecRecord,
 } from "../cron/store/sqlite-cron-store";
 import type { CheckpointEntry } from "../hooks/checkpoint-hooks";
-import type { CheckpointWorkspaceCompareResult } from "../session/checkpoint-diff";
 import type { RuntimeCapabilities } from "../runtime/capabilities";
 import type { SessionHistoryListOptions } from "../runtime/host/history";
 import type { SessionBackend } from "../runtime/host/host";
@@ -23,6 +22,7 @@ import type {
 	StartSessionResult,
 } from "../runtime/host/runtime-host";
 import type { FeatureFlagsService } from "../services/feature-flags";
+import type { CheckpointWorkspaceCompareResult } from "../session/checkpoint-diff";
 import type { CoreSessionConfig } from "../types/config";
 import type { SessionMessagesArtifactUploader } from "../types/session";
 
@@ -31,6 +31,7 @@ export type { ClineCoreSettingsApi } from "../settings";
 
 export interface HubOptions {
 	endpoint?: string;
+	clientId?: string;
 	authToken?: string;
 	strategy?: "prefer-hub" | "require-hub";
 	clientType?: string;
@@ -41,6 +42,7 @@ export interface HubOptions {
 
 export interface RemoteOptions {
 	endpoint: string;
+	clientId?: string;
 	authToken?: string;
 	clientType?: string;
 	displayName?: string;

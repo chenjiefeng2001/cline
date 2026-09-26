@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { normalizeWorkspacePath } from "../../services/workspace/workspace-manifest";
 import {
@@ -32,4 +33,19 @@ export function resolveProductionHubOwnerContext(): HubOwnerContext {
 			process.env[HUB_DISCOVERY_ENV]?.trim() ||
 			join(resolveClineDataDir(), "locks", "hub", "production.json"),
 	};
+}
+
+export function resolveA2AClientId(
+	owner: HubOwnerContext,
+	workspaceRoot: string,
+): string {
+	const normalizedWorkspace = normalizeWorkspacePath(workspaceRoot.trim());
+	const basis = [
+		"cline.a2a.principal.v1",
+		owner.ownerId,
+		owner.discoveryPath,
+		resolveClineDataDir(),
+		normalizedWorkspace || workspaceRoot.trim(),
+	].join("\0");
+	return `a2a_${createHash("sha256").update(basis).digest("hex").slice(0, 32)}`;
 }

@@ -1,9 +1,9 @@
 import { truncateSplit } from "@cline/shared";
 import type {
 	SkillConfig,
-	UserInstructionConfigWatcher,
 	WorkflowConfig,
 } from "./user-instruction-config-loader";
+import type { UserInstructionSourceReader } from "./user-instruction-service";
 
 export type RuntimeCommandKind = "skill" | "workflow";
 
@@ -37,7 +37,7 @@ function isCommandEnabled(command: SkillConfig | WorkflowConfig): boolean {
 }
 
 function listCommandsForKind(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 	kind: RuntimeCommandKind,
 ): AvailableRuntimeCommand[] {
 	return [...watcher.getSnapshot(kind).entries()]
@@ -54,7 +54,7 @@ function listCommandsForKind(
 }
 
 export function listAvailableRuntimeCommandsFromWatcher(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 ): AvailableRuntimeCommand[] {
 	const byName = new Map<string, AvailableRuntimeCommand>();
 	for (const command of [
@@ -70,7 +70,7 @@ export function listAvailableRuntimeCommandsFromWatcher(
 
 export function resolveRuntimeSlashCommandFromWatcher(
 	input: string,
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 ): string {
 	if (!input.startsWith("/") || input.length < 2) {
 		return input;

@@ -158,20 +158,26 @@ describe("formatA2ASseFrame", () => {
 });
 
 describe("A2AServer.streamMessage", () => {
-	const hubEvent = (event: string, sessionId: string): HubEventEnvelope => ({
+	const hubEvent = (
+		event: string,
+		sessionId: string,
+		payload: Record<string, unknown> = {},
+	): HubEventEnvelope => ({
 		version: "v1",
 		event: event as HubEventEnvelope["event"],
 		eventId: "hevt_1",
 		sessionId,
 		timestamp: Date.now(),
-		payload: {},
+		payload,
 	});
 
 	const makeServer = () => {
 		const calls: Array<{ command: string; sessionId?: string }> = [];
+		const order: string[] = [];
 		const client: A2AHubCommandClient = {
 			command: vi.fn(async (command, _payload, sessionId) => {
 				calls.push({ command, sessionId });
+				order.push(command);
 				if (command === "session.create") {
 					return {
 						ok: true,
@@ -184,6 +190,7 @@ describe("A2AServer.streamMessage", () => {
 		const listeners: Array<(event: HubEventEnvelope) => void> = [];
 		const events = {
 			subscribe: vi.fn((listener: (event: HubEventEnvelope) => void) => {
+				order.push("subscribe");
 				listeners.push(listener);
 				return vi.fn(() => {
 					const index = listeners.indexOf(listener);
@@ -198,17 +205,21 @@ describe("A2AServer.streamMessage", () => {
 			{ agentCard: { name: "cline-hub", version: "1.0.0" } },
 			events,
 		);
-		return { server, events, listeners, calls };
+		return { server, events, listeners, calls, order };
 	};
 
-	it("emits the initial snapshot then status updates until terminal", async () => {
-		const { server, listeners, calls } = makeServer();
+	it("subscribes before starting the run and emits updates until terminal", async () => {
+		const { server, listeners, order } = makeServer();
 		const received: unknown[] = [];
 		const unsubscribe = await server.streamMessage(
 			{ prompt: "hello" },
 			(event) => received.push(event),
 		);
-		expect(calls[0]?.command).toBe("session.create");
+		expect(order.slice(0, 3)).toEqual([
+			"session.create",
+			"subscribe",
+			"run.start",
+		]);
 
 		expect(received).toHaveLength(1);
 		expect(received[0]).toMatchObject({
@@ -241,11 +252,28 @@ describe("A2AServer.streamMessage", () => {
 		const unsubscribe = await server.streamMessage({ prompt: "go" }, (event) =>
 			received.push(event),
 		);
-		listeners[0]?.(hubEvent("approval.requested", "new-1"));
+		listeners[0]?.(
+			hubEvent("approval.requested", "new-1", {
+				approvalId: "approval-1",
+				toolCallId: "call-1",
+				toolName: "run_commands",
+				expiresAt: 1234,
+				inputJson: '{"secret":"do-not-project"}',
+			}),
+		);
 		expect(received).toHaveLength(2);
 		expect(received[1]).toMatchObject({
 			status: { state: "TASK_STATE_INPUT_REQUIRED" },
+			metadata: {
+				approval: {
+					approvalId: "approval-1",
+					toolCallId: "call-1",
+					toolName: "run_commands",
+					expiresAt: 1234,
+				},
+			},
 		});
+		expect(received[1]).not.toHaveProperty("metadata.approval.inputJson");
 		expect(listeners).toHaveLength(1);
 		listeners[0]?.(hubEvent("approval.resolved", "new-1"));
 		expect(received).toHaveLength(3);
@@ -405,7 +433,7 @@ describe("A2AServer.streamMessage", () => {
 				onClose,
 			}),
 		).rejects.toThrow("subscribe boom");
-		expect(received).toHaveLength(1);
+		expect(received).toHaveLength(0);
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
 

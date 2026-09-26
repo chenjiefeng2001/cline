@@ -6,7 +6,12 @@ import type {
 } from "@cline/shared";
 import { hasRuntimeConfigExtension } from "@cline/shared";
 import { nanoid } from "nanoid";
-import { createUserInstructionConfigService } from "../../extensions/config";
+import {
+	createUserInstructionConfigService,
+	type UserInstructionConfigType,
+	type UserInstructionSourceReader,
+	type UserInstructionSourceSnapshot,
+} from "../../extensions/config";
 import {
 	createDefaultMcpServerClientFactory,
 	createMcpTools,
@@ -51,6 +56,26 @@ function hasConfigExtension(
 	kind: RuntimeConfigExtensionKind,
 ): boolean {
 	return hasRuntimeConfigExtension(extensions, kind);
+}
+
+const SERVER_RUNTIME_SOURCE_TYPES: Partial<
+	Record<RuntimeConfigExtensionKind, UserInstructionConfigType>
+> = {
+	rules: "rule",
+	skills: "skill",
+	workflows: "workflow",
+};
+
+function resolveServerRuntimeSourceTypes(
+	extensions: ReadonlyArray<RuntimeConfigExtensionKind> | undefined,
+): UserInstructionConfigType[] | undefined {
+	if (!extensions || extensions.includes("plugins")) {
+		return undefined;
+	}
+	const types = extensions
+		.map((extension) => SERVER_RUNTIME_SOURCE_TYPES[extension])
+		.filter((type): type is UserInstructionConfigType => Boolean(type));
+	return [...new Set(types)];
 }
 
 function isToolEnabledByPolicies(
@@ -345,6 +370,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 			userInstructionService: sharedUserInstructionService,
 			configExtensions,
 			toolExecutors,
+			wrapTools,
 		} = input;
 		const onTeamEvent = input.onTeamEvent ?? (() => {});
 		const normalized = normalizeConfig(config);
@@ -375,6 +401,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 			sharedUserInstructionService,
 		);
 		let userInstructionService = sharedUserInstructionService;
+		let userInstructionServiceStarted = false;
 		let mcpShutdown: (() => Promise<void>) | undefined;
 
 		for (const error of configuredAgents.errors) {
@@ -405,8 +432,95 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 		}
 
 		if (userInstructionService) {
-			await userInstructionService.start().catch(() => {});
+			try {
+				await userInstructionService.start();
+				userInstructionServiceStarted = true;
+			} catch {}
 		}
+		const serverRuntimeSourceTypes =
+			resolveServerRuntimeSourceTypes(configExtensions);
+		const runtimeSourceTypes: UserInstructionConfigType[] = [
+			...new Set<UserInstructionConfigType>([
+				...(serverRuntimeSourceTypes ??
+					(["rule", "skill", "workflow"] as UserInstructionConfigType[])),
+				...(configuredAgentsNeedSkills
+					? (["skill"] as UserInstructionConfigType[])
+					: []),
+			]),
+		];
+		let activeRuntimeSourceSnapshot: UserInstructionSourceSnapshot | undefined;
+		let activeRecoverySourceSnapshot: UserInstructionSourceSnapshot | undefined;
+		let sourceLeaseCount = 0;
+		const captureRuntimeSource = (): void => {
+			if (
+				!userInstructionServiceStarted ||
+				!userInstructionService?.captureSourceSnapshot
+			) {
+				return;
+			}
+			activeRuntimeSourceSnapshot =
+				userInstructionService.captureSourceSnapshot(runtimeSourceTypes);
+			activeRecoverySourceSnapshot = serverRuntimeSourceTypes
+				? userInstructionService.captureSourceSnapshot(serverRuntimeSourceTypes)
+				: undefined;
+		};
+		captureRuntimeSource();
+		const liveSourceReader: UserInstructionSourceReader = {
+			getSnapshot: (type) =>
+				new Map(
+					(userInstructionService?.listRecords(type) ?? []).map((record) => [
+						record.id,
+						{
+							type,
+							id: record.id,
+							contentHash: record.contentHash,
+							item: record.item,
+						},
+					]),
+				),
+		};
+		const runtimeSourceReader: UserInstructionSourceReader = {
+			getSnapshot: (type) =>
+				(activeRuntimeSourceSnapshot ?? liveSourceReader).getSnapshot(type),
+		};
+		const acquireUserInstructionRun = (): (() => void) | undefined => {
+			if (
+				!userInstructionServiceStarted ||
+				!userInstructionService?.captureSourceSnapshot ||
+				runtimeSourceTypes.length === 0
+			) {
+				return undefined;
+			}
+			if (sourceLeaseCount === 0) {
+				captureRuntimeSource();
+				if (!activeRuntimeSourceSnapshot) {
+					throw new Error("User instruction source snapshot is unavailable");
+				}
+			}
+			sourceLeaseCount += 1;
+			let released = false;
+			return () => {
+				if (released) {
+					return;
+				}
+				released = true;
+				sourceLeaseCount = Math.max(0, sourceLeaseCount - 1);
+				if (sourceLeaseCount === 0) {
+					activeRuntimeSourceSnapshot = undefined;
+					activeRecoverySourceSnapshot = undefined;
+				}
+			};
+		};
+		const getServerRuntimeSourceReference =
+			!userInstructionServiceProvided &&
+			serverRuntimeSourceTypes &&
+			userInstructionServiceStarted
+				? () =>
+						activeRecoverySourceSnapshot?.reference ??
+						userInstructionService?.getSourceReference?.(
+							serverRuntimeSourceTypes,
+						)
+				: undefined;
 
 		const registerSkillsTool =
 			normalized.enableTools &&
@@ -425,13 +539,16 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 
 		const userInstructionPlugin =
 			userInstructionService && userInstructionsEnabled
-				? userInstructionService.createExtension({
-						includeRules: rulesEnabled,
-						includeSkills: rootSkillsEnabled,
-						includeWorkflows: workflowsEnabled,
-						registerSkillsTool,
-						allowedSkillNames: config.skills,
-					})
+				? userInstructionService.createExtension(
+						{
+							includeRules: rulesEnabled,
+							includeSkills: rootSkillsEnabled,
+							includeWorkflows: workflowsEnabled,
+							registerSkillsTool,
+							allowedSkillNames: config.skills,
+						},
+						runtimeSourceReader,
+					)
 				: undefined;
 		const runtimeExtensions = userInstructionPlugin
 			? [...(extensions ?? config.extensions ?? []), userInstructionPlugin]
@@ -476,6 +593,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 		let pendingLeadTeamTools: AgentTool[] = [];
 		let restoredStateHydratedIntoRuntime = false;
 		const delegatedAgentConfigProvider = createDelegatedAgentConfigProvider({
+			sessionId: config.sessionId,
 			providerId: config.providerId,
 			modelId: config.modelId,
 			cwd: config.cwd,
@@ -517,6 +635,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 													userInstructionService?.createSkillsExecutor
 													? userInstructionService.createSkillsExecutor(
 															agent.skills,
+															runtimeSourceReader,
 														)
 													: undefined,
 												toolExecutors,
@@ -530,6 +649,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 							onSubAgentEvent: input.onSubAgentEvent,
 							onSubAgentStart: input.onSubAgentStart,
 							onSubAgentEnd: input.onSubAgentEnd,
+							wrapTools,
 						}),
 						effectiveToolPolicies,
 					),
@@ -559,6 +679,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 					leadAgentId: config.sessionId || "lead",
 					missionLogIntervalSteps: normalized.missionLogIntervalSteps,
 					missionLogIntervalMs: normalized.missionLogIntervalMs,
+					wrapTools,
 					onTeamEvent: (event: TeamEvent) => {
 						onTeamEvent(event);
 						if (teamRuntime && teamStore) {
@@ -627,6 +748,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 								)
 						: undefined,
 					teammateConfigProvider: delegatedAgentConfigProvider,
+					wrapTools,
 				});
 
 				if (restoredStateHydratedIntoRuntime) {
@@ -717,6 +839,14 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 					?.delegatedAgentConfigProvider ?? delegatedAgentConfigProvider,
 			extensions: runtimeExtensions,
 			completionPolicy,
+			...(getServerRuntimeSourceReference
+				? { getServerRuntimeSourceReference }
+				: {}),
+			...(userInstructionServiceStarted &&
+			userInstructionService?.captureSourceSnapshot &&
+			runtimeSourceTypes.length > 0
+				? { acquireUserInstructionRun }
+				: {}),
 			registerLeadAgent: (agent) => {
 				leadAgentInstance = agent;
 				if (pendingLeadTeamTools.length > 0) {

@@ -101,6 +101,10 @@ export class UnifiedSessionPersistenceService {
 		return this.manifestStore.readSessionManifest(sessionId);
 	}
 
+	async getSession(sessionId: string): Promise<SessionRow | undefined> {
+		return this.adapter.getSession(sessionId);
+	}
+
 	async createRootSessionWithArtifacts(
 		input: import("../models/session-row").CreateRootSessionWithArtifactsInput,
 	): Promise<import("../models/session-row").RootSessionArtifacts> {

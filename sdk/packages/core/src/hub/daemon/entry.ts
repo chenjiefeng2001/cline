@@ -1,8 +1,12 @@
 import { AgentRuntimeAbortError } from "@cline/agents";
 import { initVcr, resolveClineBuildEnv } from "@cline/shared";
+import { LocalRuntimeHost } from "../../runtime/host/local-runtime-host";
+import { SqliteSessionStore } from "../../services/storage/sqlite-session-store";
+import { CoreSessionService } from "../../session/services/session-service";
 import { createLocalHubScheduleRuntimeHandlers } from "../daemon/runtime-handlers";
 import { resolveHubEndpointOptions } from "../discovery/defaults";
 import {
+	resolveA2AClientId,
 	resolveProductionHubOwnerContext,
 	resolveSharedHubOwnerContext,
 } from "../discovery/workspace";
@@ -69,6 +73,17 @@ async function main(): Promise<void> {
 	});
 
 	const daemonTelemetry = createHubDaemonTelemetry();
+	const owner =
+		resolveClineBuildEnv() === "production"
+			? resolveProductionHubOwnerContext()
+			: resolveSharedHubOwnerContext();
+	const a2aClientId =
+		options.a2a === true ? resolveA2AClientId(owner, options.cwd) : undefined;
+	const sessionHost = new LocalRuntimeHost({
+		sessionService: new CoreSessionService(new SqliteSessionStore()),
+		telemetry: daemonTelemetry.telemetry,
+		recoveryOwner: a2aClientId,
+	});
 
 	let server: Awaited<ReturnType<typeof startHubWebSocketServer>>;
 	try {
@@ -76,20 +91,30 @@ async function main(): Promise<void> {
 			host: endpoint.host,
 			port: endpoint.port,
 			pathname: endpoint.pathname,
-			owner:
-				resolveClineBuildEnv() === "production"
-					? resolveProductionHubOwnerContext()
-					: resolveSharedHubOwnerContext(),
+			owner,
 			telemetry: daemonTelemetry.telemetry,
+			sessionHost,
+			startupRecovery: () =>
+				sessionHost.recoverPendingRunContinuations({ background: true }),
 			runtimeHandlers: createLocalHubScheduleRuntimeHandlers({
 				telemetry: daemonTelemetry.telemetry,
+				sessionHost,
 			}),
 			cronOptions: { workspaceRoot: options.cwd },
-			a2a: options.a2a === true ? { enabled: true } : undefined,
+			a2a:
+				options.a2a === true
+					? {
+							enabled: true,
+							clientId: a2aClientId,
+							recoveryOwner: a2aClientId,
+							defaultSessionConfig: { cwd: options.cwd },
+						}
+					: undefined,
 		});
 	} catch (error) {
 		// Flush before the top-level catch exits so failed daemon starts are
 		// still visible in telemetry instead of dying silently.
+		await sessionHost.dispose("hub_server_start_failed").catch(() => undefined);
 		await daemonTelemetry.dispose().catch(() => undefined);
 		throw error;
 	}

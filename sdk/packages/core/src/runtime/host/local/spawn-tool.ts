@@ -33,6 +33,7 @@ export interface SpawnToolDeps {
 		event: AgentEvent,
 	): void;
 	invokeBackendOptional(method: string, ...args: unknown[]): Promise<void>;
+	wrapTools?: (tools: AgentTool[]) => AgentTool[];
 }
 
 export interface SessionSubAgentLifecycleCallbacks {
@@ -182,6 +183,7 @@ export function createSessionSpawnTool(
 			updateConnectionDefaults: () => {},
 		},
 		createSubAgentTools,
+		wrapTools: deps.wrapTools,
 		...lifecycle,
 	}) as AgentTool;
 }

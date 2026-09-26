@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AgentExtension } from "@cline/shared";
 import type { SkillsExecutorWithMetadata } from "../tools";
 import {
@@ -25,7 +26,88 @@ export interface UserInstructionConfigRecord<
 	type: UserInstructionConfigType;
 	id: string;
 	filePath: string;
+	contentHash?: string;
 	item: TConfig;
+}
+
+export interface UserInstructionSourceReference {
+	readonly version: 1;
+	readonly algorithm: "sha256";
+	readonly digest: string;
+}
+
+export interface UserInstructionSourceItem {
+	readonly name: string;
+	readonly description?: string;
+	readonly disabled?: boolean;
+	readonly instructions: string;
+}
+
+export interface UserInstructionSourceRecord<
+	TItem extends UserInstructionSourceItem = UserInstructionSourceItem,
+> {
+	type: UserInstructionConfigType;
+	id: string;
+	contentHash: string;
+	item: TItem;
+}
+
+export interface UserInstructionSourceReader {
+	getSnapshot(
+		type: UserInstructionConfigType,
+	): ReadonlyMap<string, { readonly item: UserInstructionSourceItem }>;
+}
+
+export interface UserInstructionSourceSnapshot
+	extends UserInstructionSourceReader {
+	getSnapshot(
+		type: UserInstructionConfigType,
+	): ReadonlyMap<string, UserInstructionSourceRecord>;
+	readonly reference: UserInstructionSourceReference;
+}
+
+function createSourceReference(
+	groups: ReadonlyArray<{
+		type: UserInstructionConfigType;
+		records: ReadonlyArray<{ id: string; contentHash: string }>;
+	}>,
+): UserInstructionSourceReference {
+	const digest = createHash("sha256")
+		.update(
+			JSON.stringify({
+				domain: "cline.user-instruction-source-reference.v1",
+				groups,
+			}),
+		)
+		.digest("hex");
+	return Object.freeze({
+		version: 1,
+		algorithm: "sha256",
+		digest,
+	});
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+	if (value && typeof value === "object" && !seen.has(value)) {
+		seen.add(value);
+		for (const nested of Object.values(value)) {
+			deepFreeze(nested, seen);
+		}
+		Object.freeze(value);
+	}
+	return value;
+}
+
+function freezeSourceItem(
+	item: UserInstructionConfig,
+): UserInstructionSourceItem {
+	const description = "description" in item ? item.description : undefined;
+	return deepFreeze({
+		name: item.name,
+		description,
+		disabled: item.disabled,
+		instructions: item.instructions,
+	});
 }
 
 export interface CreateUserInstructionConfigServiceOptions
@@ -41,14 +123,22 @@ export interface UserInstructionConfigService {
 	listRuntimeCommands(): AvailableRuntimeCommand[];
 	resolveRuntimeSlashCommand(input: string): string;
 	hasConfiguredSkills(allowedSkillNames?: ReadonlyArray<string>): boolean;
+	getSourceReference?(
+		types: ReadonlyArray<UserInstructionConfigType>,
+	): UserInstructionSourceReference | undefined;
+	captureSourceSnapshot?(
+		types: ReadonlyArray<UserInstructionConfigType>,
+	): UserInstructionSourceSnapshot | undefined;
 	createSkillsExecutor?(
 		allowedSkillNames?: ReadonlyArray<string>,
+		sourceReader?: UserInstructionSourceReader,
 	): SkillsExecutorWithMetadata;
 	createExtension(
 		options: Omit<
 			CreateUserInstructionPluginOptions,
 			"watcher" | "watcherReady"
 		>,
+		sourceReader?: UserInstructionSourceReader,
 	): AgentExtension;
 }
 
@@ -93,9 +183,83 @@ class DefaultUserInstructionConfigService
 				type,
 				id,
 				filePath: record.filePath,
+				contentHash: record.contentHash,
 				item: record.item as TConfig,
 			}),
 		);
+	}
+
+	captureSourceSnapshot(
+		types: ReadonlyArray<UserInstructionConfigType>,
+	): UserInstructionSourceSnapshot | undefined {
+		const selectedTypes = [...new Set(types)].sort();
+		const allSnapshots = this.watcher.getAllSnapshots();
+		const snapshots = new Map<
+			UserInstructionConfigType,
+			Map<string, UserInstructionSourceRecord>
+		>();
+		const groups: Array<{
+			type: UserInstructionConfigType;
+			records: Array<{ id: string; contentHash: string }>;
+		}> = [];
+		for (const type of selectedTypes) {
+			const sourceRecords = [...(allSnapshots.get(type)?.entries() ?? [])];
+			const records: UserInstructionSourceRecord[] = [];
+			for (const [id, sourceRecord] of sourceRecords) {
+				const contentHash = sourceRecord.contentHash;
+				if (!contentHash) {
+					return undefined;
+				}
+				records.push(
+					Object.freeze({
+						type,
+						id,
+						contentHash,
+						item: freezeSourceItem(sourceRecord.item),
+					}),
+				);
+			}
+			records.sort((left, right) =>
+				left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+			);
+			snapshots.set(
+				type,
+				new Map(records.map((record) => [record.id, record])),
+			);
+			groups.push({
+				type,
+				records: records.map(({ id, contentHash }) => ({ id, contentHash })),
+			});
+		}
+		return Object.freeze({
+			reference: createSourceReference(groups),
+			getSnapshot: (type: UserInstructionConfigType) =>
+				new Map(snapshots.get(type) ?? []),
+		});
+	}
+
+	getSourceReference(
+		types: ReadonlyArray<UserInstructionConfigType>,
+	): UserInstructionSourceReference | undefined {
+		const selectedTypes = [...new Set(types)].sort();
+		const groups: Array<{
+			type: UserInstructionConfigType;
+			records: Array<{ id: string; contentHash: string }>;
+		}> = [];
+		for (const type of selectedTypes) {
+			const records: Array<{ id: string; contentHash: string }> = [];
+			for (const [id, record] of this.watcher.getSnapshot(type).entries()) {
+				if (!record.contentHash) {
+					return undefined;
+				}
+				records.push({ id, contentHash: record.contentHash });
+			}
+			records.sort((left, right) =>
+				left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+			);
+			groups.push({ type, records });
+		}
+		return createSourceReference(groups);
 	}
 
 	listRuntimeCommands(): AvailableRuntimeCommand[] {
@@ -114,9 +278,10 @@ class DefaultUserInstructionConfigService
 
 	createSkillsExecutor(
 		allowedSkillNames?: ReadonlyArray<string>,
+		sourceReader: UserInstructionSourceReader = this.watcher,
 	): SkillsExecutorWithMetadata {
 		return createUserInstructionSkillsExecutor(
-			this.watcher,
+			sourceReader,
 			(this.ready ?? Promise.resolve()).catch(() => {}),
 			allowedSkillNames,
 		);
@@ -127,10 +292,11 @@ class DefaultUserInstructionConfigService
 			CreateUserInstructionPluginOptions,
 			"watcher" | "watcherReady"
 		>,
+		sourceReader: UserInstructionSourceReader = this.watcher,
 	): AgentExtension {
 		return createUserInstructionPlugin({
 			...options,
-			watcher: this.watcher,
+			watcher: sourceReader,
 			watcherReady: (this.ready ?? Promise.resolve()).catch(() => {}),
 		});
 	}

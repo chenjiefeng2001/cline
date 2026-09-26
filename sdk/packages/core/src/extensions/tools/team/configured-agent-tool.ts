@@ -54,6 +54,7 @@ export interface ConfiguredAgentToolConfig {
 	) => Promise<ToolApprovalResult> | ToolApprovalResult;
 	onSubAgentStart?: (context: SubAgentStartContext) => void | Promise<void>;
 	onSubAgentEnd?: (context: SubAgentEndContext) => void | Promise<void>;
+	wrapTools?: (tools: AgentTool[]) => AgentTool[];
 }
 
 function sanitizeAgentName(name: string): string {
@@ -173,11 +174,16 @@ export function createConfiguredAgentTools(
 						tools,
 						maxIterations: config.maxIterations,
 						parentAgentId: context.agentId,
+						// A lead agent reports no chain root, so its own run id
+						// becomes the chain root for the child.
+						rootRunId: context.rootRunId ?? context.runId,
 						abortSignal: context.signal,
 						onEvent: options.onSubAgentEvent,
 						hookErrorMode: options.hookErrorMode,
 						toolPolicies: options.toolPolicies,
 						requestToolApproval: options.requestToolApproval,
+						sessionId: context.sessionId,
+						wrapTools: options.wrapTools,
 					});
 					const subAgentId = subAgent.getAgentId();
 					const conversationId = subAgent.getConversationId();

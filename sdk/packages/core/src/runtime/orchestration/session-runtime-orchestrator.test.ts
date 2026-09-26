@@ -17,6 +17,7 @@
 import {
 	type AgentRuntime,
 	type AgentRuntimeConfig,
+	type AgentRuntimeResumeToolCall,
 	createAgentRuntime,
 } from "@cline/agents";
 import {
@@ -70,13 +71,19 @@ interface FakeAgentRuntimeScript {
  */
 function makeFakeAgentRuntime(script: FakeAgentRuntimeScript = {}): {
 	runtime: AgentRuntime;
-	calls: { run: unknown[]; continue: unknown[]; abort: unknown[] };
+	calls: {
+		run: unknown[];
+		continue: unknown[];
+		resume: AgentRuntimeResumeToolCall[];
+		abort: unknown[];
+	};
 	listeners: Set<(event: AgentRuntimeEvent) => void>;
 } {
 	const listeners = new Set<(event: AgentRuntimeEvent) => void>();
 	const calls = {
 		run: [] as unknown[],
 		continue: [] as unknown[],
+		resume: [] as AgentRuntimeResumeToolCall[],
 		abort: [] as unknown[],
 	};
 
@@ -116,6 +123,14 @@ function makeFakeAgentRuntime(script: FakeAgentRuntimeScript = {}): {
 		},
 		async continue(input: unknown) {
 			calls.continue.push(input);
+			emit();
+			if (script.throwError) {
+				throw script.throwError;
+			}
+			return baseResult;
+		},
+		async resumePendingToolCall(input: AgentRuntimeResumeToolCall) {
+			calls.resume.push(input);
 			emit();
 			if (script.throwError) {
 				throw script.throwError;
@@ -493,6 +508,76 @@ describe("SessionRuntime.getExtensionRegistry", () => {
 		const toolNames = observedTools.map((t) => t.name).sort();
 		expect(toolNames).toEqual(["config-tool-b", "ext-tool-a"]);
 	});
+
+	it("wraps the final per-turn tool set without mutating session config", async () => {
+		const configTool: AgentTool = {
+			name: "config-tool",
+			description: "original",
+			inputSchema: {},
+			execute: async () => ({}),
+		};
+		const extensionTool: AgentTool = {
+			name: "extension-tool",
+			description: "extension",
+			inputSchema: {},
+			execute: async () => ({}),
+		};
+		const extension = {
+			name: "wrapped-tool-ext",
+			manifest: { capabilities: ["tools"] },
+			setup: (api: { registerTool: (tool: AgentTool) => void }) => {
+				api.registerTool(extensionTool);
+			},
+		};
+		const wrapTools = vi.fn((tools: AgentTool[]) =>
+			tools.map((tool) => ({ ...tool, description: `wrapped:${tool.name}` })),
+		);
+		const { runtime } = makeFakeAgentRuntime();
+		let wrappedTools: AgentTool[] = [];
+		const session = new SessionRuntime(
+			makeAgentConfig({
+				sessionId: "session-wrap",
+				tools: [configTool],
+				extensions: [
+					extension as unknown as NonNullable<
+						AgentConfig["extensions"]
+					>[number],
+				],
+			}),
+			{
+				wrapTools,
+				createAgentRuntimeImpl: (config) => {
+					wrappedTools = [...(config.tools ?? [])];
+					return runtime;
+				},
+			},
+		);
+
+		await session.run("go");
+
+		expect(wrapTools).toHaveBeenCalledTimes(1);
+		expect(wrappedTools.map((tool) => tool.description).sort()).toEqual([
+			"wrapped:config-tool",
+			"wrapped:extension-tool",
+		]);
+		expect(configTool.description).toBe("original");
+		expect(extensionTool.description).toBe("extension");
+	});
+
+	it("uses a restored run id only for the first replayed run", async () => {
+		const { deps, configs } = withCapturingFakeRuntime();
+		const session = new SessionRuntime(makeAgentConfig(), {
+			...deps,
+			initialRunId: "restored-run",
+		});
+
+		await session.run("first");
+		await session.continue();
+
+		expect(configs[0]?.runId).toBe("restored-run");
+		expect(configs[1]?.runId).toMatch(/^run_/);
+		expect(configs[1]?.runId).not.toBe("restored-run");
+	});
 });
 
 describe("SessionRuntime message preparation", () => {
@@ -867,6 +952,39 @@ describe("SessionRuntime.run", () => {
 		expect(result.startedAt).toBeInstanceOf(Date);
 		expect(result.endedAt).toBeInstanceOf(Date);
 		expect(typeof result.durationMs).toBe("number");
+	});
+
+	it("resumes a persisted pending tool call with the saved identity", async () => {
+		const { deps, calls } = withFakeRuntime();
+		const session = new SessionRuntime(
+			makeAgentConfig({
+				initialMessages: [
+					{ role: "user", content: [{ type: "text", text: "write it" }] },
+				],
+			}),
+			{
+				...deps,
+				runtimeIdentity: {
+					agentId: "agent-resume",
+					conversationId: "conversation-resume",
+				},
+			},
+		);
+		const input: AgentRuntimeResumeToolCall = {
+			runId: "run-resume",
+			iteration: 2,
+			assistantMessageId: "assistant-1",
+			toolCallId: "call-1",
+			toolName: "write_file",
+			preparedInput: { path: "a.txt" },
+			approval: { approved: true },
+		};
+
+		await session.resumePendingToolCall(input);
+
+		expect(session.getAgentId()).toBe("agent-resume");
+		expect(session.getConversationId()).toBe("conversation-resume");
+		expect(calls.resume).toEqual([input]);
 	});
 
 	it("appends the user turn into the conversation store", async () => {

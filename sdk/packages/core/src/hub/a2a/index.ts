@@ -14,11 +14,13 @@ export {
 	A2A_TASK_NOT_CANCELABLE,
 	A2A_TASK_NOT_FOUND,
 	A2A_UNSUPPORTED_OPERATION,
+	type A2AApprovalDecisionExtraction,
 	type A2AJsonRpcError,
 	type A2AJsonRpcRequest,
 	type A2AJsonRpcResponse,
 	type A2AJsonRpcStreamResult,
 	createA2AJsonRpcHandler,
+	extractA2AApprovalDecision,
 	extractA2ARequestPrompt,
 	extractA2ARequestSessionId,
 } from "./a2a-jsonrpc";
@@ -30,6 +32,7 @@ export {
 	mapSessionToTask,
 } from "./a2a-mapping";
 export {
+	type A2AApprovalDecisionInput,
 	type A2AHubCommandClient,
 	type A2AHubEventClient,
 	type A2ASendMessageInput,
@@ -47,14 +50,21 @@ export {
 	formatA2ASseFrame,
 	isTerminalA2ATaskState,
 	mapHubEventToTaskState,
+	parseA2AApprovalDescriptor,
 } from "./a2a-sse";
 export type {
 	A2AAgentCard,
 	A2AAgentInterface,
 	A2AAgentSkill,
+	A2AApprovalDecisionData,
+	A2AApprovalDescriptor,
 	A2AArtifact,
+	A2ADataPart,
 	A2ATask,
 	A2ATaskState,
 	A2ATextPart,
 } from "./a2a-types";
-export { A2A_TERMINAL_TASK_STATES } from "./a2a-types";
+export {
+	A2A_APPROVAL_DECISION_PART_TYPE,
+	A2A_TERMINAL_TASK_STATES,
+} from "./a2a-types";

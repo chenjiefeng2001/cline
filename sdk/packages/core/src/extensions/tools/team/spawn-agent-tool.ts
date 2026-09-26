@@ -109,6 +109,7 @@ export interface SpawnAgentToolConfig {
 	 */
 	logger?: BasicLogger;
 	telemetry?: ITelemetryService;
+	wrapTools?: (tools: AgentTool[]) => AgentTool[];
 }
 
 /**
@@ -133,11 +134,16 @@ export function createSpawnAgentTool(
 				tools,
 				maxIterations: config.defaultMaxIterations,
 				parentAgentId: context.agentId,
+				// A lead agent reports no chain root, so its own run id becomes the
+				// chain root for the child.
+				rootRunId: context.rootRunId ?? context.runId,
 				abortSignal: context.signal,
 				onEvent: config.onSubAgentEvent,
 				hookErrorMode: config.hookErrorMode,
 				toolPolicies: config.toolPolicies,
 				requestToolApproval: config.requestToolApproval,
+				sessionId: context.sessionId,
+				wrapTools: config.wrapTools,
 			});
 			const subAgentId = subAgent.getAgentId();
 			const conversationId = subAgent.getConversationId();

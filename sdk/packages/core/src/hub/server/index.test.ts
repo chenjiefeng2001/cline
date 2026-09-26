@@ -466,13 +466,14 @@ describe("hub server A2A opt-in mount", () => {
 		const server = requireServer(result.server);
 		servers.add(server);
 
-		const send = vi
-			.spyOn(A2AServer.prototype, "sendMessage")
-			.mockResolvedValue({
-				id: "shutdown-stream",
-				contextId: "shutdown-stream",
-				status: { state: "TASK_STATE_WORKING" },
-			});
+		const task = {
+			id: "shutdown-stream",
+			contextId: "shutdown-stream",
+			status: { state: "TASK_STATE_WORKING" as const },
+		};
+		const prepare = vi
+			.spyOn(A2AServer.prototype, "prepareMessage")
+			.mockResolvedValue({ task, start: vi.fn(async () => task) });
 		try {
 			const response = await fetch(`http://${server.host}:${server.port}/a2a`, {
 				method: "POST",
@@ -497,7 +498,7 @@ describe("hub server A2A opt-in mount", () => {
 			expect(await ended).toBe(true);
 			servers.delete(server);
 		} finally {
-			send.mockRestore();
+			prepare.mockRestore();
 		}
 	});
 });

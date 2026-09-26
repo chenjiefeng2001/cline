@@ -152,6 +152,7 @@ export async function createRuntimeHost(
 		});
 		return new RemoteRuntimeHost({
 			endpoint: remoteEndpoint,
+			clientId: options.remote?.clientId,
 			authToken: options.remote?.authToken,
 			clientType: options.remote?.clientType,
 			displayName: options.remote?.displayName,
@@ -179,6 +180,7 @@ export async function createRuntimeHost(
 		return new HubRuntimeHost(
 			{
 				url: hubUrl,
+				clientId: options.hub?.clientId,
 				authToken: options.hub?.authToken,
 				clientType: options.hub?.clientType,
 				displayName: options.hub?.displayName,
@@ -205,6 +207,7 @@ export async function createRuntimeHost(
 			const host = new HubRuntimeHost(
 				{
 					url: hubUrl,
+					clientId: options.hub?.clientId,
 					authToken: options.hub?.authToken,
 					clientType: options.hub?.clientType,
 					displayName: options.hub?.displayName,

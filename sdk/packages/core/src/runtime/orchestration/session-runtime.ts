@@ -10,7 +10,10 @@ import type {
 	ToolApprovalRequest,
 	ToolApprovalResult,
 } from "@cline/shared";
-import type { UserInstructionConfigService } from "../../extensions/config";
+import type {
+	UserInstructionConfigService,
+	UserInstructionSourceReference,
+} from "../../extensions/config";
 import type { ToolExecutors } from "../../extensions/tools";
 import type {
 	AgentTeamsRuntime,
@@ -45,9 +48,15 @@ export interface BuiltRuntime {
 	delegatedAgentConfigProvider?: DelegatedAgentConfigProvider;
 	extensions?: AgentConfig["extensions"];
 	completionPolicy?: AgentConfig["completionPolicy"];
+	getServerRuntimeSourceReference?: () =>
+		| UserInstructionSourceReference
+		| undefined;
+	acquireUserInstructionRun?: () => (() => void) | undefined;
 	registerLeadAgent?: (agent: LeadAgentHandle) => void;
 	shutdown: (reason: string) => Promise<void> | void;
 }
+
+export type SessionToolWrapper = (tools: AgentTool[]) => AgentTool[];
 
 export interface RuntimeBuilderInput {
 	config: CoreSessionConfig;
@@ -64,6 +73,7 @@ export interface RuntimeBuilderInput {
 	configExtensions?: RuntimeConfigExtensionKind[];
 	toolExecutors?: Partial<ToolExecutors>;
 	toolPolicies?: CoreSessionConfig["toolPolicies"];
+	wrapTools?: SessionToolWrapper;
 	workspaceManager?: WorkspaceManager;
 	logger?: BasicLogger;
 	telemetry?: ITelemetryService;

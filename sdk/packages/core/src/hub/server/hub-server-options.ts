@@ -4,6 +4,9 @@ import type {
 	HubScheduleRuntimeHandlers,
 	HubScheduleServiceOptions,
 } from "../../cron/service/schedule-service";
+import type { DurableToolApprovalCoordinator } from "../../runtime/approval/durable-tool-approval";
+import type { DurableRunContinuationCoordinator } from "../../runtime/continuation/durable-run-continuation";
+import type { RunContinuationRecoveryReport } from "../../runtime/host/local-runtime-host";
 import type {
 	PendingPromptsRuntimeService,
 	RuntimeHost,
@@ -19,9 +22,14 @@ export interface HubWebSocketServerOptions {
 	a2a?: Omit<A2AHttpMountOptions, "server"> & {
 		enabled?: boolean;
 		agentCard?: A2AServerOptions["agentCard"];
+		defaultSessionConfig?: A2AServerOptions["defaultSessionConfig"];
+		clientId?: string;
+		recoveryOwner?: string;
 	};
 	owner?: HubOwnerContext;
 	sessionHost?: RuntimeHost & Partial<PendingPromptsRuntimeService>;
+	approvalCoordinator?: DurableToolApprovalCoordinator;
+	continuationCoordinator?: DurableRunContinuationCoordinator;
 	settingsService?: CoreSettingsService;
 	runtimeHandlers: HubScheduleRuntimeHandlers;
 	scheduleOptions?: Omit<HubScheduleServiceOptions, "runtimeHandlers">;
@@ -48,6 +56,10 @@ export interface HubWebSocketServerOptions {
 	 * Ignored when `sessionHost` is supplied.
 	 */
 	telemetry?: ITelemetryService;
+	startupRecovery?: () =>
+		| Promise<RunContinuationRecoveryReport | undefined>
+		| RunContinuationRecoveryReport
+		| undefined;
 }
 
 export interface HubWebSocketServer {

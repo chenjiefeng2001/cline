@@ -75,6 +75,27 @@ export interface A2ATextPart {
 	metadata?: Record<string, unknown>;
 }
 
+export interface A2ADataPart {
+	data: Record<string, unknown>;
+	metadata?: Record<string, unknown>;
+}
+
+export const A2A_APPROVAL_DECISION_PART_TYPE = "cline.approval.decision";
+
+export interface A2AApprovalDecisionData {
+	type: typeof A2A_APPROVAL_DECISION_PART_TYPE;
+	approvalId: string;
+	decision: "approved" | "denied";
+	reason?: string;
+}
+
+export interface A2AApprovalDescriptor {
+	approvalId: string;
+	toolCallId: string;
+	toolName: string;
+	expiresAt: number;
+}
+
 /** v1.0 §4.1.7 artifact. */
 export interface A2AArtifact {
 	artifactId: string;
@@ -97,5 +118,6 @@ export interface A2ATask {
 		sessionId?: string;
 		source?: string;
 		pendingApproval?: boolean;
+		approval?: A2AApprovalDescriptor;
 	};
 }

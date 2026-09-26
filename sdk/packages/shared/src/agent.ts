@@ -5,6 +5,7 @@
  *
  */
 
+import type { AgentRunBudget } from "./agents/types";
 import type { ModelInfo } from "./llms/model-info";
 import type {
 	ToolApprovalRequest,
@@ -122,6 +123,7 @@ export type AgentRunStatus =
 	| "idle"
 	| "running"
 	| "completed"
+	| "budget_exhausted"
 	| "aborted"
 	| "failed";
 
@@ -149,7 +151,7 @@ export interface AgentToolDefinition {
 	inputSchema: Record<string, unknown>;
 	lifecycle?: {
 		/**
-		 * Whether a successful call to this tool completes the current run.
+		 * Whether a successful call completes the run after the current tool batch settles.
 		 */
 		completesRun?: boolean;
 	};
@@ -166,8 +168,21 @@ export interface AgentToolContext {
 	agentId: string;
 	conversationId?: string;
 	runId?: string;
+	/**
+	 * Immediate parent agent id when this agent is delegated. Delegating tools
+	 * (`spawn_agent`, configured agent tools) use it to seed the child agent's
+	 * own chain instead of guessing from the host session.
+	 */
+	parentAgentId?: string;
+	/**
+	 * Run that owns this agent's chain. `undefined` for lead agents, whose run
+	 * id changes per run.
+	 */
+	rootRunId?: string;
 	iteration: number;
+	stepId?: string;
 	toolCallId?: string;
+	toolCallIndex?: number;
 	signal?: AbortSignal;
 	metadata?: Record<string, unknown>;
 	snapshot?: AgentRuntimeStateSnapshot;
@@ -179,6 +194,7 @@ export interface AgentTool<TInput = unknown, TOutput = unknown>
 	timeoutMs?: number;
 	retryable?: boolean;
 	maxRetries?: number;
+	validateInput?: (input: unknown) => unknown;
 	execute: (
 		input: TInput,
 		context: AgentToolContext,
@@ -294,6 +310,7 @@ export interface AgentBeforeToolContext {
 	snapshot: AgentRuntimeStateSnapshot;
 	tool: AgentTool;
 	toolCall: AgentToolCallPart;
+	stepId?: string;
 	input: unknown;
 }
 
@@ -309,6 +326,7 @@ export interface AgentAfterToolContext {
 	snapshot: AgentRuntimeStateSnapshot;
 	tool: AgentTool;
 	toolCall: AgentToolCallPart;
+	stepId?: string;
 	input: unknown;
 	result: AgentToolResult;
 	startedAt: Date;
@@ -404,6 +422,7 @@ export interface AgentRuntimeConfig {
 	 * tracks the agent transcript.
 	 */
 	sessionId?: string;
+	runId?: string;
 	agentId?: string;
 	/**
 	 * Agent conversation/transcript identifier.
@@ -414,6 +433,13 @@ export interface AgentRuntimeConfig {
 	 */
 	conversationId?: string;
 	parentAgentId?: string | null;
+	/**
+	 * Run that owns this agent's chain. Only set for delegated agents; the lead
+	 * agent's own run id changes per run, so the root run id is only stable for
+	 * a delegated chain. It is propagated into tool contexts and tool approval
+	 * requests so durable hosts can describe the agent chain.
+	 */
+	rootRunId?: string;
 	agentRole?: AgentRole;
 	systemPrompt?: string;
 	messageModelInfo?: AgentMessage["modelInfo"];
@@ -427,11 +453,19 @@ export interface AgentRuntimeConfig {
 	telemetry?: ITelemetryService;
 	initialMessages?: readonly AgentMessage[];
 	maxIterations?: number;
+	/**
+	 * Cumulative token/cost guardrails for the run. When a cap is reached the
+	 * runtime finishes the in-flight turn and then stops instead of issuing
+	 * another model request, finishing with `budget_exhausted`.
+	 */
+	budget?: AgentRunBudget;
 	completionPolicy?: {
 		requireCompletionTool?: boolean;
 		completionGuard?: () => string | undefined;
 	};
 	toolExecution?: "sequential" | "parallel";
+	maxParallelToolCalls?: number;
+	toolRetryDelayMs?: number;
 	toolPolicies?: Record<string, ToolPolicy>;
 	toolContextMetadata?: Record<string, unknown>;
 	requestToolApproval?: (

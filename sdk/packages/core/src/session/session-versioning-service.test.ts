@@ -37,10 +37,16 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 			title: "Original",
 			checkpointEnabled: true,
 			checkpoint: {
-				latest: { ref: "cccc", createdAt: 3, runCount: 3 },
+				latest: { ref: "cccc", createdAt: 3, runCount: 3, runId: "run-cccc" },
 				history: [
 					{ ref: "aaaa", createdAt: 1, runCount: 1, kind: "commit" },
-					{ ref: "bbbb", createdAt: 2, runCount: 2, kind: "stash" },
+					{
+						ref: "bbbb",
+						createdAt: 2,
+						runCount: 2,
+						runId: "run-bbbb",
+						kind: "stash",
+					},
 					{ ref: "cccc", createdAt: 3, runCount: 3, kind: "stash" },
 				],
 			},
@@ -143,7 +149,11 @@ describe("SessionVersioningService", () => {
 		});
 
 		expect(result.sessionId).toBe("restored-session");
-		expect(result.checkpoint).toMatchObject({ ref: "bbbb", runCount: 2 });
+		expect(result.checkpoint).toMatchObject({
+			ref: "bbbb",
+			runCount: 2,
+			runId: "run-bbbb",
+		});
 		expect(result.sourceSnapshot.sessionId).toBe("source-session");
 		expect(result.restoredSnapshot?.sessionId).toBe("restored-session");
 		expect(applyWorkspaceCheckpoint).toHaveBeenCalledWith(
@@ -158,6 +168,55 @@ describe("SessionVersioningService", () => {
 				expect.objectContaining({ ref: "bbbb" }),
 			],
 		);
+	});
+
+	it("prepares durable state before workspace mutation and session start", async () => {
+		const order: string[] = [];
+		await new SessionVersioningService().restoreCheckpoint({
+			sessionId: "source-session",
+			checkpointRunCount: 1,
+			restore: { messages: true, workspace: true },
+			start: { marker: true },
+			getSession: async () => makeSession(),
+			readMessages: async () => messages,
+			buildStartInput: (_context, start) => start,
+			prepareStart: async (_context, start) => {
+				order.push("prepare");
+				return start;
+			},
+			applyWorkspaceCheckpoint: async () => {
+				order.push("workspace");
+			},
+			retainCheckpointRefs: async () => undefined,
+			startSession: async () => {
+				order.push("start");
+				return { sessionId: "restored-session" };
+			},
+			getStartedSessionId: (result) => result.sessionId,
+		});
+		expect(order).toEqual(["prepare", "workspace", "start"]);
+	});
+
+	it("does not mutate workspace or start when durable preparation fails", async () => {
+		const applyWorkspaceCheckpoint = vi.fn(async () => undefined);
+		const startSession = vi.fn(async () => ({ sessionId: "restored-session" }));
+		await expect(
+			new SessionVersioningService().restoreCheckpoint({
+				sessionId: "source-session",
+				checkpointRunCount: 1,
+				restore: { messages: true, workspace: true },
+				start: { marker: true },
+				getSession: async () => makeSession(),
+				readMessages: async () => messages,
+				prepareStart: async () => {
+					throw new Error("ledger unavailable");
+				},
+				applyWorkspaceCheckpoint,
+				startSession,
+			}),
+		).rejects.toThrow("ledger unavailable");
+		expect(applyWorkspaceCheckpoint).not.toHaveBeenCalled();
+		expect(startSession).not.toHaveBeenCalled();
 	});
 
 	it("supports workspace-only restore without starting a new session", async () => {

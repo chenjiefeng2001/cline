@@ -32,13 +32,13 @@ async function createGitRepo(): Promise<string> {
 
 async function runCheckpointHooks(
 	hooks: ReturnType<typeof createCheckpointHooks>,
-	options: { parentAgentId?: string | null } = {},
+	options: { parentAgentId?: string | null; runId?: string } = {},
 ): Promise<void> {
 	const snapshot = {
 		agentId: options.parentAgentId ? "agent_child" : "agent_1",
 		parentAgentId: options.parentAgentId,
 		conversationId: options.parentAgentId ? "conv_child" : "conv_1",
-		runId: options.parentAgentId ? "run_child" : "run_1",
+		runId: options.runId ?? (options.parentAgentId ? "run_child" : "run_1"),
 		status: "running" as const,
 		iteration: 1,
 		messages: [],
@@ -145,6 +145,35 @@ describe("createCheckpointHooks", () => {
 			const checkpoint = metadata?.checkpoint as CheckpointMetadata;
 			expect(checkpoint.history).toHaveLength(1);
 			expect(checkpoint.latest.runCount).toBe(1);
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("records a new run id when the git ref is unchanged", async () => {
+		const cwd = await createGitRepo();
+		let metadata: Record<string, unknown> | undefined;
+		try {
+			const hooks = createCheckpointHooks({
+				cwd,
+				sessionId: "sess_same_ref",
+				readSessionMetadata: async () => metadata,
+				writeSessionMetadata: async (next) => {
+					metadata = next;
+				},
+			});
+
+			await runCheckpointHooks(hooks, { runId: "run-1" });
+			const first = metadata?.checkpoint as CheckpointMetadata;
+			await runCheckpointHooks(hooks, { runId: "run-2" });
+
+			const checkpoint = metadata?.checkpoint as CheckpointMetadata;
+			expect(checkpoint.latest).toMatchObject({
+				ref: first.latest.ref,
+				runCount: 2,
+				runId: "run-2",
+			});
+			expect(checkpoint.history).toHaveLength(2);
 		} finally {
 			await rm(cwd, { recursive: true, force: true });
 		}

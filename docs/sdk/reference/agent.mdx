@@ -33,6 +33,9 @@ Common fields:
 | `tools` | `AgentTool[]` | No | Tools available to the runtime |
 | `initialMessages` | `AgentMessage[]` | No | Preloaded conversation |
 | `toolPolicies` | `Record<string, ToolPolicy>` | No | Per-tool enablement/approval |
+| `toolExecution` | `"sequential" \| "parallel"` | No | Tool execution strategy |
+| `maxParallelToolCalls` | `number` | No | Parallel worker limit; defaults to the batch size |
+| `toolRetryDelayMs` | `number` | No | Initial retry backoff; defaults to `100` |
 | `hooks` | `AgentRuntimeHooks` | No | Runtime lifecycle hooks |
 
 ## Methods

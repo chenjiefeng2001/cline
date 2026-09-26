@@ -21,7 +21,13 @@ export class ConversationStore {
 	private conversationId = createConversationId();
 	private sessionStarted = false;
 
-	constructor(initialMessages?: readonly MessageWithMetadata[]) {
+	constructor(
+		initialMessages?: readonly MessageWithMetadata[],
+		conversationId?: string,
+	) {
+		if (conversationId?.trim()) {
+			this.conversationId = conversationId;
+		}
 		if ((initialMessages?.length ?? 0) > 0) {
 			this.restore(initialMessages ?? []);
 		}

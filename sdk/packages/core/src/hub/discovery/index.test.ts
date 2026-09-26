@@ -8,6 +8,7 @@ import {
 	resolveHubOwnerContext,
 	writeHubDiscovery,
 } from ".";
+import { resolveA2AClientId } from "./workspace";
 
 type EnvSnapshot = {
 	CLINE_DATA_DIR: string | undefined;
@@ -46,6 +47,17 @@ describe("hub discovery", () => {
 				"owners",
 				"hub-a4d26868017c.json",
 			),
+		);
+	});
+
+	it("derives a stable, namespace-scoped A2A principal", () => {
+		const owner = resolveHubOwnerContext("stable-a2a");
+		const first = resolveA2AClientId(owner, "/workspace/one");
+		expect(first).toBe(resolveA2AClientId(owner, "/workspace/one"));
+		expect(first).toMatch(/^a2a_[0-9a-f]{32}$/);
+		expect(first).not.toBe(resolveA2AClientId(owner, "/workspace/two"));
+		expect(first).not.toBe(
+			resolveA2AClientId(resolveHubOwnerContext("other"), "/workspace/one"),
 		);
 	});
 

@@ -3,18 +3,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { composeToolMiddleware } from "../../middleware/tool-middleware";
-import { deriveIdempotencyKey } from "./idempotency-key";
+import { EffectLedgerUnavailableError } from "./effect-ledger";
+import {
+	deriveIdempotencyKey,
+	deriveLegacyIdempotencyKey,
+} from "./idempotency-key";
 import { createIdempotencyMiddleware } from "./idempotency-middleware";
 import { replayEffectsIntoSession } from "./recovery";
 import { SqliteEffectLedger } from "./stores/sqlite-effect-ledger";
 
 describe("replayEffectsIntoSession", () => {
+	const sourceRunId = "run-source";
 	let dir: string;
+	let now: Date;
 	let ledger: SqliteEffectLedger;
 
 	beforeEach(() => {
 		dir = mkdtempSync(join(tmpdir(), "cline-recovery-"));
-		ledger = new SqliteEffectLedger({ dbPath: join(dir, "effects.db") });
+		now = new Date("2026-09-24T00:00:00.000Z");
+		ledger = new SqliteEffectLedger({
+			dbPath: join(dir, "effects.db"),
+			clock: () => now,
+		});
 		ledger.init();
 	});
 
@@ -29,29 +39,69 @@ describe("replayEffectsIntoSession", () => {
 		toolCallId: string,
 		result: unknown,
 		status: "succeeded" | "failed",
-	) => {
+	): Promise<string> => {
+		const input = { path: toolName };
 		const key = deriveIdempotencyKey({
 			sessionId,
 			toolName,
+			runId: sourceRunId,
+			iteration: 1,
+			toolCallIndex: 0,
+			toolCallId,
+			input,
+		});
+		const claim = await ledger.claim({
+			idempotencyKey: key,
+			sessionId,
+			toolName,
+			runId: sourceRunId,
 			iteration: 1,
 			toolCallId,
-			input: { toolCallId },
+			toolCallIndex: 0,
+			input,
+			ownerId: "seed-owner",
+		});
+		if (claim.outcome !== "claimed") {
+			throw new Error("expected seed claim");
+		}
+		await ledger.complete(claim.lease, {
+			status,
+			error: status === "failed" ? "boom" : undefined,
+			result: status === "succeeded" ? result : undefined,
+		});
+		return key;
+	};
+
+	const seedPending = async (
+		sessionId: string,
+		toolName: string,
+		toolCallId: string,
+	): Promise<string> => {
+		const input = { path: toolName };
+		const key = deriveIdempotencyKey({
+			sessionId,
+			toolName,
+			runId: sourceRunId,
+			iteration: 1,
+			toolCallIndex: 0,
+			toolCallId,
+			input,
 		});
 		await ledger.claim({
 			idempotencyKey: key,
 			sessionId,
 			toolName,
+			runId: sourceRunId,
+			iteration: 1,
 			toolCallId,
+			toolCallIndex: 0,
+			input,
+			ownerId: "pending-owner",
 		});
-		if (status === "failed") {
-			await ledger.complete(key, { status: "failed", error: "boom" });
-		} else {
-			await ledger.complete(key, { status: "succeeded", result });
-		}
 		return key;
 	};
 
-	it("re-keys succeeded effects into the recovered session and skips failed ones", async () => {
+	it("re-keys succeeded effects and skips proven-safe failures", async () => {
 		const succeededKey = await seedEffect(
 			"s-old",
 			"write_file",
@@ -71,23 +121,63 @@ describe("replayEffectsIntoSession", () => {
 			fromSessionId: "s-old",
 			toSessionId: "s-new",
 		});
-		expect(outcome.replayed).toBe(1);
-		expect(outcome.skipped).toBe(1);
+		expect(outcome).toEqual({ replayed: 1, inDoubt: 0, skipped: 1 });
 
-		// The re-keyed record replays in the recovered session.
-		const reKeyed = `${"s-new"}:${succeededKey.slice("s-old:".length)}`;
+		const reKeyed = `s-new:${succeededKey.slice("s-old:".length)}`;
 		const record = await ledger.get(reKeyed);
-		expect(record?.status).toBe("succeeded");
-		expect(record?.result).toEqual({ written: true });
-		expect(record?.sessionId).toBe("s-new");
-		expect(record?.toolCallId).toBe("call-1");
-
-		// The failed record is NOT copied — re-execution is safe.
-		const failedReKeyed = `${"s-new"}:${failedKey.slice("s-old:".length)}`;
+		expect(record).toMatchObject({
+			status: "succeeded",
+			result: { written: true },
+			sessionId: "s-new",
+			toolCallId: "call-1",
+		});
+		const failedReKeyed = `s-new:${failedKey.slice("s-old:".length)}`;
 		expect(await ledger.get(failedReKeyed)).toBeUndefined();
 	});
 
-	it("respects the checkpoint cutoff (createdBefore)", async () => {
+	it("carries pending and in-doubt effects forward as in-doubt", async () => {
+		const pendingKey = await seedPending("s-old", "write_file", "call-pending");
+		now = new Date("2026-09-24T00:00:01.000Z");
+		const inDoubtKey = deriveIdempotencyKey({
+			sessionId: "s-old",
+			toolName: "send_request",
+			runId: sourceRunId,
+			iteration: 1,
+			toolCallIndex: 1,
+			toolCallId: "call-doubt",
+			input: { path: "send_request" },
+		});
+		const claim = await ledger.claim({
+			idempotencyKey: inDoubtKey,
+			sessionId: "s-old",
+			toolName: "send_request",
+			runId: sourceRunId,
+			iteration: 1,
+			toolCallId: "call-doubt",
+			toolCallIndex: 1,
+			input: { path: "send_request" },
+			ownerId: "doubt-owner",
+		});
+		if (claim.outcome !== "claimed") {
+			throw new Error("expected in-doubt seed claim");
+		}
+		await ledger.complete(claim.lease, {
+			status: "in_doubt",
+			error: "connection lost",
+		});
+
+		const outcome = await replayEffectsIntoSession(ledger, {
+			fromSessionId: "s-old",
+			toSessionId: "s-new",
+		});
+		expect(outcome).toEqual({ replayed: 0, inDoubt: 2, skipped: 0 });
+		for (const key of [pendingKey, inDoubtKey]) {
+			const reKeyed = `s-new:${key.slice("s-old:".length)}`;
+			expect((await ledger.get(reKeyed))?.status).toBe("in_doubt");
+		}
+	});
+
+	it("respects the checkpoint cutoff", async () => {
 		const oldKey = await seedEffect(
 			"s-old",
 			"write_file",
@@ -95,54 +185,163 @@ describe("replayEffectsIntoSession", () => {
 			1,
 			"succeeded",
 		);
-		const record = await ledger.get(oldKey);
-		const cutoff = record?.createdAt ?? new Date().toISOString();
-
-		// An effect created after the cutoff.
+		const cutoff = now.toISOString();
+		now = new Date("2026-09-24T00:00:01.000Z");
+		const laterInput = { path: "send_request" };
 		const laterKey = deriveIdempotencyKey({
 			sessionId: "s-old",
 			toolName: "send_request",
+			runId: sourceRunId,
 			iteration: 2,
+			toolCallIndex: 1,
 			toolCallId: "call-2",
-			input: { toolCallId: "call-2" },
+			input: laterInput,
 		});
-		await ledger.claim({
+		const laterClaim = await ledger.claim({
 			idempotencyKey: laterKey,
 			sessionId: "s-old",
 			toolName: "send_request",
+			runId: sourceRunId,
+			iteration: 2,
 			toolCallId: "call-2",
+			toolCallIndex: 1,
+			input: laterInput,
+			ownerId: "later-owner",
 		});
-		await ledger.complete(laterKey, { status: "succeeded", result: 2 });
-		// Bump its createdAt beyond the cutoff.
-		await ledger.complete(laterKey, { status: "succeeded", result: 2 });
+		if (laterClaim.outcome !== "claimed") {
+			throw new Error("expected later claim");
+		}
+		await ledger.complete(laterClaim.lease, {
+			status: "succeeded",
+			result: 2,
+		});
 
 		const outcome = await replayEffectsIntoSession(ledger, {
 			fromSessionId: "s-old",
 			toSessionId: "s-new",
 			createdBefore: cutoff,
 		});
-		expect(outcome.replayed).toBeGreaterThanOrEqual(1);
-		// The later effect stays out of the replay plan.
-		const laterReKeyed = `${"s-new"}:${laterKey.slice("s-old:".length)}`;
-		expect(await ledger.get(laterReKeyed)).toBeUndefined();
+		expect(outcome).toEqual({ replayed: 1, inDoubt: 0, skipped: 1 });
+		expect(
+			await ledger.get(`s-new:${oldKey.slice("s-old:".length)}`),
+		).toBeDefined();
+		expect(
+			await ledger.get(`s-new:${laterKey.slice("s-old:".length)}`),
+		).toBeUndefined();
 	});
 
-	it("is idempotent — replaying twice skips already-present records", async () => {
+	it("replays only the restored checkpoint run", async () => {
+		const restoredKey = await seedEffect(
+			"s-old",
+			"write_file",
+			"call-restored",
+			"restored",
+			"succeeded",
+		);
+		const laterInput = { path: "later" };
+		const laterKey = deriveIdempotencyKey({
+			sessionId: "s-old",
+			toolName: "write_file",
+			runId: "run-later",
+			iteration: 1,
+			toolCallIndex: 0,
+			input: laterInput,
+		});
+		const laterClaim = await ledger.claim({
+			idempotencyKey: laterKey,
+			sessionId: "s-old",
+			toolName: "write_file",
+			runId: "run-later",
+			iteration: 1,
+			toolCallIndex: 0,
+			input: laterInput,
+			ownerId: "later-run-owner",
+		});
+		if (laterClaim.outcome !== "claimed") {
+			throw new Error("expected later run claim");
+		}
+		await ledger.complete(laterClaim.lease, {
+			status: "succeeded",
+			result: "later",
+		});
+
+		const outcome = await replayEffectsIntoSession(ledger, {
+			fromSessionId: "s-old",
+			toSessionId: "s-new",
+			runId: sourceRunId,
+		});
+
+		expect(outcome).toEqual({ replayed: 1, inDoubt: 0, skipped: 1 });
+		expect(
+			await ledger.get(`s-new:${restoredKey.slice("s-old:".length)}`),
+		).toBeDefined();
+		expect(
+			await ledger.get(`s-new:${laterKey.slice("s-old:".length)}`),
+		).toBeUndefined();
+	});
+
+	it("replays pre-run-id records under a deterministic legacy scope", async () => {
+		const legacyRunId = "legacy_1_checkpoint-ref";
+		const input = { path: "legacy" };
+		const key = deriveLegacyIdempotencyKey({
+			sessionId: "s-old",
+			toolName: "write_file",
+			iteration: 1,
+			toolCallId: "old-provider-call",
+			input,
+		});
+		const claim = await ledger.claim({
+			idempotencyKey: key,
+			sessionId: "s-old",
+			toolName: "write_file",
+			toolCallId: "old-provider-call",
+			input,
+			ownerId: "legacy-owner",
+		});
+		if (claim.outcome !== "claimed") {
+			throw new Error("expected legacy claim");
+		}
+		await ledger.complete(claim.lease, {
+			status: "succeeded",
+			result: "legacy-result",
+		});
+		await replayEffectsIntoSession(ledger, {
+			fromSessionId: "s-old",
+			toSessionId: "s-new",
+			runId: legacyRunId,
+		});
+		const context = {
+			toolName: "write_file",
+			toolCallId: "regenerated-call",
+			toolCallIndex: 0,
+			runId: legacyRunId,
+			iteration: 1,
+			input,
+		} as const;
+		const chain = composeToolMiddleware([
+			createIdempotencyMiddleware({ ledger, sessionId: "s-new" }),
+		]);
+
+		await expect(chain(async () => "should-not-run", context)).resolves.toBe(
+			"legacy-result",
+		);
+	});
+
+	it("is idempotent", async () => {
 		await seedEffect("s-old", "write_file", "call-1", 1, "succeeded");
 		const first = await replayEffectsIntoSession(ledger, {
 			fromSessionId: "s-old",
 			toSessionId: "s-new",
 		});
-		expect(first.replayed).toBe(1);
+		expect(first).toEqual({ replayed: 1, inDoubt: 0, skipped: 0 });
 		const second = await replayEffectsIntoSession(ledger, {
 			fromSessionId: "s-old",
 			toSessionId: "s-new",
 		});
-		expect(second.replayed).toBe(0);
-		expect(second.skipped).toBe(1);
+		expect(second).toEqual({ replayed: 0, inDoubt: 0, skipped: 1 });
 	});
 
-	it("wires into the idempotency middleware: the recovered session replays instead of double-applying", async () => {
+	it("makes recovered calls replay through middleware", async () => {
 		const key = await seedEffect(
 			"s-old",
 			"write_file",
@@ -155,26 +354,81 @@ describe("replayEffectsIntoSession", () => {
 			toSessionId: "s-new",
 		});
 
-		// The recovered session's middleware derives the same logical key.
+		const input = { path: "write_file" };
 		const context = {
 			toolName: "write_file",
-			toolCallId: "call-1",
+			toolCallId: "regenerated-call-id",
+			toolCallIndex: 0,
+			runId: sourceRunId,
 			iteration: 1,
-			input: { toolCallId: "call-1" },
+			input,
 		} as const;
 		const expectedKey = deriveIdempotencyKey({
 			sessionId: "s-new",
 			toolName: "write_file",
+			runId: sourceRunId,
 			iteration: 1,
-			toolCallId: "call-1",
-			input: { toolCallId: "call-1" },
+			toolCallId: "regenerated-call-id",
+			toolCallIndex: 0,
+			input,
 		});
-		expect(expectedKey).toBe(`${"s-new"}:${key.slice("s-old:".length)}`);
+		expect(expectedKey).toBe(`s-new:${key.slice("s-old:".length)}`);
 
 		const chain = composeToolMiddleware([
 			createIdempotencyMiddleware({ ledger, sessionId: "s-new" }),
 		]);
-		const replayed = await chain(async () => "should-not-run", context);
-		expect(replayed).toEqual({ written: true });
+		await expect(chain(async () => "should-not-run", context)).resolves.toEqual(
+			{
+				written: true,
+			},
+		);
+	});
+
+	it("blocks recovered in-doubt calls through middleware", async () => {
+		const input = { path: "write_file" };
+		const key = deriveIdempotencyKey({
+			sessionId: "s-old",
+			toolName: "write_file",
+			runId: sourceRunId,
+			iteration: 1,
+			toolCallId: "call-1",
+			toolCallIndex: 0,
+			input,
+		});
+		const claim = await ledger.claim({
+			idempotencyKey: key,
+			sessionId: "s-old",
+			toolName: "write_file",
+			runId: sourceRunId,
+			iteration: 1,
+			toolCallId: "call-1",
+			toolCallIndex: 0,
+			input,
+			ownerId: "old-owner",
+		});
+		if (claim.outcome !== "claimed") {
+			throw new Error("expected source claim");
+		}
+		await ledger.complete(claim.lease, {
+			status: "in_doubt",
+			error: "lost response",
+		});
+		await replayEffectsIntoSession(ledger, {
+			fromSessionId: "s-old",
+			toSessionId: "s-new",
+		});
+		const chain = composeToolMiddleware([
+			createIdempotencyMiddleware({ ledger, sessionId: "s-new" }),
+		]);
+		await expect(
+			chain(async () => "should-not-run", {
+				toolName: "write_file",
+				toolCallId: "call-1",
+				toolCallIndex: 0,
+				runId: sourceRunId,
+				iteration: 1,
+				input,
+			}),
+		).rejects.toBeInstanceOf(EffectLedgerUnavailableError);
 	});
 });

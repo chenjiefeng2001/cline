@@ -14,6 +14,7 @@ import type {
 	AgentExtensionAutomationContext,
 	AgentResult,
 	AgentRuntimeEvent,
+	AgentToolContext,
 	BasicLogger,
 } from "@cline/shared";
 import { setClineDir, setHomeDir } from "@cline/shared/storage";
@@ -25,6 +26,13 @@ import type { SessionManifest } from "../../session/models/session-manifest";
 import { FileSessionService } from "../../session/services/file-session-service";
 import { SessionSource } from "../../types/common";
 import type { CoreSessionConfig } from "../../types/config";
+import {
+	DurableToolApprovalCoordinator,
+	SqliteDurableToolApprovalStore,
+} from "../approval/durable-tool-approval";
+import { deriveIdempotencyKey } from "../ledger/idempotency-key";
+import { SqliteEffectLedger } from "../ledger/stores/sqlite-effect-ledger";
+import type { SessionRuntimeOrchestratorDeps } from "../orchestration/session-runtime-orchestrator";
 import { LocalRuntimeHost as RuntimeHostUnderTest } from "./local-runtime-host";
 import { type StartSessionInput, splitCoreSessionConfig } from "./runtime-host";
 
@@ -180,6 +188,281 @@ describe("LocalRuntimeHost", () => {
 		setHomeDir(envSnapshot.HOME ?? "~");
 		setClineDir(envSnapshot.CLINE_DIR ?? join("~", ".cline"));
 		rmSync(isolatedHomeDir, { recursive: true, force: true });
+	});
+
+	it("wraps final tools with the host ledger and keeps injected ledgers open", async () => {
+		const ledgerPath = join(isolatedHomeDir, "effects.db");
+		const ledger = new SqliteEffectLedger({ dbPath: ledgerPath });
+		const initialize = vi.spyOn(ledger, "init");
+		const close = vi.spyOn(ledger, "close");
+		const execute = vi.fn(async () => ({ written: true }));
+		let capturedConfig: AgentConfig | undefined;
+		let capturedDeps: SessionRuntimeOrchestratorDeps | undefined;
+		const agent = {
+			run: vi.fn(async () => createResult()),
+			continue: vi.fn(async () => createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-ledger"),
+			getConversationId: vi.fn().mockReturnValue("conversation-ledger"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: new FileSessionService(join(isolatedHomeDir, "sessions")),
+			effectLedger: ledger,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({
+					tools: [
+						{
+							name: "write_file",
+							description: "write",
+							inputSchema: {},
+							execute,
+						},
+					],
+					shutdown: vi.fn().mockResolvedValue(undefined),
+				}),
+			} as never,
+			createAgent: (config, deps) => {
+				capturedConfig = config;
+				capturedDeps = deps;
+				return agent as never;
+			},
+		});
+		try {
+			await manager.startSession(
+				normalizeStartInput({
+					config: createConfig({
+						sessionId: "session-ledger",
+						enableSpawnAgent: false,
+						enableAgentTeams: false,
+					}),
+				}),
+			);
+			const tools =
+				capturedDeps?.wrapTools?.(capturedConfig?.tools ?? []) ?? [];
+			const toolContext: AgentToolContext = {
+				sessionId: "session-ledger",
+				agentId: "agent-ledger",
+				conversationId: "conversation-ledger",
+				iteration: 1,
+				toolCallId: "call-ledger",
+			};
+			await expect(
+				tools[0]?.execute({ path: "x" }, toolContext),
+			).resolves.toEqual({
+				written: true,
+			});
+			await expect(
+				tools[0]?.execute({ path: "x" }, toolContext),
+			).resolves.toEqual({
+				written: true,
+			});
+			expect(initialize).toHaveBeenCalledOnce();
+			expect(execute).toHaveBeenCalledOnce();
+			expect(await ledger.list("session-ledger")).toHaveLength(1);
+			await manager.dispose();
+			expect(close).not.toHaveBeenCalled();
+		} finally {
+			ledger.close();
+		}
+	});
+
+	it("replays source effects before starting a restored session", async () => {
+		const ledger = new SqliteEffectLedger({
+			dbPath: join(isolatedHomeDir, "restore-effects.db"),
+		});
+		ledger.init();
+		let restoredInitialRunId: string | undefined;
+		const shutdownRuntime = vi.fn().mockResolvedValue(undefined);
+		const agent = {
+			run: vi.fn(async () => createResult()),
+			continue: vi.fn(async () => createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-restore"),
+			getConversationId: vi.fn().mockReturnValue("conversation-restore"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: new FileSessionService(
+				join(isolatedHomeDir, "restore-sessions"),
+			),
+			effectLedger: ledger,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({
+					tools: [],
+					shutdown: shutdownRuntime,
+				}),
+			} as never,
+			createAgent: (_config, deps) => {
+				restoredInitialRunId = deps?.initialRunId;
+				return agent as never;
+			},
+		});
+		try {
+			await manager.startSession(
+				normalizeStartInput({
+					config: createConfig({
+						sessionId: "source-ledger-session",
+						enableSpawnAgent: false,
+						enableAgentTeams: false,
+					}),
+					initialMessages: [
+						{ role: "user", content: "first" },
+						{ role: "assistant", content: "response" },
+					],
+					sessionMetadata: {
+						checkpointEnabled: true,
+						checkpoint: {
+							history: [
+								{
+									ref: "checkpoint-ledger",
+									createdAt: Date.now() - 60_000,
+									runCount: 1,
+									runId: "run-ledger",
+								},
+							],
+						},
+					},
+				}),
+			);
+			const input = { path: "x" };
+			const effectRunId = "run-ledger";
+			const key = deriveIdempotencyKey({
+				sessionId: "source-ledger-session",
+				toolName: "write_file",
+				runId: effectRunId,
+				iteration: 1,
+				toolCallId: "call-restore",
+				toolCallIndex: 0,
+				input,
+			});
+			const claim = await ledger.claim({
+				idempotencyKey: key,
+				sessionId: "source-ledger-session",
+				toolName: "write_file",
+				runId: effectRunId,
+				iteration: 1,
+				toolCallId: "call-restore",
+				toolCallIndex: 0,
+				input,
+				ownerId: "source-owner",
+			});
+			if (claim.outcome !== "claimed") {
+				throw new Error("expected source effect claim");
+			}
+			await ledger.complete(claim.lease, {
+				status: "succeeded",
+				result: { written: true },
+			});
+
+			const restored = await manager.restoreSession({
+				sessionId: "source-ledger-session",
+				checkpointRunCount: 1,
+				restore: { messages: true, workspace: false },
+				start: normalizeStartInput({
+					config: createConfig({
+						sessionId: "restored-ledger-session",
+						enableSpawnAgent: false,
+						enableAgentTeams: false,
+					}),
+				}),
+			});
+
+			expect(restored.sessionId).toBe("restored-ledger-session");
+			expect(restoredInitialRunId).toBe(effectRunId);
+			const replayKey = deriveIdempotencyKey({
+				sessionId: "restored-ledger-session",
+				toolName: "write_file",
+				runId: effectRunId,
+				iteration: 1,
+				toolCallId: "call-restore",
+				toolCallIndex: 0,
+				input,
+			});
+			expect(await ledger.get(replayKey)).toMatchObject({
+				status: "succeeded",
+				result: { written: true },
+			});
+		} finally {
+			await manager.dispose();
+			ledger.close();
+		}
+	});
+
+	it("does not reuse a persisted restore run id for an ordinary resume", async () => {
+		const sessionId = "ordinary-resume";
+		const initialRunIds: Array<string | undefined> = [];
+		const agent = {
+			run: vi.fn(async () => createResult()),
+			continue: vi.fn(async () => createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-resume"),
+			getConversationId: vi.fn().mockReturnValue("conversation-resume"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: new FileSessionService(
+				join(isolatedHomeDir, "ordinary-resume-sessions"),
+			),
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({
+					tools: [],
+					shutdown: vi.fn().mockResolvedValue(undefined),
+				}),
+			} as never,
+			createAgent: (_config, deps) => {
+				initialRunIds.push(deps?.initialRunId);
+				return agent as never;
+			},
+		});
+		const startInput = normalizeStartInput({
+			config: createConfig({
+				sessionId,
+				enableSpawnAgent: false,
+				enableAgentTeams: false,
+			}),
+			initialMessages: [{ role: "user", content: "resume" }],
+			sessionMetadata: {
+				restoredFromSessionId: "old-source",
+				restoredCheckpointRunCount: 1,
+				checkpoint: {
+					latest: {
+						ref: "checkpoint-old",
+						createdAt: Date.now(),
+						runCount: 1,
+						runId: "old-run",
+					},
+					history: [
+						{
+							ref: "checkpoint-old",
+							createdAt: Date.now(),
+							runCount: 1,
+							runId: "old-run",
+						},
+					],
+				},
+			},
+		});
+
+		try {
+			await manager.startSession(startInput);
+			await manager.startSession(startInput);
+			expect(initialRunIds).toEqual([undefined, undefined]);
+		} finally {
+			await manager.dispose();
+		}
 	});
 
 	it("stores git under metadata and refreshes it after an active turn", async () => {
@@ -435,6 +718,7 @@ describe("LocalRuntimeHost", () => {
 				providerId: "cline-pass",
 				apiKey: "workos:resolved-token",
 			}),
+			expect.objectContaining({ wrapTools: expect.any(Function) }),
 		);
 	});
 
@@ -579,6 +863,7 @@ describe("LocalRuntimeHost", () => {
 				thinkingBudgetTokens: 1024,
 				temperature: 0.3,
 			}),
+			expect.objectContaining({ wrapTools: expect.any(Function) }),
 		);
 
 		await manager.updateSessionConnection(sessionId, {
@@ -780,6 +1065,9 @@ describe("LocalRuntimeHost", () => {
 		};
 		const manager = new RuntimeHostUnderTest({
 			distinctId,
+			approvalCoordinator: new DurableToolApprovalCoordinator(
+				new SqliteDurableToolApprovalStore({ dbPath: ":memory:" }),
+			),
 			sessionService: {
 				ensureSessionsDir: vi.fn().mockReturnValue("/tmp/sessions"),
 				createRootSessionWithArtifacts: vi.fn().mockResolvedValue({
@@ -850,6 +1138,356 @@ describe("LocalRuntimeHost", () => {
 			sessionId,
 			status: "idle",
 		});
+		await manager.dispose();
+	});
+
+	it("records a delegated tool approval under the requesting agent chain", async () => {
+		const sessionId = "sess-delegated-continuation";
+		const messagesPath = join(isolatedHomeDir, "delegated-messages.json");
+		writeFileSync(
+			messagesPath,
+			JSON.stringify(
+				[
+					{ role: "user", content: [{ type: "text", text: "review it" }] },
+					{
+						role: "assistant",
+						id: "assistant-1",
+						content: [
+							{
+								type: "tool_use",
+								id: "assistant-1",
+								call_id: "call-1",
+								name: "read_files",
+								input: { path: "a.md" },
+							},
+						],
+					},
+				],
+				null,
+				2,
+			),
+			"utf8",
+		);
+		const manifest = {
+			...createManifest(sessionId),
+			messages_path: messagesPath,
+		};
+		const persistSessionMessages = vi.fn();
+		const requestToolApproval = vi.fn(async () => ({ approved: true }));
+		let capturedConfig: AgentConfig | undefined;
+		let manager: RuntimeHostUnderTest;
+		const approvalResults: Array<{ approved: boolean; reason?: string }> = [];
+		let persistDelta = { delegated: 0, lead: 0 };
+		// Read while the turn is still in flight: finishing the turn cancels the
+		// pending continuations, which is exactly the manual-cleanup semantics
+		// this assertion is not about.
+		let capturedRecords: Awaited<
+			ReturnType<
+				ReturnType<
+					RuntimeHostUnderTest["getRunContinuationCoordinator"]
+				>["listRecoverable"]
+			>
+		> = [];
+		const agent = {
+			run: vi.fn(async () => {
+				const ask = capturedConfig?.requestToolApproval;
+				if (!ask) {
+					throw new Error("requestToolApproval was not wired");
+				}
+				// A delegated sub-agent asks through the same host-owned callback,
+				// but with its own agent identity and chain.
+				approvalResults.push(
+					(await ask({
+						sessionId,
+						agentId: "agent-child",
+						parentAgentId: "agent-root-1",
+						rootRunId: "run-root-1",
+						conversationId: "conv-child-1",
+						iteration: 1,
+						runId: "run-child-1",
+						toolCallIndex: 0,
+						assistantMessageId: "assistant-1",
+						toolCallId: "call-1",
+						toolName: "read_files",
+						input: { path: "a.md" },
+						policy: { autoApprove: false },
+					})) as { approved: boolean; reason?: string },
+				);
+				const persistCallsAfterDelegated =
+					persistSessionMessages.mock.calls.length;
+				approvalResults.push(
+					(await ask({
+						sessionId,
+						agentId: "agent-root-1",
+						conversationId: "conv-root-1",
+						iteration: 2,
+						runId: "run-root-1",
+						toolCallIndex: 0,
+						assistantMessageId: "assistant-1",
+						toolCallId: "call-2",
+						toolName: "read_files",
+						input: { path: "b.md" },
+						policy: { autoApprove: false },
+					})) as { approved: boolean; reason?: string },
+				);
+				persistDelta = {
+					delegated: persistCallsAfterDelegated,
+					lead: persistSessionMessages.mock.calls.length,
+				};
+				capturedRecords = await manager
+					.getRunContinuationCoordinator()
+					.listRecoverable(sessionId);
+				return createResult();
+			}),
+			continue: vi.fn().mockResolvedValue(createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-root-1"),
+			getConversationId: vi.fn().mockReturnValue("conv-root-1"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		manager = new RuntimeHostUnderTest({
+			distinctId,
+			approvalCoordinator: new DurableToolApprovalCoordinator(
+				new SqliteDurableToolApprovalStore({ dbPath: ":memory:" }),
+			),
+			sessionService: {
+				ensureSessionsDir: vi.fn().mockReturnValue("/tmp/sessions"),
+				createRootSessionWithArtifacts: vi.fn().mockResolvedValue({
+					manifestPath: "/tmp/manifest.json",
+					messagesPath,
+					manifest,
+				}),
+				persistSessionMessages,
+				readSessionManifest: vi.fn().mockResolvedValue(manifest),
+				updateSessionStatus: vi.fn().mockResolvedValue({ updated: true }),
+				writeSessionManifest: vi.fn(),
+				listSessions: vi.fn().mockResolvedValue([]),
+				deleteSession: vi.fn().mockResolvedValue({ deleted: true }),
+			} as never,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({ tools: [], shutdown: vi.fn() }),
+			} as never,
+			createAgent: (config) => {
+				capturedConfig = config;
+				return agent as never;
+			},
+		});
+		await manager.startSession(
+			normalizeStartInput({
+				config: createConfig({ sessionId }),
+				prompt: "hello",
+				capabilities: { requestToolApproval },
+			}),
+		);
+
+		expect(approvalResults).toEqual([{ approved: true }, { approved: true }]);
+		const records = capturedRecords;
+		expect(records).toHaveLength(2);
+		const [delegatedRecord, leadRecord] = records as [
+			(typeof records)[number],
+			(typeof records)[number],
+		];
+		expect(delegatedRecord.agentId).toBe("agent-child");
+		expect(delegatedRecord.conversationId).toBe("conv-child-1");
+		expect(delegatedRecord.agentChain).toEqual({
+			agentId: "agent-child",
+			parentAgentId: "agent-root-1",
+			rootRunId: "run-root-1",
+		});
+		// The host only sees the lead agent's transcript, so a delegated run must
+		// not claim a recovery state that would replay the wrong turn.
+		expect(delegatedRecord.recoverySnapshot).toBeUndefined();
+		expect(delegatedRecord.runState).toBeUndefined();
+
+		expect(leadRecord.agentId).toBe("agent-root-1");
+		expect(leadRecord.conversationId).toBe("conv-root-1");
+		expect(leadRecord.agentChain).toEqual({ agentId: "agent-root-1" });
+		expect(leadRecord.runState?.resume).toMatchObject({
+			type: "tool_call",
+			agentId: "agent-root-1",
+			conversationId: "conv-root-1",
+		});
+		expect(leadRecord.runState?.agent).toEqual({ agentId: "agent-root-1" });
+		// Only the lead approval persisted a transcript: the delegated turn has no
+		// session transcript to persist.
+		expect(persistDelta.lead - persistDelta.delegated).toBe(1);
+		await manager.dispose();
+	});
+
+	it("treats a teammate approval without a declared chain as delegated", async () => {
+		const sessionId = "sess-teammate-continuation";
+		const messagesPath = join(isolatedHomeDir, "teammate-messages.json");
+		writeFileSync(messagesPath, "[]", "utf8");
+		const manifest = {
+			...createManifest(sessionId),
+			messages_path: messagesPath,
+		};
+		const persistSessionMessages = vi.fn();
+		const requestToolApproval = vi.fn(async () => ({ approved: true }));
+		let capturedConfig: AgentConfig | undefined;
+		let manager: RuntimeHostUnderTest;
+		let capturedRecord:
+			| Awaited<
+					ReturnType<
+						ReturnType<
+							RuntimeHostUnderTest["getRunContinuationCoordinator"]
+						>["listRecoverable"]
+					>
+			  >[number]
+			| undefined;
+		const agent = {
+			run: vi.fn(async () => {
+				const ask = capturedConfig?.requestToolApproval;
+				if (!ask) {
+					throw new Error("requestToolApproval was not wired");
+				}
+				// A teammate is a team member rather than a spawned child: it has
+				// its own agent id but never declares a parent.
+				await ask({
+					sessionId,
+					agentId: "teammate-1",
+					conversationId: "conv-teammate-1",
+					iteration: 1,
+					runId: "run-teammate-1",
+					toolCallIndex: 0,
+					assistantMessageId: "assistant-1",
+					toolCallId: "call-1",
+					toolName: "read_files",
+					input: { path: "a.md" },
+					policy: { autoApprove: false },
+				});
+				capturedRecord = (
+					await manager
+						.getRunContinuationCoordinator()
+						.listRecoverable(sessionId)
+				)[0];
+				return createResult();
+			}),
+			continue: vi.fn().mockResolvedValue(createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-root-1"),
+			getConversationId: vi.fn().mockReturnValue("conv-root-1"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		manager = new RuntimeHostUnderTest({
+			distinctId,
+			approvalCoordinator: new DurableToolApprovalCoordinator(
+				new SqliteDurableToolApprovalStore({ dbPath: ":memory:" }),
+			),
+			sessionService: {
+				ensureSessionsDir: vi.fn().mockReturnValue("/tmp/sessions"),
+				createRootSessionWithArtifacts: vi.fn().mockResolvedValue({
+					manifestPath: "/tmp/manifest.json",
+					messagesPath,
+					manifest,
+				}),
+				persistSessionMessages,
+				readSessionManifest: vi.fn().mockResolvedValue(manifest),
+				updateSessionStatus: vi.fn().mockResolvedValue({ updated: true }),
+				writeSessionManifest: vi.fn(),
+				listSessions: vi.fn().mockResolvedValue([]),
+				deleteSession: vi.fn().mockResolvedValue({ deleted: true }),
+			} as never,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({ tools: [], shutdown: vi.fn() }),
+			} as never,
+			createAgent: (config) => {
+				capturedConfig = config;
+				return agent as never;
+			},
+		});
+		await manager.startSession(
+			normalizeStartInput({
+				config: createConfig({ sessionId }),
+				prompt: "hello",
+				capabilities: { requestToolApproval },
+			}),
+		);
+
+		expect(capturedRecord?.agentId).toBe("teammate-1");
+		// The lead agent is the only provable parent, so the chain records it
+		// instead of trusting the teammate to declare one.
+		expect(capturedRecord?.agentChain).toEqual({
+			agentId: "teammate-1",
+			parentAgentId: "agent-root-1",
+		});
+		expect(capturedRecord?.runState).toBeUndefined();
+		await manager.dispose();
+	});
+
+	it("confines the injected user file loader to the session workspace", async () => {
+		const sessionId = "sess-userfile-containment";
+		const workspace = join(isolatedHomeDir, "workspace");
+		const outside = join(isolatedHomeDir, "outside");
+		mkdirSync(workspace, { recursive: true });
+		mkdirSync(outside, { recursive: true });
+		writeFileSync(join(workspace, "note.md"), "inside", "utf8");
+		writeFileSync(join(outside, "secret.txt"), "TOP SECRET", "utf8");
+
+		const manifest = createManifest(sessionId);
+		let capturedConfig: AgentConfig | undefined;
+		const agent = {
+			run: vi.fn().mockResolvedValue(createResult()),
+			continue: vi.fn().mockResolvedValue(createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-root-1"),
+			getConversationId: vi.fn().mockReturnValue("conv-root-1"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: {
+				ensureSessionsDir: vi.fn().mockReturnValue("/tmp/sessions"),
+				createRootSessionWithArtifacts: vi.fn().mockResolvedValue({
+					manifestPath: "/tmp/manifest.json",
+					messagesPath: join(isolatedHomeDir, "messages.json"),
+					manifest,
+				}),
+				persistSessionMessages: vi.fn(),
+				updateSessionStatus: vi.fn().mockResolvedValue({ updated: true }),
+				writeSessionManifest: vi.fn(),
+				listSessions: vi.fn().mockResolvedValue([]),
+				deleteSession: vi.fn().mockResolvedValue({ deleted: true }),
+			} as never,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({ tools: [], shutdown: vi.fn() }),
+			} as never,
+			createAgent: (config) => {
+				capturedConfig = config;
+				return agent as never;
+			},
+		});
+		await manager.startSession(
+			normalizeStartInput({
+				config: createConfig({
+					sessionId,
+					cwd: workspace,
+					workspaceRoot: workspace,
+				}),
+				prompt: "hello",
+			}),
+		);
+
+		const loader = capturedConfig?.userFileContentLoader;
+		expect(typeof loader).toBe("function");
+		await expect(loader?.("note.md")).resolves.toBe("inside");
+		// A client-supplied attachment must not become an arbitrary file read.
+		await expect(loader?.(join(outside, "secret.txt"))).rejects.toThrow(
+			"outside the session workspace",
+		);
+		await expect(loader?.("../outside/secret.txt")).rejects.toThrow(
+			"outside the session workspace",
+		);
+		await manager.dispose();
 	});
 
 	it("ingests automation events emitted by sandbox plugins during setup", async () => {
@@ -1058,7 +1696,7 @@ describe("LocalRuntimeHost", () => {
 		const agent = {
 			run: vi.fn().mockResolvedValue(createResult()),
 			continue: vi.fn().mockResolvedValue(createResult()),
-			getMessages: vi.fn().mockReturnValue(initialMessages),
+			getMessages: vi.fn().mockReturnValue([]),
 			getAgentId: vi.fn().mockReturnValue("agent-root-1"),
 			getConversationId: vi.fn().mockReturnValue("conv-root-1"),
 			abort: vi.fn(),
@@ -2084,6 +2722,7 @@ describe("LocalRuntimeHost", () => {
 			cwd: repoCwd,
 			sessionId,
 			runCount: 3,
+			runId: "conv_1",
 		});
 		expect(updateSession).toHaveBeenCalledTimes(2);
 		expect(updateSession).toHaveBeenNthCalledWith(1, {
@@ -4468,6 +5107,7 @@ describe("LocalRuntimeHost", () => {
 					},
 				}),
 			}),
+			expect.objectContaining({ wrapTools: expect.any(Function) }),
 		);
 	});
 
@@ -4532,6 +5172,7 @@ describe("LocalRuntimeHost", () => {
 					loopDetection: { softThreshold: 4, hardThreshold: 8 },
 				},
 			}),
+			expect.objectContaining({ wrapTools: expect.any(Function) }),
 		);
 	});
 
@@ -4597,6 +5238,7 @@ describe("LocalRuntimeHost", () => {
 			expect.objectContaining({
 				prepareTurn: expect.any(Function),
 			}),
+			expect.objectContaining({ wrapTools: expect.any(Function) }),
 		);
 	});
 

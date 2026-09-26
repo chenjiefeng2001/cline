@@ -6,10 +6,8 @@ import {
 	type SkillsExecutorWithMetadata,
 } from "../tools";
 import { listAvailableRuntimeCommandsFromWatcher } from "./runtime-commands";
-import type {
-	SkillConfig,
-	UserInstructionConfigWatcher,
-} from "./user-instruction-config-loader";
+import type { SkillConfig } from "./user-instruction-config-loader";
+import type { UserInstructionSourceReader } from "./user-instruction-service";
 
 type SkillsExecutorMetadataItem = {
 	id: string;
@@ -23,7 +21,7 @@ type ConfiguredSkill = SkillsExecutorMetadataItem & {
 };
 
 export interface CreateUserInstructionPluginOptions {
-	watcher: UserInstructionConfigWatcher;
+	watcher: UserInstructionSourceReader;
 	watcherReady?: Promise<void>;
 	includeRules?: boolean;
 	includeSkills?: boolean;
@@ -73,7 +71,7 @@ function isSkillAllowed(
 }
 
 export function getConfiguredSkillsFromWatcher(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 	allowedSkillNames?: ReadonlyArray<string>,
 ): ConfiguredSkill[] {
 	const allowedSkills = toAllowedSkillSet(allowedSkillNames);
@@ -93,7 +91,7 @@ export function getConfiguredSkillsFromWatcher(
 }
 
 function listAvailableSkillNames(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 	allowedSkillNames?: ReadonlyArray<string>,
 ): string[] {
 	return getConfiguredSkillsFromWatcher(watcher, allowedSkillNames)
@@ -104,7 +102,7 @@ function listAvailableSkillNames(
 }
 
 function resolveSkillRecord(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 	requestedSkill: string,
 	allowedSkillNames?: ReadonlyArray<string>,
 ): { id: string; skill: SkillConfig } | { error: string } {
@@ -172,7 +170,7 @@ function resolveSkillRecord(
 }
 
 export function createUserInstructionSkillsExecutor(
-	watcher: UserInstructionConfigWatcher,
+	watcher: UserInstructionSourceReader,
 	watcherReady: Promise<void> = Promise.resolve(),
 	allowedSkillNames?: ReadonlyArray<string>,
 ): SkillsExecutorWithMetadata {
@@ -261,14 +259,21 @@ export function createUserInstructionPlugin(
 					(command.kind === "skill" && options.includeSkills) ||
 					(command.kind === "workflow" && options.includeWorkflows),
 			)) {
+				const commandName = command.name;
 				api.registerCommand({
-					name: command.name,
+					name: commandName,
 					description: command.description,
 					handler: (input) => {
+						const currentCommand = listAvailableRuntimeCommandsFromWatcher(
+							options.watcher,
+						).find((candidate) => candidate.name === commandName);
+						if (!currentCommand) {
+							return input;
+						}
 						const trimmed = input.trim();
 						return trimmed
-							? `${command.instructions}\n\n${trimmed}`
-							: command.instructions;
+							? `${currentCommand.instructions}\n\n${trimmed}`
+							: currentCommand.instructions;
 					},
 				});
 			}

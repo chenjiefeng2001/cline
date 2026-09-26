@@ -16,10 +16,15 @@ export interface ToolMiddlewareContext {
 	toolName: string;
 	/** Loop iteration that produced the call. */
 	iteration: number;
+	stepId?: string;
 	toolCallId?: string;
+	toolCallIndex?: number;
 	sessionId?: string;
+	runId?: string;
 	agentId?: string;
 	conversationId?: string;
+	retryable?: boolean;
+	signal?: AbortSignal;
 	input: unknown;
 	/** Tool policy (`autoApprove: false` → approval node asks). */
 	policy?: { enabled?: boolean; autoApprove?: boolean };

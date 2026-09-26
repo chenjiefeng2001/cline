@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import type { HubEventEnvelope } from "@cline/shared";
 import {
 	afterAll,
 	afterEach,
@@ -16,7 +17,7 @@ import {
 	type A2AHttpMountOptions,
 	mountA2AHttpHandler,
 } from "./a2a-http";
-import type { A2AJsonRpcResponse } from "./a2a-jsonrpc";
+import type { A2AJsonRpcResponse, A2AJsonRpcStreamResult } from "./a2a-jsonrpc";
 import * as jsonrpc from "./a2a-jsonrpc";
 import {
 	A2A_EXTENDED_AGENT_CARD_NOT_CONFIGURED,
@@ -27,6 +28,7 @@ import {
 	A2A_TASK_NOT_FOUND,
 	A2A_UNSUPPORTED_OPERATION,
 	createA2AJsonRpcHandler,
+	extractA2AApprovalDecision,
 	extractA2ARequestPrompt,
 	extractA2ARequestSessionId,
 } from "./a2a-jsonrpc";
@@ -184,6 +186,32 @@ describe("extractA2ARequestPrompt", () => {
 		).toBe("s1");
 		expect(extractA2ARequestSessionId(textMessage("x"))).toBeUndefined();
 	});
+
+	it("parses only the reserved approval decision data part", () => {
+		const decision = {
+			type: "cline.approval.decision",
+			approvalId: "approval-1",
+			decision: "approved",
+			reason: "reviewed",
+		};
+		expect(
+			extractA2AApprovalDecision({
+				message: { taskId: "task-1", parts: [{ data: decision }] },
+			}),
+		).toEqual({ kind: "decision", decision });
+		expect(
+			extractA2AApprovalDecision({
+				message: {
+					parts: [{ text: "approve" }, { data: decision }],
+				},
+			}),
+		).toMatchObject({ kind: "invalid" });
+		expect(
+			extractA2AApprovalDecision({
+				message: { parts: [{ data: { type: "other", value: true } }] },
+			}),
+		).toMatchObject({ kind: "invalid" });
+	});
 });
 
 describe("createA2AJsonRpcHandler", () => {
@@ -221,6 +249,175 @@ describe("createA2AJsonRpcHandler", () => {
 		expect(calls[0]?.command).toBe("session.send_input");
 		expect(calls[0]?.sessionId).toBe("s1");
 		expect(response.result).toMatchObject({ task: { id: "s1" } });
+	});
+
+	it("routes a structured approval decision through approval.respond", async () => {
+		const { client, calls, replies } = makeClient();
+		replies.set("approval.respond", {
+			ok: true,
+			payload: { approvalId: "approval-1", approved: true },
+		});
+		replies.set("session.get", {
+			ok: true,
+			payload: {
+				session: { sessionId: "s1", status: "running" },
+				pendingApproval: false,
+			},
+		});
+		const handler = createA2AJsonRpcHandler(makeServer(client));
+		const response = asJsonRpc(
+			await handler({
+				jsonrpc: "2.0",
+				id: 21,
+				method: "SendMessage",
+				params: {
+					message: {
+						taskId: "s1",
+						parts: [
+							{
+								data: {
+									type: "cline.approval.decision",
+									approvalId: "approval-1",
+									decision: "approved",
+								},
+							},
+						],
+					},
+				},
+			}),
+		);
+		expect(calls.map((call) => call.command)).toEqual([
+			"approval.respond",
+			"session.get",
+		]);
+		expect(calls[0]).toMatchObject({
+			command: "approval.respond",
+			sessionId: "s1",
+			payload: { approvalId: "approval-1", approved: true },
+		});
+		expect(response.result).toMatchObject({
+			task: { id: "s1", status: { state: "TASK_STATE_WORKING" } },
+		});
+	});
+
+	it("rejects mixed text and approval data parts", async () => {
+		const { client, calls } = makeClient();
+		const handler = createA2AJsonRpcHandler(makeServer(client));
+		const response = asJsonRpc(
+			await handler({
+				jsonrpc: "2.0",
+				id: 22,
+				method: "SendMessage",
+				params: {
+					message: {
+						taskId: "s1",
+						parts: [
+							{ text: "approve" },
+							{
+								data: {
+									type: "cline.approval.decision",
+									approvalId: "approval-1",
+									decision: "approved",
+								},
+							},
+						],
+					},
+				},
+			}),
+		);
+		expect(response.error?.code).toBe(A2A_JSONRPC_INVALID_PARAMS);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("subscribes before starting a streaming run and captures its events", async () => {
+		const order: string[] = [];
+		const listeners = new Set<(event: HubEventEnvelope) => void>();
+		const event = (
+			name: HubEventEnvelope["event"],
+			payload: Record<string, unknown> = {},
+		): HubEventEnvelope => ({
+			version: "v1",
+			event: name,
+			eventId: `evt-${name}`,
+			sessionId: "stream-order",
+			timestamp: Date.now(),
+			payload,
+		});
+		const client: A2AHubCommandClient = {
+			command: vi.fn(async (command) => {
+				if (command === "session.create") {
+					order.push("session.create");
+					return {
+						ok: true,
+						payload: {
+							session: { sessionId: "stream-order", status: "running" },
+						},
+					};
+				}
+				if (command === "run.start") {
+					order.push("run.start");
+					for (const listener of listeners) {
+						listener(event("run.started"));
+						listener(event("assistant.delta", { text: "delta" }));
+						listener(event("run.completed"));
+					}
+					return {
+						ok: true,
+						payload: { result: { finishReason: "success" } },
+					};
+				}
+				return { ok: true, payload: {} };
+			}),
+		};
+		const events = {
+			subscribe: vi.fn((listener: (event: HubEventEnvelope) => void) => {
+				order.push("subscribe");
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			}),
+		};
+		const server = new A2AServer(
+			client,
+			{ agentCard: { name: "cline-hub", version: "1.0.0" } },
+			events,
+		);
+		const stream = (await createA2AJsonRpcHandler(server)({
+			jsonrpc: "2.0",
+			id: 20,
+			method: "SendStreamingMessage",
+			params: textMessage("stream in order"),
+		})) as A2AJsonRpcStreamResult;
+		const results: A2AStreamEvent[] = [];
+		let resolveClosed: () => void = () => {};
+		const closed = new Promise<void>((resolve) => {
+			resolveClosed = resolve;
+		});
+
+		expect(stream.stream).toBe(true);
+		expect(order).toEqual(["session.create"]);
+		const cancel = stream.subscribe((frame) => {
+			const json = frame.replace(/^data:\s*/, "").trim();
+			results.push((JSON.parse(json) as { result: A2AStreamEvent }).result);
+		}, resolveClosed);
+		await closed;
+
+		expect(order).toEqual(["session.create", "subscribe", "run.start"]);
+		expect(results[0]).toMatchObject({
+			id: "stream-order",
+			status: { state: "TASK_STATE_SUBMITTED" },
+		});
+		expect(results.at(-1)).toMatchObject({
+			taskId: "stream-order",
+			status: { state: "TASK_STATE_COMPLETED" },
+		});
+		expect(
+			results.filter(
+				(event) =>
+					"artifact" in event && event.artifact.parts?.[0]?.text === "delta",
+			),
+		).toHaveLength(1);
+		expect(listeners.size).toBe(0);
+		cancel();
 	});
 
 	it("dispatches GetTask, CancelTask, and ListTasks", async () => {
@@ -529,7 +726,11 @@ describe("mountA2AHttpHandler — stream cleanup", () => {
 
 describe("mountA2AHttpHandler — body buffering", () => {
 	it("decodes split UTF-8 once and accepts the exact byte limit", async () => {
-		const { client, calls } = makeClient();
+		const { client, calls, replies } = makeClient();
+		replies.set("session.create", {
+			ok: true,
+			payload: { session: { sessionId: "body-1", status: "idle" } },
+		});
 		const text = "café 漢字 𐐀";
 		const body = Buffer.from(
 			JSON.stringify({
@@ -551,7 +752,9 @@ describe("mountA2AHttpHandler — body buffering", () => {
 		req.emit("end");
 		expect(await handled).toBe(true);
 		expect(res.statusCode).toBe(200);
-		expect(calls[0]?.payload).toMatchObject({ metadata: { prompt: text } });
+		expect(calls[0]?.payload).toMatchObject({ metadata: { source: "a2a" } });
+		expect(calls[1]?.command).toBe("run.start");
+		expect(calls[1]?.payload).toMatchObject({ prompt: text });
 		expectBodyListenersRemoved(req);
 	});
 
@@ -863,7 +1066,7 @@ describe("mountA2AHttpHandler — message/stream SSE", () => {
 		const readFrame = createSseReader(reader);
 		expect(await readFrame()).toMatchObject({
 			id: "stream-1",
-			status: { state: "TASK_STATE_WORKING" },
+			status: { state: "TASK_STATE_SUBMITTED" },
 		});
 
 		// Progress → working; terminal → stream end after the final update.

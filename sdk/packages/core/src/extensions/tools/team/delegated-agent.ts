@@ -9,7 +9,10 @@ import type {
 	ToolApprovalRequest,
 	ToolApprovalResult,
 } from "@cline/shared";
-import { SessionRuntime } from "../../../runtime/orchestration/session-runtime-orchestrator";
+import {
+	SessionRuntime,
+	type SessionRuntimeOrchestratorDeps,
+} from "../../../runtime/orchestration/session-runtime-orchestrator";
 import {
 	buildSubAgentSystemPrompt,
 	buildTeammateSystemPrompt,
@@ -45,6 +48,12 @@ export interface DelegatedAgentRuntimeConfig
 	logger?: BasicLogger;
 	telemetry?: ITelemetryService;
 	workspaceMetadata?: string;
+	sessionId?: string;
+	/**
+	 * Run that owns the agent chain. Set on a delegated runtime so every agent
+	 * created from this provider inherits the same chain root.
+	 */
+	rootRunId?: string;
 }
 
 export interface DelegatedAgentConfigProvider {
@@ -63,6 +72,12 @@ export interface BuildDelegatedAgentConfigOptions {
 	tools: AgentTool[];
 	configProvider: DelegatedAgentConfigProvider;
 	parentAgentId?: string;
+	/**
+	 * Run that owns the parent agent's chain. Carried onto the child so its own
+	 * tool contexts and approval requests describe the full chain; a child
+	 * without it cannot be attributed to a root run.
+	 */
+	rootRunId?: string;
 	maxIterations?: number;
 	abortSignal?: AbortSignal;
 	onEvent?: (event: AgentEvent) => void;
@@ -73,6 +88,8 @@ export interface BuildDelegatedAgentConfigOptions {
 	) => Promise<ToolApprovalResult> | ToolApprovalResult;
 	role?: string;
 	cwd?: string;
+	sessionId?: string;
+	wrapTools?: (tools: AgentTool[]) => AgentTool[];
 }
 
 export function createDelegatedAgentConfigProvider(
@@ -113,13 +130,19 @@ export function buildDelegatedAgentConfig(
 		options.kind === "teammate"
 			? buildTeammateSystemPrompt(options.prompt, runtimeConfig)
 			: buildSubAgentSystemPrompt(options.prompt, runtimeConfig);
+	// A delegated agent keeps the chain's root run so a later recovery can tell
+	// which root run owns it. When the parent did not report one, fall back to
+	// the parent's own run id so the chain is still describable.
+	const rootRunId = options.rootRunId ?? runtimeConfig.rootRunId;
 
 	return {
 		...options.configProvider.getConnectionConfig(),
+		sessionId: options.sessionId ?? runtimeConfig.sessionId,
 		systemPrompt,
 		tools: options.tools,
 		maxIterations: options.maxIterations ?? runtimeConfig.maxIterations,
 		parentAgentId: options.parentAgentId,
+		...(rootRunId ? { rootRunId } : {}),
 		abortSignal: options.abortSignal,
 		onEvent: options.onEvent,
 		hooks: runtimeConfig.hooks,
@@ -136,7 +159,11 @@ export function createDelegatedAgent(
 	options: BuildDelegatedAgentConfigOptions,
 ): SessionRuntime {
 	const config = buildDelegatedAgentConfig(options);
-	const session = new SessionRuntime(config);
+	const deps: SessionRuntimeOrchestratorDeps = {
+		...(config.rootRunId ? { chainRootRunId: config.rootRunId } : {}),
+		...(options.wrapTools ? { wrapTools: options.wrapTools } : {}),
+	};
+	const session = new SessionRuntime(config, deps);
 	if (config.onEvent) {
 		session.subscribeEvents(config.onEvent);
 	}

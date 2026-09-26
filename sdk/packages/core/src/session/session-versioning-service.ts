@@ -70,6 +70,10 @@ export interface SessionCheckpointRestoreInput<
 		context: SessionCheckpointRestoreContext,
 		start: TRestoreStartInput,
 	) => TStartInput | Promise<TStartInput>;
+	prepareStart?: (
+		context: SessionCheckpointRestoreContext,
+		start: TStartInput,
+	) => TStartInput | Promise<TStartInput>;
 	startSession?: (input: TStartInput) => Promise<TStartResult>;
 	getStartedSessionId?: (result: TStartResult) => string | undefined;
 	readRestoredSession?: (
@@ -166,18 +170,21 @@ export class SessionVersioningService {
 			cwd: input.cwd,
 			restoreMessages,
 		});
-		if (restoreWorkspace) {
-			await (input.applyWorkspaceCheckpoint ?? applyCheckpointToWorktree)(
-				plan.cwd,
-				plan.checkpoint,
-			);
-		}
+		const applyWorkspace = async (): Promise<void> => {
+			if (restoreWorkspace) {
+				await (input.applyWorkspaceCheckpoint ?? applyCheckpointToWorktree)(
+					plan.cwd,
+					plan.checkpoint,
+				);
+			}
+		};
 
 		const sourceSnapshot = createCoreSessionSnapshot({
 			session: sourceSession,
 			messages: sourceMessages,
 		});
 		if (!restoreMessages) {
+			await applyWorkspace();
 			return { checkpoint: plan.checkpoint, sourceSnapshot };
 		}
 
@@ -210,9 +217,13 @@ export class SessionVersioningService {
 			);
 		}
 
-		const startInput = input.buildStartInput
+		const builtStartInput = input.buildStartInput
 			? await input.buildStartInput(context, input.start)
 			: (input.start as unknown as TStartInput);
+		const startInput = input.prepareStart
+			? await input.prepareStart(context, builtStartInput)
+			: builtStartInput;
+		await applyWorkspace();
 		const startResult = await input.startSession(startInput);
 		const newSessionId = input.getStartedSessionId?.(startResult);
 		if (newSessionId) {

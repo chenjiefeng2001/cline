@@ -47,6 +47,9 @@ export type {
 	AgentRuntimeConfig,
 	AgentRuntimeConfigWithModel,
 	AgentRuntimeConfigWithProvider,
+	AgentRuntimeResumeToolBatch,
+	AgentRuntimeResumeToolCall,
+	AgentRuntimeResumeToolCallEntry,
 } from "./agent-runtime";
 export {
 	Agent,
@@ -54,4 +57,5 @@ export {
 	AgentRuntimeAbortError,
 	createAgent,
 	createAgentRuntime,
+	createToolStepId,
 } from "./agent-runtime";

@@ -8,6 +8,7 @@ import {
 	type AgentConfig,
 	type AgentEvent,
 	type AgentResult,
+	type AgentTool,
 	type AppendMissionLogInput,
 	type AttachTeamOutcomeFragmentInput,
 	type CreateTeamOutcomeInput,
@@ -131,6 +132,7 @@ export interface AgentTeamsRuntimeOptions {
 	missionLogIntervalMs?: number;
 	maxConcurrentRuns?: number;
 	onTeamEvent?: (event: TeamEvent) => void;
+	wrapTools?: (tools: AgentTool[]) => AgentTool[];
 }
 
 export interface SpawnTeammateOptions {
@@ -544,6 +546,7 @@ export class AgentTeamsRuntime {
 	private readonly missionLogIntervalSteps: number;
 	private readonly missionLogIntervalMs: number;
 	private readonly maxConcurrentRuns: number;
+	private readonly wrapTools?: (tools: AgentTool[]) => AgentTool[];
 
 	constructor(options: AgentTeamsRuntimeOptions) {
 		this.teamName = options.teamName;
@@ -558,6 +561,7 @@ export class AgentTeamsRuntime {
 			options.missionLogIntervalMs ?? 120000,
 		);
 		this.maxConcurrentRuns = Math.max(1, options.maxConcurrentRuns ?? 2);
+		this.wrapTools = options.wrapTools;
 		const leadAgentId = options.leadAgentId ?? "lead";
 		this.members.set(leadAgentId, {
 			agentId: leadAgentId,
@@ -868,7 +872,9 @@ export class AgentTeamsRuntime {
 			},
 		};
 
-		const agent = new SessionRuntime(wrappedConfig);
+		const agent = this.wrapTools
+			? new SessionRuntime(wrappedConfig, { wrapTools: this.wrapTools })
+			: new SessionRuntime(wrappedConfig);
 		if (wrappedConfig.onEvent) {
 			agent.subscribeEvents(wrappedConfig.onEvent);
 		}
