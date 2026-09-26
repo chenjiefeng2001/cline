@@ -173,6 +173,19 @@ jobs:
             - name: Build CLI
               run: bun -F @cline/cli build
 
+            # apps/vscode/src/shared/proto/ and src/generated/ are gitignored
+            # build products (build-proto.mjs), but the webview-ui suite imports
+            # them through the `@shared/proto/*` alias. On a fresh checkout they
+            # do not exist, so without this step vite fails to resolve
+            # "@shared/proto/cline/common" and 25 of 48 webview-ui suites fail to
+            # collect. The ext-vscode-test job gets this for free because
+            # `ci:build` starts with `protos`; this job does not, so it has to
+            # ask. Local runs hide the problem: a developer who has built the
+            # extension already has the generated files on disk.
+            - name: Generate protobufs
+              working-directory: apps/vscode
+              run: bun run protos
+
             # Deterministic serial chain (webview-ui → desktop-app → multi-agent
             # → rollout → examples/vscode) covering the suites outside the
             # default `test` aggregator. Default `test` semantics unchanged.
