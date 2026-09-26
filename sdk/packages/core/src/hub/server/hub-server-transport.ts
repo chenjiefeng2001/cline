@@ -8,10 +8,10 @@ import type {
 import { captureSdkError, createSessionId } from "@cline/shared";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { CronService } from "../../cron/service/cron-service";
-
-const hubServerTracer = trace.getTracer("cline.hub.server");
 import { HubScheduleCommandService } from "../../cron/service/schedule-command-service";
 import { HubScheduleService } from "../../cron/service/schedule-service";
+import { DurableToolApprovalCoordinator } from "../../runtime/approval/durable-tool-approval";
+import { DurableRunContinuationCoordinator } from "../../runtime/continuation/durable-run-continuation";
 import { LocalRuntimeHost } from "../../runtime/host/local-runtime-host";
 import type {
 	PendingPromptsRuntimeService,
@@ -26,10 +26,14 @@ import {
 	type CoreSettingsType,
 } from "../../settings";
 import type { CoreSessionEvent } from "../../types/events";
+import type { HubCommandDispatchContext } from "./command-transport";
+
+const hubServerTracer = trace.getTracer("cline.hub.server");
+
+import { redactCredentialRecord } from "./credential-redaction";
 import {
 	handleApprovalRespond,
 	requestToolApproval as requestToolApprovalHandler,
-	resolvePendingApproval,
 } from "./handlers/approval-handlers";
 import {
 	cancelPendingCapabilityRequests,
@@ -57,6 +61,7 @@ import {
 	handleSessionHook,
 	handleSessionInput,
 } from "./handlers/run-handlers";
+import { authorizeHubSessionCommand } from "./handlers/session-access";
 import { projectSessionEvent } from "./handlers/session-event-projector";
 import {
 	handleSessionAttach,
@@ -71,6 +76,7 @@ import {
 	handleSessionPendingPrompts,
 	handleSessionRemovePendingPrompt,
 	handleSessionRestore,
+	handleSessionResume,
 	handleSessionUpdate,
 	handleSessionUpdateConnection,
 	handleSessionUpdatePendingPrompt,
@@ -163,12 +169,23 @@ function parseSettingsToggleInput(payload: unknown): CoreSettingsToggleInput {
 /** @internal Exported for unit testing fetch/runtime wiring. */
 export class HubServerTransport implements NativeHubTransport {
 	private readonly clients = new Map<string, HubClientRecord>();
+	/**
+	 * Connections currently attached to this transport. A client identity whose
+	 * owning connection is no longer here can be reclaimed by a reconnecting
+	 * client that reuses its id, so an abrupt disconnect cannot permanently
+	 * block a legitimate client.
+	 */
+	private readonly liveConnections = new Set<string>();
 	private readonly listeners = new Map<
 		string,
 		Set<{ sessionId?: string; listener: (event: HubEventEnvelope) => void }>
 	>();
 	private readonly sessionState = new Map<string, HubSessionState>();
 	private readonly pendingApprovals = new Map<string, PendingApproval>();
+	private readonly approvalCoordinator: DurableToolApprovalCoordinator;
+	private readonly ownsApprovalCoordinator: boolean;
+	private readonly continuationCoordinator: DurableRunContinuationCoordinator;
+	private readonly ownsContinuationCoordinator: boolean;
 	private readonly pendingCapabilityRequests = new Map<
 		string,
 		PendingCapabilityRequest
@@ -187,18 +204,73 @@ export class HubServerTransport implements NativeHubTransport {
 	private readonly ctx: HubTransportContext;
 
 	constructor(readonly options: HubWebSocketServerOptions) {
-		this.sessionHost =
-			options.sessionHost ??
-			new LocalRuntimeHost({
+		if (options.sessionHost) {
+			this.sessionHost = options.sessionHost;
+			const hostWithCoordinator = options.sessionHost as RuntimeHost & {
+				getToolApprovalCoordinator?: () => DurableToolApprovalCoordinator;
+				getRunContinuationCoordinator?: () => DurableRunContinuationCoordinator;
+			};
+			const hostCoordinator =
+				hostWithCoordinator.getToolApprovalCoordinator?.();
+			const hostContinuationCoordinator =
+				hostWithCoordinator.getRunContinuationCoordinator?.();
+			if (
+				options.approvalCoordinator &&
+				hostCoordinator &&
+				options.approvalCoordinator !== hostCoordinator
+			) {
+				throw new Error(
+					"Hub approval coordinator must match the session host coordinator",
+				);
+			}
+			if (
+				options.continuationCoordinator &&
+				hostContinuationCoordinator &&
+				options.continuationCoordinator !== hostContinuationCoordinator
+			) {
+				throw new Error(
+					"Hub continuation coordinator must match the session host coordinator",
+				);
+			}
+			this.approvalCoordinator =
+				options.approvalCoordinator ??
+				hostCoordinator ??
+				new DurableToolApprovalCoordinator();
+			this.ownsApprovalCoordinator =
+				options.approvalCoordinator === undefined && !hostCoordinator;
+			this.continuationCoordinator =
+				options.continuationCoordinator ??
+				hostContinuationCoordinator ??
+				new DurableRunContinuationCoordinator();
+			this.ownsContinuationCoordinator =
+				options.continuationCoordinator === undefined &&
+				!hostContinuationCoordinator;
+		} else {
+			this.approvalCoordinator =
+				options.approvalCoordinator ?? new DurableToolApprovalCoordinator();
+			this.ownsApprovalCoordinator = options.approvalCoordinator === undefined;
+			this.continuationCoordinator =
+				options.continuationCoordinator ??
+				new DurableRunContinuationCoordinator();
+			this.ownsContinuationCoordinator =
+				options.continuationCoordinator === undefined;
+			this.sessionHost = new LocalRuntimeHost({
 				sessionService: new CoreSessionService(new SqliteSessionStore()),
 				fetch: options.fetch,
 				telemetry: options.telemetry,
+				approvalCoordinator: this.approvalCoordinator,
+				continuationCoordinator: this.continuationCoordinator,
+				recoveryOwner: options.a2a?.recoveryOwner?.trim(),
 			});
+		}
 		this.ctx = {
 			clients: this.clients,
 			sessionState: this.sessionState,
 			pendingApprovals: this.pendingApprovals,
+			approvalCoordinator: this.approvalCoordinator,
+			continuationCoordinator: this.continuationCoordinator,
 			pendingCapabilityRequests: this.pendingCapabilityRequests,
+			liveConnections: this.liveConnections,
 			suppressNextTerminalEventBySession:
 				this.suppressNextTerminalEventBySession,
 			telemetry: options.telemetry,
@@ -279,6 +351,20 @@ export class HubServerTransport implements NativeHubTransport {
 	}
 
 	async start(): Promise<void> {
+		this.approvalCoordinator.setPreservePendingApprovals(false);
+		this.continuationCoordinator.setPreservePending(false);
+		try {
+			await this.options.startupRecovery?.();
+		} catch (error) {
+			logHubBoundaryError("startup recovery failed", error);
+			captureSdkError(this.options.telemetry, {
+				component: "core",
+				operation: "hub.startup_recovery",
+				error,
+				severity: "error",
+				handled: true,
+			});
+		}
 		await this.schedules.start();
 		if (this.cronService) {
 			try {
@@ -290,18 +376,26 @@ export class HubServerTransport implements NativeHubTransport {
 	}
 
 	async stop(): Promise<void> {
-		for (const approvalId of this.pendingApprovals.keys()) {
-			resolvePendingApproval(this.ctx, approvalId, {
-				approved: false,
-				reason: "Hub shutting down before approval was resolved.",
-			});
-		}
+		this.approvalCoordinator.setPreservePendingApprovals(true);
+		this.continuationCoordinator.setPreservePending(true);
+		this.approvalCoordinator.releaseWaiters(
+			"Hub shutting down before approval was resolved.",
+		);
 		cancelPendingCapabilityRequests(
 			this.ctx,
 			() => true,
 			"Hub shutting down before capability request was resolved.",
 		);
-		await this.sessionHost.dispose("hub_server_stop");
+		try {
+			await this.sessionHost.dispose("hub_server_stop");
+		} finally {
+			if (this.ownsApprovalCoordinator) {
+				await this.approvalCoordinator.close();
+			}
+			if (this.ownsContinuationCoordinator) {
+				await this.continuationCoordinator.close();
+			}
+		}
 		await this.schedules.dispose();
 		if (this.cronService) {
 			try {
@@ -312,7 +406,41 @@ export class HubServerTransport implements NativeHubTransport {
 		}
 	}
 
-	async handleCommand(envelope: HubCommandEnvelope): Promise<HubReplyEnvelope> {
+	/**
+	 * Mark a websocket connection as attached. The websocket server calls this
+	 * once per accepted socket; the connection id is what later registrations
+	 * are compared against.
+	 */
+	beginConnection(connectionId: string): void {
+		if (connectionId) {
+			this.liveConnections.add(connectionId);
+		}
+	}
+
+	/**
+	 * Mark a websocket connection as gone and drop any client identity it still
+	 * owned, so a reconnecting client that reuses its id is not locked out by a
+	 * record left behind by an abrupt disconnect.
+	 */
+	endConnection(connectionId: string): void {
+		if (!connectionId) {
+			return;
+		}
+		this.liveConnections.delete(connectionId);
+		for (const [clientId, client] of [...this.clients]) {
+			if (client.metadata?.connectionId === connectionId) {
+				this.clients.delete(clientId);
+				this.publish(
+					buildHubEvent("hub.client.disconnected", { clientId }, undefined),
+				);
+			}
+		}
+	}
+
+	async handleCommand(
+		envelope: HubCommandEnvelope,
+		dispatch?: HubCommandDispatchContext,
+	): Promise<HubReplyEnvelope> {
 		// No-op span unless a TracerProvider is registered. Pairs with the
 		// client-side "hub.command" span via hub.request_id correlation.
 		const span = hubServerTracer.startSpan("hub.dispatch", {
@@ -321,10 +449,11 @@ export class HubServerTransport implements NativeHubTransport {
 				"hub.request_id": envelope.requestId,
 				"hub.session_id": envelope.sessionId,
 				"hub.client_id": envelope.clientId,
+				"hub.connection_id": dispatch?.connectionId ?? "",
 			},
 		});
 		try {
-			const reply = await this.dispatchCommand(envelope);
+			const reply = await this.dispatchCommand(envelope, dispatch);
 			if (!reply.ok) {
 				span.setStatus({
 					code: SpanStatusCode.ERROR,
@@ -352,10 +481,17 @@ export class HubServerTransport implements NativeHubTransport {
 
 	private async dispatchCommand(
 		envelope: HubCommandEnvelope,
+		dispatch?: HubCommandDispatchContext,
 	): Promise<HubReplyEnvelope> {
+		// One authorization table for every session-scoped command, checked
+		// before dispatch so no handler can forget it.
+		const forbidden = authorizeHubSessionCommand(this.ctx, envelope);
+		if (forbidden) {
+			return forbidden;
+		}
 		switch (envelope.command) {
 			case "client.register":
-				return handleClientRegister(this.ctx, envelope);
+				return handleClientRegister(this.ctx, envelope, dispatch);
 			case "client.update":
 				return handleClientUpdate(this.ctx, envelope);
 			case "client.unregister":
@@ -379,6 +515,8 @@ export class HubServerTransport implements NativeHubTransport {
 					(request: ToolApprovalRequest) =>
 						requestToolApprovalHandler(this.ctx, request),
 				);
+			case "session.resume":
+				return await handleSessionResume(this.ctx, envelope);
 			case "session.attach":
 				return await handleSessionAttach(this.ctx, envelope);
 			case "session.detach":
@@ -593,14 +731,31 @@ export class HubServerTransport implements NativeHubTransport {
 		);
 	}
 
+	/**
+	 * Fan an event out to subscribers.
+	 *
+	 * Payloads are redacted here rather than per publisher: this is the single
+	 * point every broadcast passes through, so a new event cannot leak a
+	 * credential by forgetting to sanitize. Redaction is applied to the payload
+	 * only — event name, session id, and event id are addressing, not data.
+	 */
 	private publish(event: HubEventEnvelope): void {
+		const projection: HubEventEnvelope =
+			event.payload === undefined
+				? event
+				: {
+						...event,
+						payload: redactCredentialRecord(
+							event.payload as Record<string, unknown>,
+						),
+					};
 		for (const entries of this.listeners.values()) {
 			for (const entry of entries) {
-				if (entry.sessionId && entry.sessionId !== event.sessionId) {
+				if (entry.sessionId && entry.sessionId !== projection.sessionId) {
 					continue;
 				}
 				try {
-					entry.listener(event);
+					entry.listener(projection);
 				} catch (error) {
 					logHubBoundaryError(
 						`listener threw while publishing ${event.event}`,

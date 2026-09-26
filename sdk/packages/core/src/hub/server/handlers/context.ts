@@ -9,6 +9,8 @@ import type {
 	SessionParticipant,
 } from "@cline/shared";
 import { createSessionId } from "@cline/shared";
+import type { DurableToolApprovalCoordinator } from "../../../runtime/approval/durable-tool-approval";
+import type { DurableRunContinuationCoordinator } from "../../../runtime/continuation/durable-run-continuation";
 import type {
 	PendingPromptsRuntimeService,
 	RuntimeHost,
@@ -47,11 +49,20 @@ export type PendingCapabilityRequest = {
  */
 export interface HubTransportContext {
 	readonly clients: Map<string, HubClientRecord>;
+	/**
+	 * Websocket connections currently attached. A client identity owned by a
+	 * connection that is no longer listed may be reclaimed by a reconnecting
+	 * client using the same id. Optional: in-process transports (A2A mount,
+	 * tests) have no connections and register without a bound identity.
+	 */
+	readonly liveConnections?: Set<string>;
 	readonly sessionState: Map<string, HubSessionState>;
 	readonly pendingApprovals: Map<string, PendingApproval>;
 	readonly pendingCapabilityRequests: Map<string, PendingCapabilityRequest>;
 	readonly suppressNextTerminalEventBySession: Map<string, string>;
 	readonly telemetry?: ITelemetryService;
+	readonly approvalCoordinator?: DurableToolApprovalCoordinator;
+	readonly continuationCoordinator?: DurableRunContinuationCoordinator;
 	readonly sessionHost: RuntimeHost &
 		Partial<
 			PendingPromptsRuntimeService &

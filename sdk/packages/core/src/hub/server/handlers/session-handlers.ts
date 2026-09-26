@@ -5,22 +5,26 @@ import type {
 	ToolApprovalRequest,
 } from "@cline/shared";
 import { createSessionId, parseRuntimeConfigExtensions } from "@cline/shared";
+import type { DurableToolApprovalRecord } from "../../../runtime/approval/durable-tool-approval";
 import { normalizeConnectionUpdate } from "../../../runtime/config/connection-update";
-import type {
-	RuntimeSessionConfig,
-	SessionConnectionUpdate,
+import {
+	RUNTIME_INTERNAL_RECOVERY_OWNER,
+	type RuntimeSessionConfig,
+	type SessionConnectionUpdate,
+	type StartSessionInput,
 } from "../../../runtime/host/runtime-host";
 import { parseSessionCompactionState } from "../../../session/models/session-compaction";
-import {
-	SessionVersioningError,
-	SessionVersioningService,
-} from "../../../session/session-versioning-service";
+import { SessionVersioningError } from "../../../session/session-versioning-service";
 import {
 	createHubClientContributionRuntime,
 	parseHubClientContributions,
 } from "../hub-client-contributions";
 import { logHubMessage } from "../hub-server-logging";
 import { toHubSessionRecord } from "../hub-session-records";
+import {
+	cancelPendingApprovals,
+	replayPendingApprovals,
+} from "./approval-handlers";
 import { cancelPendingCapabilityRequests } from "./capability-handlers";
 import {
 	asPlainRecord,
@@ -35,6 +39,17 @@ import {
 } from "./context";
 
 const CAPABILITY_OWNER_METADATA_KEY = "hubCapabilityOwnerClientId";
+
+function projectPendingApproval(
+	record: DurableToolApprovalRecord,
+): Record<string, unknown> {
+	return {
+		approvalId: record.approvalId,
+		toolCallId: record.toolCallId,
+		toolName: record.toolName,
+		expiresAt: record.expiresAt,
+	};
+}
 
 function readConnectionString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0
@@ -104,15 +119,6 @@ export function readSessionConnectionUpdate(
 	return normalizeConnectionUpdate(updates);
 }
 
-function getCapabilityOwnerClientId(
-	ctx: HubTransportContext,
-	sessionId: string,
-): string | undefined {
-	// Sidecar access follows the live hub owner, not persisted metadata clients
-	// can replay or edit.
-	return ctx.sessionState.get(sessionId)?.createdByClientId;
-}
-
 function stripServerOwnedSessionMetadata(
 	metadata: Record<string, JsonValue | undefined> | undefined,
 ): Record<string, JsonValue | undefined> | undefined {
@@ -124,30 +130,6 @@ function stripServerOwnedSessionMetadata(
 	const sanitized = { ...metadata };
 	delete sanitized[CAPABILITY_OWNER_METADATA_KEY];
 	return sanitized;
-}
-
-function authorizeSessionCompactionAccess(input: {
-	sessionId: string;
-	ctx: HubTransportContext;
-	clientId: string;
-	envelope: HubCommandEnvelope;
-}): HubReplyEnvelope | undefined {
-	const ownerClientId = getCapabilityOwnerClientId(input.ctx, input.sessionId);
-	if (!ownerClientId) {
-		return errorReply(
-			input.envelope,
-			"session_wrong_client",
-			`Session ${input.sessionId} has no owner`,
-		);
-	}
-	if (ownerClientId !== input.clientId) {
-		return errorReply(
-			input.envelope,
-			"session_wrong_client",
-			`Session ${input.sessionId} is owned by ${ownerClientId}`,
-		);
-	}
-	return undefined;
 }
 
 export async function handleSessionCreate(
@@ -169,6 +151,13 @@ export async function handleSessionCreate(
 		envelope.payload && typeof envelope.payload === "object"
 			? envelope.payload
 			: {};
+	const internalRecoveryOwner = (payload as Record<PropertyKey, unknown>)[
+		RUNTIME_INTERNAL_RECOVERY_OWNER
+	];
+	const recoveryOwner =
+		typeof internalRecoveryOwner === "string" && internalRecoveryOwner.trim()
+			? internalRecoveryOwner.trim()
+			: undefined;
 	const metadata =
 		payload.metadata && typeof payload.metadata === "object"
 			? JSON.parse(JSON.stringify(payload.metadata))
@@ -272,6 +261,9 @@ export async function handleSessionCreate(
 					: "hub"),
 	});
 	const started = await ctx.sessionHost.startSession({
+		...(recoveryOwner
+			? { [RUNTIME_INTERNAL_RECOVERY_OWNER]: recoveryOwner }
+			: {}),
 		source: typeof metadata.source === "string" ? metadata.source : undefined,
 		interactive: metadata.interactive !== false,
 		sessionMetadata:
@@ -505,8 +497,19 @@ export async function handleSessionRestore(
 			sessionConfig,
 			requestCapability: ctx.requestCapability,
 		});
-		const service = new SessionVersioningService();
-		const result = await service.restoreCheckpoint({
+		const baseStart: StartSessionInput = {
+			config: {
+				providerId: sessionConfig?.providerId ?? "",
+				modelId: sessionConfig?.modelId ?? "",
+				cwd: sessionConfig?.cwd ?? "",
+				systemPrompt: sessionConfig?.systemPrompt ?? "",
+				sessionId,
+				enableTools: sessionConfig?.enableTools ?? true,
+				enableSpawnAgent: sessionConfig?.enableSpawnAgent ?? true,
+				enableAgentTeams: sessionConfig?.enableAgentTeams ?? true,
+			},
+		};
+		const result = await ctx.sessionHost.restoreSession({
 			sessionId: sourceSessionId,
 			checkpointRunCount,
 			restore: {
@@ -515,15 +518,12 @@ export async function handleSessionRestore(
 				omitCheckpointMessageFromSession:
 					restoreOptions.omitCheckpointMessageFromSession === true,
 			},
-			start: sessionConfig,
+			start: baseStart,
 			cwd:
 				(typeof sessionConfig?.cwd === "string" && sessionConfig.cwd.trim()) ||
 				(typeof sessionConfig?.workspaceRoot === "string" &&
 					sessionConfig.workspaceRoot.trim()) ||
 				undefined,
-			getSession: (sessionId) => ctx.sessionHost.getSession(sessionId),
-			readMessages: (sessionId) =>
-				ctx.sessionHost.readSessionMessages(sessionId),
 			buildStartInput: (context) => {
 				if (context.restoredCheckpointMetadata) {
 					metadata.checkpoint = context.restoredCheckpointMetadata;
@@ -627,9 +627,6 @@ export async function handleSessionRestore(
 								: undefined,
 				};
 			},
-			startSession: (startInput) => ctx.sessionHost.startSession(startInput),
-			getStartedSessionId: (started) => started.sessionId,
-			readRestoredSession: (sessionId) => ctx.sessionHost.getSession(sessionId),
 		});
 		if (!restoreMessages) {
 			return okReply(envelope, { checkpoint: result.checkpoint });
@@ -702,12 +699,12 @@ export async function handleSessionAttach(
 			`Unknown session: ${sessionId}`,
 		);
 	}
-	ensureSessionParticipant(
-		ctx,
-		sessionId,
-		envelope.clientId?.trim() || "hub-client",
-		"participant",
-	);
+	const clientId = envelope.clientId?.trim() || "hub-client";
+	// Attaching must never grant authority: a client that could promote itself by
+	// attaching would make the whole ACL advisory, and would also hand it
+	// capability ownership. Ownership is only ever set by `session.create`.
+	ensureSessionParticipant(ctx, sessionId, clientId, "observer");
+	await replayPendingApprovals(ctx, sessionId, clientId);
 	const attachedSession = await readHubSessionRecord(ctx, sessionId);
 	ctx.publish(
 		ctx.buildEvent(
@@ -770,14 +767,25 @@ export async function handleSessionGet(
 ): Promise<HubReplyEnvelope> {
 	const sessionId = extractSessionId(envelope);
 	const includeSnapshot = envelope.payload?.includeSnapshot === true;
-	const [session, snapshot] = await Promise.all([
+	const [session, snapshot, pendingApprovals] = await Promise.all([
 		readHubSessionRecord(ctx, sessionId),
 		includeSnapshot
 			? readCoreSessionSnapshot(ctx, sessionId)
 			: Promise.resolve(undefined),
+		ctx.approvalCoordinator?.listPending(sessionId) ?? Promise.resolve([]),
 	]);
+	const approval = pendingApprovals[0];
 	return session
-		? okReply(envelope, { session, ...(snapshot ? { snapshot } : {}) })
+		? okReply(envelope, {
+				session,
+				...(snapshot ? { snapshot } : {}),
+				...(approval
+					? {
+							pendingApproval: true,
+							approval: projectPendingApproval(approval),
+						}
+					: {}),
+			})
 		: errorReply(
 				envelope,
 				"session_not_found",
@@ -829,16 +837,7 @@ export async function handleSessionCompactionGet(
 			`Unknown session: ${sessionId}`,
 		);
 	}
-	const clientId = envelope.clientId?.trim() || "hub-client";
-	const unauthorized = authorizeSessionCompactionAccess({
-		sessionId,
-		ctx,
-		clientId,
-		envelope,
-	});
-	if (unauthorized) {
-		return unauthorized;
-	}
+	// Ownership is enforced centrally by the session ACL table.
 	const state = await ctx.sessionHost.readSessionCompactionState(sessionId);
 	return okReply(envelope, { sessionId, state });
 }
@@ -930,7 +929,6 @@ export async function handleSessionCompactionUpdate(
 			"session.compaction.update requires a session id",
 		);
 	}
-	const clientId = envelope.clientId?.trim() || "hub-client";
 	const session = await readHubSessionRecord(ctx, sessionId);
 	if (!session) {
 		return errorReply(
@@ -939,15 +937,7 @@ export async function handleSessionCompactionUpdate(
 			`Unknown session: ${sessionId}`,
 		);
 	}
-	const unauthorized = authorizeSessionCompactionAccess({
-		sessionId,
-		ctx,
-		clientId,
-		envelope,
-	});
-	if (unauthorized) {
-		return unauthorized;
-	}
+	// Ownership is enforced centrally by the session ACL table.
 	const payload =
 		envelope.payload && typeof envelope.payload === "object"
 			? envelope.payload
@@ -994,12 +984,120 @@ export async function handleSessionCompactionUpdate(
 	};
 }
 
+export async function handleSessionResume(
+	ctx: HubTransportContext,
+	envelope: HubCommandEnvelope,
+): Promise<HubReplyEnvelope> {
+	const sessionId = extractSessionId(envelope);
+	const continuationKey =
+		typeof envelope.payload?.continuationKey === "string"
+			? envelope.payload.continuationKey.trim()
+			: "";
+	const start = asPlainRecord(envelope.payload?.start);
+	const startConfig = asPlainRecord(start?.config);
+	const continuationKeys = Array.isArray(envelope.payload?.continuationKeys)
+		? envelope.payload.continuationKeys
+				.filter(
+					(value): value is string =>
+						typeof value === "string" && value.trim().length > 0,
+				)
+				.map((value) => value.trim())
+		: [];
+	const resolvedKeys =
+		continuationKeys.length > 0
+			? continuationKeys
+			: continuationKey
+				? [continuationKey]
+				: [];
+	if (!sessionId || resolvedKeys.length === 0 || !start || !startConfig) {
+		return errorReply(
+			envelope,
+			"invalid_session_resume",
+			"session.resume requires sessionId, continuationKey (or continuationKeys), and start",
+		);
+	}
+	const runtime = ctx.sessionHost as typeof ctx.sessionHost & {
+		resumePendingRun?: (input: {
+			continuationKey: string;
+			start: StartSessionInput;
+			ownerToken?: string;
+			leaseDurationMs?: number;
+			reclaimExecuting?: boolean;
+		}) => Promise<unknown>;
+		resumePendingRunBatch?: (input: {
+			continuationKeys: string[];
+			start: StartSessionInput;
+			ownerToken?: string;
+			leaseDurationMs?: number;
+			reclaimExecuting?: boolean;
+		}) => Promise<unknown>;
+	};
+	const resumeInput = {
+		start: {
+			...(start as Record<string, unknown>),
+			config: {
+				...(startConfig as Record<string, unknown>),
+				sessionId,
+			},
+		} as unknown as StartSessionInput,
+		ownerToken:
+			typeof envelope.payload?.ownerToken === "string"
+				? envelope.payload.ownerToken
+				: undefined,
+		leaseDurationMs:
+			typeof envelope.payload?.leaseDurationMs === "number"
+				? envelope.payload.leaseDurationMs
+				: undefined,
+		reclaimExecuting:
+			envelope.payload?.reclaimExecuting === true ? true : undefined,
+	};
+	try {
+		if (resolvedKeys.length > 1) {
+			if (typeof runtime.resumePendingRunBatch !== "function") {
+				return errorReply(
+					envelope,
+					"session_resume_unavailable",
+					"The runtime host does not support durable run batch resume.",
+				);
+			}
+			const result = await runtime.resumePendingRunBatch({
+				continuationKeys: resolvedKeys,
+				...resumeInput,
+			});
+			return okReply(envelope, { result });
+		}
+		if (typeof runtime.resumePendingRun !== "function") {
+			return errorReply(
+				envelope,
+				"session_resume_unavailable",
+				"The runtime host does not support durable run resume.",
+			);
+		}
+		const result = await runtime.resumePendingRun({
+			continuationKey: resolvedKeys[0] as string,
+			...resumeInput,
+		});
+		return okReply(envelope, { result });
+	} catch (error) {
+		return errorReply(
+			envelope,
+			"session_resume_failed",
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+}
+
 export async function handleSessionDelete(
 	ctx: HubTransportContext,
 	envelope: HubCommandEnvelope,
 ): Promise<HubReplyEnvelope> {
 	const sessionId = extractSessionId(envelope);
 	const deleted = await ctx.sessionHost.deleteSession(sessionId);
+	await cancelPendingApprovals(
+		ctx,
+		(approval) => approval.sessionId === sessionId,
+		"Session deleted",
+	);
 	ctx.sessionState.delete(sessionId);
 	return okReply(envelope, { deleted });
 }

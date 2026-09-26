@@ -7,6 +7,7 @@ import type {
 } from "@cline/shared";
 import {
 	captureSdkError,
+	createSessionId,
 	HUB_COMMAND_SLOW_LOG_MS,
 	resolveHubCommandTimeoutMs,
 	safeJsonParse,
@@ -15,6 +16,23 @@ import type { HubCommandTransport } from "./command-transport";
 import { logHubMessage } from "./hub-server-logging";
 
 type HubCommandFrame = HubTransportFrame & { kind: "command" };
+type HubStreamFrame = Extract<
+	HubTransportFrame,
+	{ kind: "stream.subscribe" | "stream.unsubscribe" }
+>;
+
+/**
+ * Commands a connection may issue before it has registered a client identity.
+ * Everything else needs a bound identity, because every downstream handler
+ * authorizes on `envelope.clientId` and that value used to be self-reported.
+ */
+const PRE_REGISTRATION_COMMANDS: ReadonlySet<string> = new Set([
+	"client.register",
+]);
+
+export const HUB_UNREGISTERED_CLIENT_ERROR = "hub_unregistered_client";
+export const HUB_CLIENT_ID_MISMATCH_ERROR = "hub_client_id_mismatch";
+export const HUB_CLIENT_ID_TAKEN_ERROR = "hub_client_id_taken";
 
 export interface BrowserHubSocketLike {
 	send(data: string): void;
@@ -52,15 +70,114 @@ function commandErrorReply(
 	};
 }
 
+/**
+ * Per-connection identity binding.
+ *
+ * The websocket upgrade already proved the connection holds the hub bearer
+ * token, so the connection itself is the principal. What it must not be able to
+ * do is *name* that principal: `envelope.clientId` arrives from the wire, and
+ * every session/approval/subscription handler authorizes on it. This object
+ * records which client identity the connection registered as, and rewrites
+ * inbound envelopes to that identity so a client cannot act as — or subscribe
+ * on behalf of — anyone else.
+ */
+class ConnectionIdentity {
+	private boundClientId: string | undefined;
+
+	constructor(readonly connectionId: string) {}
+
+	get clientId(): string | undefined {
+		return this.boundClientId;
+	}
+
+	bind(clientId: string): void {
+		this.boundClientId = clientId;
+	}
+
+	release(): void {
+		this.boundClientId = undefined;
+	}
+
+	/**
+	 * Authorize one inbound command frame. Returns the envelope to dispatch, or
+	 * an error reply when the connection is not allowed to issue it.
+	 */
+	authorizeCommand(frame: HubCommandFrame): HubReplyEnvelope | undefined {
+		const claimed = frame.envelope.clientId?.trim() ?? "";
+		if (!this.boundClientId) {
+			if (!PRE_REGISTRATION_COMMANDS.has(frame.envelope.command)) {
+				return commandErrorReply(
+					frame,
+					HUB_UNREGISTERED_CLIENT_ERROR,
+					`Command ${frame.envelope.command} requires a registered client identity on this connection.`,
+				);
+			}
+			return undefined;
+		}
+		if (claimed && claimed !== this.boundClientId) {
+			return commandErrorReply(
+				frame,
+				HUB_CLIENT_ID_MISMATCH_ERROR,
+				`This connection is bound to client ${this.boundClientId} and cannot act as ${claimed}.`,
+			);
+		}
+		if (frame.envelope.clientId !== this.boundClientId) {
+			// Rewrite rather than reject: a client that omits the field is
+			// claiming the identity it already proved, not a different one.
+			frame.envelope.clientId = this.boundClientId;
+		}
+		return undefined;
+	}
+
+	/** Authorize a stream frame and return the client id it may act as. */
+	authorizeStream(frame: HubStreamFrame): string | HubReplyEnvelope {
+		const claimed = frame.clientId?.trim() ?? "";
+		if (!this.boundClientId) {
+			return streamDenial(
+				HUB_UNREGISTERED_CLIENT_ERROR,
+				"Event subscription requires a registered client identity on this connection.",
+			);
+		}
+		if (claimed && claimed !== this.boundClientId) {
+			return streamDenial(
+				HUB_CLIENT_ID_MISMATCH_ERROR,
+				`This connection is bound to client ${this.boundClientId} and cannot subscribe as ${claimed}.`,
+			);
+		}
+		return this.boundClientId;
+	}
+}
+
+/**
+ * Stream frames carry no request id, so a denial is reported with a synthetic
+ * one. Clients correlate denials by error code, not by request id.
+ */
+function streamDenial(code: string, message: string): HubReplyEnvelope {
+	return {
+		version: "v1",
+		requestId: createSessionId("hreq_"),
+		ok: false,
+		error: { code, message },
+	};
+}
+
 export class BrowserWebSocketHubAdapter {
 	constructor(
 		private readonly transport: HubCommandTransport,
 		private readonly telemetry?: ITelemetryService,
 	) {}
 
-	attach(socket: BrowserHubSocketLike): () => void {
+	/**
+	 * Attach one authenticated connection. `connectionId` is the server-issued
+	 * principal for this socket: it is minted by the upgrade path, stamped onto
+	 * every dispatched command, and used to prove a client identity is not shared
+	 * with another live connection.
+	 */
+	attach(socket: BrowserHubSocketLike, connectionId?: string): () => void {
 		const subscriptions = new Map<string, () => void>();
-		const registeredClientIds = new Set<string>();
+		const identity = new ConnectionIdentity(
+			connectionId?.trim() || createSessionId("hconn_"),
+		);
 		let closed = false;
 
 		const sendFrame = (frame: HubTransportFrame): void => {
@@ -86,6 +203,27 @@ export class BrowserWebSocketHubAdapter {
 				const frame = JSON.parse(event.data) as HubTransportFrame;
 				switch (frame.kind) {
 					case "command": {
+						const denied = identity.authorizeCommand(frame);
+						if (denied) {
+							logHubMessage("warn", "command.denied", {
+								...commandLogContext(frame),
+								connectionId: identity.connectionId,
+								errorCode: denied.error?.code,
+							});
+							captureSdkError(this.telemetry, {
+								component: "core",
+								operation: "hub.unauthorized_command",
+								error: new Error(denied.error?.message ?? "Unauthorized"),
+								severity: "warn",
+								handled: true,
+								context: {
+									...commandLogContext(frame),
+									connectionId: identity.connectionId,
+								},
+							});
+							sendFrame({ kind: "reply", envelope: denied });
+							break;
+						}
 						const startedAt = performance.now();
 						let settled = false;
 						const context = commandLogContext(frame);
@@ -97,7 +235,9 @@ export class BrowserWebSocketHubAdapter {
 								elapsedMs: Math.round(performance.now() - startedAt),
 							});
 						}, HUB_COMMAND_SLOW_LOG_MS);
-						const commandPromise = this.transport.command(frame.envelope);
+						const commandPromise = this.transport.command(frame.envelope, {
+							connectionId: identity.connectionId,
+						});
 						commandPromise.then(
 							(lateReply) => {
 								if (!settled) return;
@@ -190,18 +330,16 @@ export class BrowserWebSocketHubAdapter {
 								{}) as unknown as HubClientRegistration;
 							const clientId =
 								registration.clientId?.trim() ||
-								frame.envelope.clientId?.trim();
+								frame.envelope.clientId?.trim() ||
+								(reply.payload as { clientId?: string } | undefined)?.clientId;
 							if (clientId) {
-								registeredClientIds.add(clientId);
+								identity.bind(clientId);
 							}
 						} else if (
 							frame.envelope.command === "client.unregister" &&
 							reply.ok
 						) {
-							const clientId = frame.envelope.clientId?.trim();
-							if (clientId) {
-								registeredClientIds.delete(clientId);
-							}
+							identity.release();
 						}
 						sendFrame({
 							kind: "reply",
@@ -210,6 +348,12 @@ export class BrowserWebSocketHubAdapter {
 						break;
 					}
 					case "stream.subscribe": {
+						const authorized = identity.authorizeStream(frame);
+						if (typeof authorized !== "string") {
+							sendFrame({ kind: "reply", envelope: authorized });
+							break;
+						}
+						frame.clientId = authorized;
 						const key = `${frame.clientId}:${frame.sessionId ?? "*"}`;
 						if (subscriptions.has(key)) {
 							break;
@@ -223,6 +367,12 @@ export class BrowserWebSocketHubAdapter {
 						break;
 					}
 					case "stream.unsubscribe": {
+						const authorized = identity.authorizeStream(frame);
+						if (typeof authorized !== "string") {
+							sendFrame({ kind: "reply", envelope: authorized });
+							break;
+						}
+						frame.clientId = authorized;
 						const key = `${frame.clientId}:${frame.sessionId ?? "*"}`;
 						subscriptions.get(key)?.();
 						subscriptions.delete(key);
@@ -275,14 +425,18 @@ export class BrowserWebSocketHubAdapter {
 				unsubscribe();
 			}
 			subscriptions.clear();
-			for (const clientId of registeredClientIds) {
-				void this.transport.command({
-					version: "v1",
-					command: "client.unregister",
-					clientId,
-				});
+			const clientId = identity.clientId;
+			if (clientId) {
+				void this.transport.command(
+					{
+						version: "v1",
+						command: "client.unregister",
+						clientId,
+					},
+					{ connectionId: identity.connectionId },
+				);
 			}
-			registeredClientIds.clear();
+			identity.release();
 			socket.removeEventListener("message", onMessage);
 			socket.removeEventListener("close", onClose);
 		};

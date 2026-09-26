@@ -30,6 +30,7 @@ import {
 	writeHubDiscovery,
 } from "../discovery";
 import { resolveDefaultHubPort } from "../discovery/defaults";
+import { resolveA2AClientId } from "../discovery/workspace";
 import { BrowserWebSocketHubAdapter } from "./browser-websocket";
 import { logHubBoundaryError } from "./hub-server-logging";
 import type {
@@ -297,8 +298,28 @@ export async function startHubWebSocketServer(
 	const buildId = resolveHubBuildId();
 	const authToken = createHubAuthToken();
 	const a2aBasePath = `/${(options.a2a?.basePath ?? "/a2a").replace(/^\/+|\/+$/g, "")}`;
-	const transport = new HubServerTransport(options);
-	const a2aClientId = `a2a_${randomUUID()}`;
+	const configuredA2AClientId = options.a2a?.clientId?.trim();
+	const a2aClientId =
+		configuredA2AClientId ||
+		resolveA2AClientId(
+			owner,
+			typeof options.a2a?.defaultSessionConfig?.cwd === "string"
+				? options.a2a.defaultSessionConfig.cwd
+				: process.cwd(),
+		);
+	const a2aRecoveryOwner = options.a2a?.recoveryOwner?.trim() || a2aClientId;
+	const transport = new HubServerTransport({
+		...options,
+		...(options.a2a
+			? {
+					a2a: {
+						...options.a2a,
+						clientId: a2aClientId,
+						recoveryOwner: a2aRecoveryOwner,
+					},
+				}
+			: {}),
+	});
 	const a2aHandler =
 		options.a2a?.enabled === true
 			? mountA2AHttpHandler({
@@ -322,6 +343,8 @@ export async function startHubWebSocketServer(
 								version: corePackage.version,
 								url: new URL(a2aBasePath, url.replace(/^ws:/, "http:")).href,
 							},
+							defaultSessionConfig: options.a2a.defaultSessionConfig,
+							recoveryOwner: a2aRecoveryOwner,
 						},
 						{
 							subscribe: (listener, subscriptionOptions) =>
@@ -580,11 +603,17 @@ export async function startHubWebSocketServer(
 						tracked.isAlive = true;
 					});
 					sockets.add(tracked);
-					const detach = adapter.attach(wrapWsSocket(websocket));
+					// The authenticated socket is the principal. Mint the id here
+					// so the same value can be registered as live, handed to the
+					// adapter for identity binding, and released on close.
+					const connectionId = `hconn_${randomUUID()}`;
+					transport.beginConnection(connectionId);
+					const detach = adapter.attach(wrapWsSocket(websocket), connectionId);
 					cleanup.add(detach);
 					websocket.once("close", () => {
 						sockets.delete(tracked);
 						detach();
+						transport.endConnection(connectionId);
 						cleanup.delete(detach);
 					});
 				},

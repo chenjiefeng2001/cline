@@ -1,6 +1,11 @@
 import type { AgentToolContext, HubEventEnvelope } from "@cline/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
+	DurableToolApprovalCoordinator,
+	SqliteDurableToolApprovalStore,
+} from "../../runtime/approval/durable-tool-approval";
+import {
+	RUNTIME_INTERNAL_RECOVERY_OWNER,
 	SessionNotFoundError,
 	type StartSessionInput,
 	type StartSessionResult,
@@ -23,6 +28,9 @@ describe("HubServerTransport boundaries", () => {
 	function createTransport(options: Record<string, unknown> = {}) {
 		const { sessionHost: sessionHostOverride, ...transportOptions } = options;
 		return new HubServerTransport({
+			approvalCoordinator: new DurableToolApprovalCoordinator(
+				new SqliteDurableToolApprovalStore({ dbPath: ":memory:" }),
+			),
 			runtimeHandlers: createLocalHubScheduleRuntimeHandlers(),
 			scheduleOptions: { dbPath: ":memory:" },
 			sessionHost: {
@@ -55,6 +63,233 @@ describe("HubServerTransport boundaries", () => {
 	function getContext(transport: HubServerTransport): HubTransportContext {
 		return (transport as unknown as { ctx: HubTransportContext }).ctx;
 	}
+
+	/**
+	 * Seed live session ownership. Session commands are authorized centrally by
+	 * the ACL table, so a test that is not exercising authorization has to say
+	 * which client owns the session it operates on.
+	 */
+	function ownSession(
+		transport: HubServerTransport,
+		sessionId = "session-1",
+		clientId = "client-1",
+	): void {
+		ensureSessionState(getContext(transport), sessionId, clientId, "creator");
+	}
+
+	it("runs startup recovery before schedules start", async () => {
+		const order: string[] = [];
+		const recovery = vi.fn(async () => {
+			order.push("recovery");
+		});
+		const transport = createTransport({ startupRecovery: recovery });
+		const schedules = (
+			transport as unknown as {
+				schedules: { start: () => Promise<void> };
+			}
+		).schedules;
+		const originalStart = schedules.start.bind(schedules);
+		schedules.start = vi.fn(async () => {
+			order.push("schedules");
+			await originalStart();
+		});
+		try {
+			await transport.start();
+			expect(order).toEqual(["recovery", "schedules"]);
+			expect(recovery).toHaveBeenCalledTimes(1);
+		} finally {
+			await transport.stop();
+		}
+	});
+
+	it("forwards only the internal A2A recovery owner to the runtime", async () => {
+		let captured: StartSessionInput | undefined;
+		const startSession = vi.fn(async (input: StartSessionInput) => {
+			captured = input;
+			return {
+				sessionId: "owner-session",
+				manifest: {
+					version: 1,
+					session_id: "owner-session",
+					source: "a2a",
+					pid: process.pid,
+					started_at: new Date(0).toISOString(),
+					status: "running",
+					interactive: true,
+					provider: "mock",
+					model: "mock",
+					cwd: "/tmp/project",
+					workspace_root: "/tmp/project",
+					enable_tools: true,
+					enable_spawn: false,
+					enable_teams: false,
+				},
+				manifestPath: "",
+				messagesPath: "",
+			} as StartSessionResult;
+		});
+		const transport = createTransport({
+			sessionHost: {
+				startSession,
+				getSession: vi.fn().mockResolvedValue({
+					sessionId: "owner-session",
+					status: "running",
+					startedAt: new Date(0).toISOString(),
+					updatedAt: new Date(0).toISOString(),
+					workspaceRoot: "/tmp/project",
+					cwd: "/tmp/project",
+				}),
+				readSessionMessages: vi.fn().mockResolvedValue([]),
+			} as never,
+		});
+		const payload = {
+			workspaceRoot: "/tmp/project",
+			cwd: "/tmp/project",
+			sessionConfig: { sessionId: "owner-session" },
+			metadata: { source: "a2a" },
+			recoveryOwner: "client-spoofed",
+		} as Record<string, unknown> & {
+			[RUNTIME_INTERNAL_RECOVERY_OWNER]?: string;
+		};
+		payload[RUNTIME_INTERNAL_RECOVERY_OWNER] = "server-owned";
+		const reply = await transport.handleCommand({
+			version: "v1",
+			requestId: "req-owner",
+			command: "session.create",
+			clientId: "a2a-owner",
+			payload,
+		});
+		expect(reply.ok).toBe(true);
+		expect(captured?.[RUNTIME_INTERNAL_RECOVERY_OWNER]).toBe("server-owned");
+		expect(captured?.recoveryOwner).toBeUndefined();
+	});
+
+	it("redacts credentials from every published event payload", () => {
+		const transport = createTransport();
+		const events: HubEventEnvelope[] = [];
+		transport.subscribe("watcher", (event) => events.push(event));
+
+		(
+			transport as unknown as {
+				publish: (event: HubEventEnvelope) => void;
+			}
+		).publish({
+			version: "v1",
+			event: "ui.notify",
+			eventId: "evt_secret",
+			timestamp: Date.now(),
+			payload: {
+				title: "sync",
+				apiKey: "sk-live-abcdefghijklmnop",
+				nested: { password: "hunter2", note: "Bearer abcdef0123456789xyz" },
+			},
+		});
+
+		const published = events.at(-1);
+		expect(published?.payload).toEqual({
+			title: "sync",
+			apiKey: "[REDACTED]",
+			nested: {
+				password: "[REDACTED]",
+				note: "Bearer [REDACTED]",
+			},
+		});
+		// Addressing fields are not data and must survive untouched.
+		expect(published?.event).toBe("ui.notify");
+		expect(published?.eventId).toBe("evt_secret");
+	});
+
+	it("keeps non-credential event payload fields intact", () => {
+		const transport = createTransport();
+		const events: HubEventEnvelope[] = [];
+		transport.subscribe("watcher", (event) => events.push(event));
+
+		(
+			transport as unknown as { publish: (event: HubEventEnvelope) => void }
+		).publish({
+			version: "v1",
+			event: "ui.notify",
+			eventId: "evt_ok",
+			timestamp: Date.now(),
+			payload: { count: 3, ok: true, label: "hello", items: ["a", "b"] },
+		});
+
+		expect(events.at(-1)?.payload).toEqual({
+			count: 3,
+			ok: true,
+			label: "hello",
+			items: ["a", "b"],
+		});
+	});
+
+	it("redacts credentials from the client registry projection", async () => {
+		const transport = createTransport();
+		const ctx = getContext(transport);
+		ctx.clients.set("client-1", {
+			clientId: "client-1",
+			clientType: "core",
+			actorKind: "client",
+			connectedAt: 0,
+			lastSeenAt: 0,
+			transport: "native",
+			capabilities: [],
+			metadata: {
+				workspaceRoot: "/tmp/project",
+				apiKey: "sk-live-abcdefghijklmnop",
+			},
+		});
+
+		const reply = await transport.handleCommand({
+			version: "v1",
+			requestId: "req-client-list",
+			command: "client.list",
+			clientId: "client-1",
+		});
+
+		expect(reply.ok).toBe(true);
+		const clients = (
+			reply.payload as { clients: Array<Record<string, unknown>> }
+		).clients;
+		expect(clients[0]?.metadata).toEqual({
+			workspaceRoot: "/tmp/project",
+			apiKey: "[REDACTED]",
+		});
+	});
+
+	it("redacts credentials from the session record projection", async () => {
+		const transport = createTransport({
+			sessionHost: {
+				getSession: vi.fn().mockResolvedValue({
+					sessionId: "session-1",
+					status: "idle",
+					startedAt: new Date(0).toISOString(),
+					updatedAt: new Date(0).toISOString(),
+					workspaceRoot: "/tmp/project",
+					cwd: "/tmp/project",
+					metadata: {
+						apiKey: "sk-live-abcdefghijklmnop",
+						systemPrompt: "Call with ANTHROPIC_API_KEY=sk-abcdefghijklmnop",
+					},
+				}),
+				listSessions: vi.fn().mockResolvedValue([]),
+			},
+		});
+		ownSession(transport);
+
+		const reply = await transport.handleCommand({
+			version: "v1",
+			requestId: "req-session-get",
+			command: "session.get",
+			clientId: "client-1",
+			sessionId: "session-1",
+		});
+
+		expect(reply.ok).toBe(true);
+		const serialized = JSON.stringify(reply.payload);
+		expect(serialized).not.toContain("sk-live-abcdefghijklmnop");
+		expect(serialized).not.toContain("sk-abcdefghijklmnop");
+		expect(serialized).toContain("[REDACTED]");
+	});
 
 	it("continues publishing when one listener throws", () => {
 		const transport = createTransport();
@@ -255,6 +490,50 @@ describe("HubServerTransport boundaries", () => {
 		});
 	});
 
+	it("includes a redacted pending approval descriptor on session.get", async () => {
+		const listPending = vi.fn().mockResolvedValue([
+			{
+				approvalId: "approval-1",
+				toolCallId: "call-1",
+				toolName: "run_commands",
+				expiresAt: 1234,
+				inputJson: '{"secret":"do-not-project"}',
+			},
+		]);
+		const transport = createTransport({
+			approvalCoordinator: { listPending } as never,
+			sessionHost: {
+				getSession: vi.fn().mockResolvedValue({
+					sessionId: "session-approval",
+					status: "running",
+					startedAt: new Date(0).toISOString(),
+					updatedAt: new Date(0).toISOString(),
+					workspaceRoot: "/tmp/project",
+					cwd: "/tmp/project",
+				}),
+			} as never,
+		});
+		const reply = await transport.handleCommand({
+			version: "v1",
+			requestId: "req-approval",
+			command: "session.get",
+			sessionId: "session-approval",
+		});
+		expect(listPending).toHaveBeenCalledWith("session-approval");
+		expect(reply).toMatchObject({
+			payload: {
+				pendingApproval: true,
+				approval: {
+					approvalId: "approval-1",
+					toolCallId: "call-1",
+					toolName: "run_commands",
+					expiresAt: 1234,
+				},
+			},
+		});
+		expect(JSON.stringify(reply)).not.toContain("do-not-project");
+	});
+
 	it("returns session_not_found when session messages are requested for an unknown session", async () => {
 		const readMessages = vi.fn().mockResolvedValue([]);
 		const telemetry = { capture: vi.fn() };
@@ -381,7 +660,10 @@ describe("HubServerTransport boundaries", () => {
 	it("keeps interactive approval requests pending until a response arrives", async () => {
 		vi.useFakeTimers();
 		try {
-			const transport = createTransport();
+			const recoverPendingRunContinuations = vi.fn().mockResolvedValue({});
+			const transport = createTransport({
+				sessionHost: { recoverPendingRunContinuations } as never,
+			});
 			const events: HubEventEnvelope[] = [];
 			let approvalId = "";
 			transport.subscribe("test", (event) => {
@@ -430,6 +712,8 @@ describe("HubServerTransport boundaries", () => {
 				version: "v1",
 				requestId: "req-1",
 				command: "approval.respond",
+				clientId: "client-1",
+				sessionId: "session-1",
 				payload: {
 					approvalId,
 					approved: true,
@@ -442,9 +726,217 @@ describe("HubServerTransport boundaries", () => {
 				approved: true,
 				reason: "approved by user",
 			});
+			expect(recoverPendingRunContinuations).toHaveBeenCalledWith({
+				background: true,
+				maxCandidates: 1,
+				sessionId: "session-1",
+			});
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("enforces the approval client and replays pending requests on attach", async () => {
+		const transport = createTransport();
+		const ctx = getContext(transport);
+		const events: HubEventEnvelope[] = [];
+		let approvalId = "";
+		let resolveRequested: (() => void) | undefined;
+		const requested = new Promise<void>((resolve) => {
+			resolveRequested = resolve;
+		});
+		transport.subscribe("test", (event) => {
+			events.push(event);
+			if (event.event === "approval.requested") {
+				approvalId = String(event.payload?.approvalId ?? "");
+				resolveRequested?.();
+			}
+		});
+		ensureSessionState(ctx, "session-1", "client-1", "creator", {
+			interactive: true,
+		});
+		const resultPromise = requestToolApproval(ctx, {
+			sessionId: "session-1",
+			agentId: "agent-1",
+			conversationId: "conversation-1",
+			runId: "run-approval",
+			iteration: 1,
+			toolCallIndex: 0,
+			toolCallId: "call-approval-auth",
+			toolName: "write_file",
+			input: { path: "a.txt" },
+			policy: { autoApprove: false },
+		});
+		await requested;
+		const wrongClient = await handleApprovalRespond(ctx, {
+			version: "v1",
+			requestId: "req-wrong-client",
+			command: "approval.respond",
+			clientId: "client-2",
+			sessionId: "session-1",
+			payload: { approvalId, approved: true },
+		});
+		expect(wrongClient).toMatchObject({
+			ok: false,
+			error: { code: "approval_wrong_client" },
+		});
+		await transport.handleCommand({
+			version: "v1",
+			requestId: "req-attach-approval",
+			command: "session.attach",
+			clientId: "client-1",
+			sessionId: "session-1",
+		});
+		expect(
+			events.filter(
+				(event) =>
+					event.event === "approval.requested" &&
+					event.payload?.approvalId === approvalId,
+			),
+		).toHaveLength(2);
+		const accepted = await handleApprovalRespond(ctx, {
+			version: "v1",
+			requestId: "req-right-client",
+			command: "approval.respond",
+			clientId: "client-1",
+			sessionId: "session-1",
+			payload: { approvalId, approved: true },
+		});
+		expect(accepted).toMatchObject({ ok: true });
+		await expect(resultPromise).resolves.toEqual({ approved: true });
+	});
+
+	it("preserves pending approvals across a clean hub shutdown", async () => {
+		const transport = createTransport();
+		const ctx = getContext(transport);
+		let resolveRequested: (() => void) | undefined;
+		const requested = new Promise<void>((resolve) => {
+			resolveRequested = resolve;
+		});
+		transport.subscribe("test", (event) => {
+			if (event.event === "approval.requested") {
+				resolveRequested?.();
+			}
+		});
+		ensureSessionState(ctx, "session-1", "client-1", "creator", {
+			interactive: true,
+		});
+		const resultPromise = requestToolApproval(ctx, {
+			sessionId: "session-1",
+			agentId: "agent-1",
+			conversationId: "conversation-1",
+			runId: "run-shutdown",
+			iteration: 1,
+			toolCallIndex: 0,
+			toolCallId: "call-shutdown",
+			toolName: "write_file",
+			input: { path: "a.txt" },
+			policy: { autoApprove: false },
+		});
+		await requested;
+		await transport.stop();
+		await expect(resultPromise).resolves.toMatchObject({ approved: false });
+		const coordinator = ctx.approvalCoordinator;
+		expect(coordinator).toBeDefined();
+		await expect(coordinator?.listPending("session-1")).resolves.toHaveLength(
+			1,
+		);
+		await coordinator?.close();
+	});
+
+	it("routes durable run resume through the execution host", async () => {
+		const resumePendingRun = vi.fn().mockResolvedValue({
+			record: { phase: "completed" },
+		});
+		const transport = createTransport({
+			sessionHost: { resumePendingRun },
+		});
+		ownSession(transport);
+		const reply = await transport.handleCommand({
+			version: "v1",
+			requestId: "req-resume",
+			command: "session.resume",
+			clientId: "client-1",
+			sessionId: "session-1",
+			payload: {
+				continuationKey: "approval:approval-1",
+				start: { config: { providerId: "mock", modelId: "mock" } },
+			},
+		});
+
+		expect(reply).toMatchObject({
+			ok: true,
+			payload: { result: { record: { phase: "completed" } } },
+		});
+		expect(resumePendingRun).toHaveBeenCalledWith(
+			expect.objectContaining({
+				continuationKey: "approval:approval-1",
+				start: expect.objectContaining({
+					config: expect.objectContaining({ sessionId: "session-1" }),
+				}),
+			}),
+		);
+	});
+
+	it("routes a durable run batch resume through the execution host", async () => {
+		const resumePendingRunBatch = vi.fn().mockResolvedValue({
+			records: [{ phase: "completed" }],
+		});
+		const resumePendingRun = vi.fn();
+		const transport = createTransport({
+			sessionHost: { resumePendingRun, resumePendingRunBatch },
+		});
+		ownSession(transport);
+		const reply = await transport.handleCommand({
+			version: "v1",
+			requestId: "req-resume-batch",
+			command: "session.resume",
+			clientId: "client-1",
+			sessionId: "session-1",
+			payload: {
+				continuationKeys: ["approval:approval-1", "approval:approval-2"],
+				start: { config: { providerId: "mock", modelId: "mock" } },
+			},
+		});
+
+		expect(reply).toMatchObject({
+			ok: true,
+			payload: { result: { records: [{ phase: "completed" }] } },
+		});
+		expect(resumePendingRun).not.toHaveBeenCalled();
+		expect(resumePendingRunBatch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				continuationKeys: ["approval:approval-1", "approval:approval-2"],
+				start: expect.objectContaining({
+					config: expect.objectContaining({ sessionId: "session-1" }),
+				}),
+			}),
+		);
+	});
+
+	it("rejects a batch resume when the host does not support it", async () => {
+		const resumePendingRun = vi.fn();
+		const transport = createTransport({
+			sessionHost: { resumePendingRun },
+		});
+		ownSession(transport);
+		const reply = await transport.handleCommand({
+			version: "v1",
+			requestId: "req-resume-batch-unsupported",
+			command: "session.resume",
+			clientId: "client-1",
+			sessionId: "session-1",
+			payload: {
+				continuationKeys: ["approval:approval-1", "approval:approval-2"],
+				start: { config: { providerId: "mock", modelId: "mock" } },
+			},
+		});
+
+		expect(reply).toMatchObject({
+			ok: false,
+			error: { code: "session_resume_unavailable" },
+		});
+		expect(resumePendingRun).not.toHaveBeenCalled();
 	});
 
 	it("rejects pending tool approvals when a run is aborted", async () => {
@@ -806,6 +1298,9 @@ describe("HubServerTransport boundaries", () => {
 				updateSession,
 			},
 		});
+		// The caller owns the session: this test is about the metadata sanitizer,
+		// not about authorization (which `session-access` covers separately).
+		ownSession(transport, "session-1", "attacker-client");
 
 		await transport.handleCommand({
 			version: "v1",
@@ -1258,6 +1753,7 @@ describe("HubServerTransport boundaries", () => {
 		});
 		const events: HubEventEnvelope[] = [];
 		transport.subscribe("client-1", (event) => events.push(event));
+		ownSession(transport, "stale-session");
 
 		const reply = await transport.handleCommand({
 			version: "v1",
