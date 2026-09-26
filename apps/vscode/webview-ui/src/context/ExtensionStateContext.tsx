@@ -21,7 +21,6 @@ import {
 } from "../../../src/shared/api"
 import { Environment } from "../../../src/shared/config-types"
 import type { McpServer, McpViewTab } from "../../../src/shared/mcp"
-import { PLATFORM_CONFIG } from "../config/platform.config"
 import {
 	createReplicaState,
 	type ReplicaState,
@@ -29,6 +28,7 @@ import {
 	applyMessage as reducerApplyMessage,
 	applyStateSnapshot as reducerApplyStateSnapshot,
 } from "../components/chat/chat-view/messageReducer"
+import { PLATFORM_CONFIG } from "../config/platform.config"
 import {
 	McpServiceClient,
 	ModelsServiceClient,
@@ -93,6 +93,17 @@ export interface ExtensionStateContextType
 		"clineMessages" | "turnState" | "messageTruncated" | "totalMessageCount" | "epoch" | "stateVersion"
 	> {
 	didHydrateState: boolean
+	/**
+	 * True once the initial state snapshot has not arrived within
+	 * HYDRATION_TIMEOUT_MS. The UI surfaces this instead of rendering nothing,
+	 * because an unhydrated webview used to be indistinguishable from a broken
+	 * one: App returned null, so a dropped or oversized first frame left a blank
+	 * panel with no error, no spinner, and no way to recover short of reloading
+	 * the window.
+	 */
+	hydrationTimedOut: boolean
+	/** Re-request the full state snapshot after a hydration timeout. */
+	retryHydration: () => void
 	showWelcome: boolean
 	onboardingModels: OnboardingModelGroup | undefined
 	openRouterModels: Record<string, ModelInfo>
@@ -188,6 +199,13 @@ export interface ExtensionStateContextType
 }
 
 export const ExtensionStateContext = createContext<ExtensionStateContextType | undefined>(undefined)
+
+/**
+ * How long to wait for the first state snapshot before telling the user that
+ * hydration failed. Generous enough that a cold extension host on a large
+ * workspace does not trip it, short enough that a stuck load is obvious.
+ */
+const HYDRATION_TIMEOUT_MS = 12_000
 
 export const ExtensionStateContextProvider: React.FC<{
 	children: React.ReactNode
@@ -376,6 +394,7 @@ export const ExtensionStateContextProvider: React.FC<{
 	})
 	const [expandTaskHeader, setExpandTaskHeader] = useState(true)
 	const [didHydrateState, setDidHydrateState] = useState(false)
+	const [hydrationTimedOut, setHydrationTimedOut] = useState(false)
 
 	const [showWelcome, setShowWelcome] = useState(false)
 	const [onboardingModels, setOnboardingModels] = useState<OnboardingModelGroup | undefined>(undefined)
@@ -567,6 +586,7 @@ export const ExtensionStateContextProvider: React.FC<{
 									setOnboardingModels(undefined)
 								}
 								setDidHydrateState(true)
+								setHydrationTimedOut(false)
 								return newState
 							})
 							lastSnapshotVersionRef.current = Math.max(lastSnapshotVersionRef.current, incomingStateVersion)
@@ -589,6 +609,40 @@ export const ExtensionStateContextProvider: React.FC<{
 			})
 		}, delay)
 	}, [showWelcome])
+
+	/**
+	 * Hydration watchdog. Without it, any failure to deliver the FIRST snapshot
+	 * (oversized frame dropped by the transport, host still booting, a race on
+	 * webview re-creation) left `didHydrateState` false forever, and App rendered
+	 * null - a blank panel with no error and no recovery.
+	 */
+	const retryHydration = useCallback(() => {
+		console.warn("[ExtensionState] Retrying state hydration")
+		setHydrationTimedOut(false)
+		fullSyncRetryCountRef.current = 0
+		// Tear the current stream down first so the retry is a fresh subscription
+		// rather than a second listener competing for the same frames.
+		stateSubscriptionRef.current?.()
+		stateSubscriptionRef.current = null
+		requestFullSync()
+	}, [requestFullSync])
+
+	useEffect(() => {
+		if (didHydrateState) {
+			return
+		}
+		const handle = setTimeout(() => {
+			if (didHydrateState) {
+				return
+			}
+			console.error(
+				`[ExtensionState] No state snapshot within ${HYDRATION_TIMEOUT_MS}ms; the webview would render blank. Requesting a full sync.`,
+			)
+			setHydrationTimedOut(true)
+			retryHydration()
+		}, HYDRATION_TIMEOUT_MS)
+		return () => clearTimeout(handle)
+	}, [didHydrateState, retryHydration])
 
 	// References to store subscription cancellation functions
 	const stateSubscriptionRef = useRef<(() => void) | null>(null)
@@ -833,6 +887,7 @@ export const ExtensionStateContextProvider: React.FC<{
 							}
 
 							setDidHydrateState(true)
+							setHydrationTimedOut(false)
 
 							return newState
 						})
@@ -1331,6 +1386,8 @@ export const ExtensionStateContextProvider: React.FC<{
 	const contextValue: ExtensionStateContextType = {
 		...state,
 		didHydrateState,
+		hydrationTimedOut,
+		retryHydration,
 		showWelcome,
 		onboardingModels,
 		openRouterModels,

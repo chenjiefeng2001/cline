@@ -2,6 +2,7 @@ import type { Boolean, EmptyRequest } from "@shared/proto/cline/common"
 import { useCallback, useEffect } from "react"
 import AccountView from "./components/account/AccountView"
 import ChatView from "./components/chat/ChatView"
+import HydrationGate from "./components/common/HydrationGate"
 import HistoryView from "./components/history/HistoryView"
 import MarketplaceView from "./components/marketplace/MarketplaceView"
 import McpView from "./components/mcp/configuration/McpConfigurationView"
@@ -68,8 +69,10 @@ const AppContent = () => {
 		}
 	}, [clineUser?.uid, clineUser?.appBaseUrl])
 
+	// Never render nothing: an unhydrated webview used to `return null`, which made
+	// a dropped first state frame look identical to a broken extension.
 	if (!didHydrateState) {
-		return null
+		return <HydrationGate />
 	}
 
 	if (showWelcome) {
