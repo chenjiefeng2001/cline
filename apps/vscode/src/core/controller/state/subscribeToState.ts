@@ -125,6 +125,13 @@ function truncateStateForIpc(state: ExtensionState, maxMessages?: number): Exten
  * Fields kept when even the halved payload is still over the limit. This is a
  * fixed-size allowlist on purpose: it is the only way to *guarantee* the
  * payload fits, since any pass-through field could in principle be huge.
+ *
+ * turnState / currentTaskItem / queuedPrompts are NOT optional here. turnState
+ * is the authoritative UI mode the footer buttons and the input gate read
+ * (see buttonsForPhase), and currentTaskItem is the active task handle. Drop
+ * either and the webview cannot tell a finished turn from an in-flight one, so
+ * the input stays disabled and the conversation cannot be continued - a
+ * degraded payload must never be able to strand the UI.
  */
 const STATE_SIZE_FLOOR_FIELDS = [
 	"version",
@@ -158,6 +165,9 @@ const STATE_SIZE_FLOOR_FIELDS = [
 	"epoch",
 	"messageTruncated",
 	"totalMessageCount",
+	"turnState",
+	"currentTaskItem",
+	"queuedPrompts",
 ] as const satisfies readonly (keyof ExtensionState)[]
 
 /**

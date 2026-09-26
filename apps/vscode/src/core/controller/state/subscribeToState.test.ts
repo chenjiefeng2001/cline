@@ -136,4 +136,36 @@ describe("subscribeToState state-size guard", () => {
 		expect(parsed.version).toBe("3.4.9")
 		expect(parsed.mode).toBe("act")
 	})
+
+	it("keeps turnState and currentTaskItem in the reduced skeleton", async () => {
+		// Regression guard: an earlier allowlist omitted these. The webview reads
+		// turnState.phase as the authoritative UI mode (buttonsForPhase) and
+		// currentTaskItem as the active task handle, so losing either strands the
+		// UI - input disabled, buttons dead, conversation not continuable - which
+		// is strictly worse than a shorter transcript.
+		const state = baseState({
+			version: "3.4.9",
+			clineMessages: Array.from({ length: 200 }, (_, i) => bigMessage(i, 5_000)),
+			turnState: { phase: "awaiting_approval", seq: 12, anchorTs: 1_700_000_000_000 },
+			currentTaskItem: {
+				id: "task-abc",
+				ts: 1_700_000_000_000,
+				task: "a long conversation",
+				tokensIn: 1,
+				tokensOut: 1,
+				totalCost: 0,
+			},
+			queuedPrompts: [{ id: "q1", prompt: "queued one", delivery: "queue", attachmentCount: 0 }],
+			remoteConfigSettings: { blob: "R".repeat(3 * STATE_SIZE_HARD_LIMIT) } as never,
+		})
+
+		const { stateJson } = await captureStatePayload(state)
+		const parsed = JSON.parse(stateJson) as Record<string, unknown>
+		console.log(`  skeleton turnState=${JSON.stringify(parsed.turnState)}`)
+		console.log(`  skeleton currentTaskItem=${JSON.stringify(parsed.currentTaskItem)}`)
+
+		expect(parsed.turnState).toMatchObject({ phase: "awaiting_approval", seq: 12 })
+		expect(parsed.currentTaskItem).toMatchObject({ id: "task-abc" })
+		expect(parsed.queuedPrompts).toHaveLength(1)
+	})
 })
