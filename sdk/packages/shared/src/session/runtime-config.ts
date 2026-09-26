@@ -1,3 +1,4 @@
+import type { AgentRunBudget } from "../agents/types";
 import type { ToolPolicy } from "../llms/tools";
 
 export type AgentMode = "act" | "plan" | "yolo" | "zen";
@@ -52,6 +53,12 @@ export interface SessionPromptConfig {
 	systemPrompt?: string;
 	rules?: string;
 	maxIterations?: number;
+	/**
+	 * Cumulative token/cost guardrails for each run of this session. When a cap
+	 * is reached the runtime finishes the in-flight turn and stops with
+	 * `budget_exhausted` instead of issuing another model request.
+	 */
+	budget?: AgentRunBudget;
 }
 
 export interface SessionWorkspaceConfig {
@@ -66,4 +73,10 @@ export interface SessionExecutionConfig {
 	missionLogIntervalMs?: number;
 	maxConsecutiveMistakes?: number;
 	toolPolicies?: Record<string, ToolPolicy>;
+	/**
+	 * Maximum number of tool calls executed concurrently within one assistant
+	 * turn. `1` (or omitted) keeps tool execution sequential; `2` or more
+	 * enables parallel tool execution.
+	 */
+	maxParallelToolCalls?: number;
 }

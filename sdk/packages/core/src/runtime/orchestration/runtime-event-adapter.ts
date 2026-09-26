@@ -122,11 +122,13 @@ function textFromMessage(message: AgentMessage | undefined): string {
 }
 
 function statusToLegacyFinishReason(
-	status: "completed" | "aborted" | "failed",
+	status: "completed" | "budget_exhausted" | "aborted" | "failed",
 ): AgentFinishReason {
 	switch (status) {
 		case "completed":
 			return "completed";
+		case "budget_exhausted":
+			return "budget_exhausted";
 		case "aborted":
 			return "aborted";
 		case "failed":
@@ -370,7 +372,7 @@ export class RuntimeEventAdapter {
 	}
 
 	private translateRunFinished(result: {
-		status: "completed" | "aborted" | "failed";
+		status: "completed" | "budget_exhausted" | "aborted" | "failed";
 		outputText: string;
 		iterations: number;
 		usage: AgentUsage;

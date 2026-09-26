@@ -137,6 +137,7 @@ describe("createAgentRuntimeConfig", () => {
 			thinking: true,
 			reasoningEffort: "high",
 			maxIterations: 7,
+			budget: { maxTotalCost: 3 },
 			maxParallelToolCalls: 4,
 			completionPolicy: { requireCompletionTool: true },
 			toolPolicies: { "*": { autoApprove: false } },
@@ -177,7 +178,9 @@ describe("createAgentRuntimeConfig", () => {
 		});
 		expect(runtimeConfig.tools).toBe(tools);
 		expect(runtimeConfig.maxIterations).toBe(7);
+		expect(runtimeConfig.budget).toEqual({ maxTotalCost: 3 });
 		expect(runtimeConfig.toolExecution).toBe("parallel");
+		expect(runtimeConfig.maxParallelToolCalls).toBe(4);
 		expect(runtimeConfig.completionPolicy).toEqual({
 			requireCompletionTool: true,
 		});

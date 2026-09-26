@@ -39,6 +39,7 @@ export interface CreateAgentRuntimeConfigInput {
 	 * event routing, persistence, and approval delivery.
 	 */
 	readonly sessionId?: string;
+	readonly runId?: string;
 	readonly agentId: string;
 	/**
 	 * Agent conversation/transcript identifier used by tools, hooks, telemetry,
@@ -46,6 +47,12 @@ export interface CreateAgentRuntimeConfigInput {
 	 */
 	readonly conversationId?: string;
 	readonly parentAgentId?: string;
+	/**
+	 * Run that owns this agent's chain. Only set for delegated agents; a root
+	 * agent's own run id changes per run, so the root run id is only stable for
+	 * a delegated chain.
+	 */
+	readonly rootRunId?: string;
 	/** The role label for teammates (`AgentConfig.role` in sub-agent configs). */
 	readonly agentRole?: string;
 	/** Pre-built model adapter (produced by `apiHandlerToAgentModel`). */
@@ -92,9 +99,11 @@ export function createAgentRuntimeConfig(
 
 	const config: AgentRuntimeConfig = {
 		sessionId: input.sessionId ?? agentConfig.sessionId,
+		runId: input.runId,
 		agentId: input.agentId,
 		conversationId: input.conversationId,
 		parentAgentId: input.parentAgentId,
+		rootRunId: input.rootRunId ?? agentConfig.rootRunId,
 		agentRole: input.agentRole,
 		systemPrompt: input.systemPrompt ?? agentConfig.systemPrompt,
 		messageModelInfo,
@@ -110,7 +119,9 @@ export function createAgentRuntimeConfig(
 		initialMessages: input.initialMessages,
 		completionPolicy: agentConfig.completionPolicy,
 		maxIterations: agentConfig.maxIterations,
+		budget: agentConfig.budget,
 		toolExecution,
+		maxParallelToolCalls: agentConfig.maxParallelToolCalls,
 		toolPolicies: agentConfig.toolPolicies,
 		toolContextMetadata: input.toolContextMetadata,
 		requestToolApproval: agentConfig.requestToolApproval,

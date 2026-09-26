@@ -174,6 +174,9 @@ export function shouldAutoContinueTeamRuns(
 	if (session.aborting) {
 		return false;
 	}
+	// A budget-exhausted lead must not auto-continue team runs: the run stopped
+	// precisely because it could not pay for another model call, so continuing
+	// would silently overspend the cap that stopped it.
 	const canAutoContinue =
 		finishReason === "completed" || finishReason === "max_iterations";
 	if (!canAutoContinue) {
