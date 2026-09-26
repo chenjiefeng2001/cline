@@ -138,6 +138,261 @@ runs not using the yolo preset still produce a `task.completed` signal.
 Each session emits at most one `task.completed`. See `DOC.md` for the
 event payload and `source` field.
 
+### Hub connection identity
+
+The websocket upgrade authenticates the *connection* (bearer token, or a
+loopback-origin allowance), but every command envelope also carries a
+`clientId`, and the whole hub authorizes on that value. A server-issued
+connection principal closes the gap between those two facts.
+
+Each accepted socket is assigned an unguessable `connectionId` at upgrade time.
+`BrowserWebSocketHubAdapter` binds that connection to the first client identity
+it successfully registers, and from then on:
+
+- any command other than `client.register` is refused with
+  `hub_unregistered_client`;
+- a command whose `envelope.clientId` names a different identity is refused
+  with `hub_client_id_mismatch`;
+- a command that omits `clientId` has the bound identity stamped onto it, so
+  downstream handlers keep reading one field;
+- `stream.subscribe` / `stream.unsubscribe` are subject to the same check, so a
+  client cannot subscribe to another client's session events.
+
+The connection id is also recorded as server-owned provenance on the client
+record (`metadata.connectionId`, never client-supplied), which lets
+`client.register` refuse to hand a live identity to a second connection
+(`hub_client_id_taken`). An identity whose owning connection has gone away is
+reclaimable, so an abrupt disconnect cannot permanently lock a client out of its
+own id on reconnect. In-process callers (the A2A mount, tests) supply no
+connection id and stay trusted, because they never cross a network boundary.
+
+A client identity is still just an identity: it does not by itself grant access
+to a session it does not own. See the session ACL note below for what is and is
+not enforced there.
+
+## Hub session ACL
+
+> **Integrator contract — daemon restart.** Session *records* survive a daemon
+> restart and stay readable, but **authority does not**. Ownership and
+> participation live only in the daemon's in-memory `sessionState`, because
+> session metadata is client-writable and a persisted owner claim could be
+> replayed by any client. After a restart an existing session therefore has no
+> provable owner: reads succeed, every write is refused with
+> `session_wrong_client`, and the client re-establishes authority by issuing
+> `session.create` (which may target the same session id). Do not build an
+> integration that assumes a session you merely read is one you may drive.
+
+Session ownership (`createdByClientId`) and participants have always been
+modelled, but only the two compaction handlers ever checked them, so any
+registered client could delete, resume, reconfigure, or drive another client's
+session. Authorization is now a single table in
+`hub/server/handlers/session-access.ts`, checked once in `dispatchCommand`
+before any handler runs, so it cannot drift per handler again.
+
+Commands declare the authority they need:
+
+| Access | Commands |
+|---|---|
+| `own` | `session.delete`, `session.resume`, `session.update`, `session.update_connection`, `session.compaction.get`, `session.compaction.update`, `session.update_pending_prompt`, `session.remove_pending_prompt` |
+| `write` | `run.start`, `session.send_input`, `run.abort`, `session.restore`, `session.hook` |
+| `read` | `session.get`, `session.list`, `session.messages`, `session.attach`, `session.detach`, `session.pending_prompts` |
+
+`own` is the owner alone, `write` is the owner or a `participant`, and `read` is
+open to any client with an identity so a UI can watch a session it did not
+create. Two properties matter:
+
+- **Attaching never grants authority.** `session.attach` registers the caller as
+  an `observer`, so it cannot be used to escalate to `write` or to pick up
+  capability ownership. Ownership is only ever set by `session.create`.
+- **Ownership is live state, not metadata.** Session metadata is client-writable,
+  so a persisted owner claim could be replayed; ownership lives only in
+  `ctx.sessionState`. A session whose state was lost (daemon restart) therefore
+  has no provable owner: reads stay open, writes are refused, and the client
+  re-establishes authority through `session.create`.
+
+A command envelope with no `clientId` is treated as an in-process caller (the
+A2A mount, internal handlers). Remote callers can never reach that branch: the
+connection principal refuses unregistered commands and stamps the bound identity
+on every frame it forwards.
+
+## Hub credential and file boundaries
+
+**Attached user files are confined to the session workspace.** `userFiles`
+arrives from a client and used to be read straight off disk, so a remote client
+could attach any path the daemon could read — `/etc/shadow`, an SSH private key —
+and have the contents injected into the model context. Containment now lives at
+the read, in `loadUserFileContent`, and the host injects it with the session's
+`workspaceRoot`. The check resolves `realpath` on both sides, so it defeats
+`..` traversal, an absolute path elsewhere, *and* a symlink planted inside the
+workspace that points out of it; a workspace reached through a symlink compares
+correctly too. A rejection is surfaced as `UserFileOutsideWorkspaceError` so it
+is distinguishable from a missing file, and degrades to a per-file
+`Error fetching content` block rather than failing the whole turn. Callers that
+own their own trust boundary can still omit the root and keep the unconfined
+behavior.
+
+**Credential redaction is applied to projections, at the choke points.**
+Auditing each projection separately is how a leak comes back, so redaction is
+enforced where data is broadcast rather than where it is produced:
+`HubServerTransport.publish` (every event payload), the session-record
+projection (metadata and system prompt), and the client-registry projection
+(`client.list` metadata). Two mechanisms combine: a value under a
+credential-ish key is masked wholesale, which does not depend on recognizing a
+secret's shape, and free-form strings are scanned for `Bearer …`, `key=value`,
+and known provider key shapes. Only the projection is redacted — nothing here
+changes what is persisted or what a provider request uses, so it cannot break a
+call. Class instances are dropped rather than enumerated, depth and array length
+are bounded, and event addressing fields (name, ids, session id) are not data and
+pass through untouched.
+
+### Durable Tool Effects
+
+`AgentRuntime` enforces an optional per-run budget (`AgentRunBudget`) in addition
+to the turn cap. The budget is a **pre-request stop gate**, not a reservation:
+cumulative input tokens, output tokens, their sum, and provider cost are compared
+against the configured caps before each model request, and the run that reached a
+cap finishes its in-flight turn — so every tool call still receives a tool result
+and the transcript stays valid — then ends with the controlled
+`budget_exhausted` status instead of a thrown error. A structured
+`status-notice` with the reached limit, cap, and usage is emitted so hosts and
+UIs can explain the stop. Caps are validated once at construction: a non-finite,
+zero, negative, or unknown field fails fast rather than degrading into an
+unbounded run, and a budget with no caps set is simply absent. `budget_exhausted`
+is deliberately excluded from team auto-continue, because continuing would issue
+exactly the model call the budget refused to pay for. The budget is recorded in
+the durable recovery state, so a replayed continuation keeps the guardrail that
+stopped the original run. Budgets are per run, not per session, and are not yet
+pooled across a delegated agent chain.
+
+`LocalRuntimeHost` owns one SQLite-backed Effect Ledger for its execution
+scope. `SessionRuntimeOrchestrator` wraps the final per-turn tool set rather
+than mutating the configured tools, so extension tools and tools added later
+in the session receive the same protection. The same wrapper is propagated to
+configured sub-agents, spawned sub-agents, and teammates.
+
+A tool step is keyed by session, durable run id, loop iteration, tool name,
+call ordinal within the model response, and a stable hash of its input. The run
+id is stored in checkpoint metadata and reused only by the first run of that
+checkpoint restore; later turns receive new ids. Provider-generated tool-call
+ids are audit metadata rather than part of the durable key, allowing a restored
+model call to receive a new provider id without bypassing a recorded outcome.
+The key still assumes the restored model preserves the logical call ordering
+and input; a divergent path requires a durable application-level idempotency
+key.
+
+Claims use an immediate SQLite transaction. Only one owner receives a lease
+token; completion is fenced by that token. An expired pending lease becomes
+`in_doubt` and is never executed automatically. Thrown tool errors are also
+`in_doubt` by default; only tools explicitly marked `retryable` can produce a
+safe `failed` outcome that permits another attempt. Structured unsuccessful
+results, including mixed result arrays, are not recorded as successful effects.
+
+Checkpoint restore re-keys all source-session effects before workspace mutation
+and before the restored session can execute its optional prompt. Succeeded
+effects replay, pending/in-doubt effects remain blocked, and explicitly failed
+effects may be retried. Active source sessions cannot be restored. Hub restore
+delegates to the execution host, and the detached daemon shares one
+`LocalRuntimeHost` between hub sessions and scheduled runs.
+
+Durable approval state is stored by the core-owned `DurableToolApprovalCoordinator`
+in a SQLite `approvals.db` beside the execution data. Each request is keyed by
+session, durable run id, iteration, tool name, call ordinal, and input hash.
+The store persists the request payload, policy, target/decision principal,
+status, expiry, and decision reason. `pending` requests are atomically decided
+once; expiry, abort, run cancellation, and session deletion become terminal
+states. The local host and hub transport share one coordinator instance, and
+`session.attach` republishes pending requests to the assigned client after a
+reconnect. Hub clients that need reconnect recovery should configure a stable
+`clientId`. A durable approval decision is separate from resumable run state. The MVP
+continuation journal is `continuations.db`; it records the exact prepared input,
+assistant-message boundary, approval id, phase, lease, and a versioned local
+recovery snapshot. The snapshot stores only bounded server-runtime selectors
+(`configExtensions` for rules/skills/workflows and a skills allowlist) plus an
+aggregate SHA-256 source reference, never source contents or paths; it omits
+API keys, provider credentials, raw callbacks, and client capability payloads.
+ The continuation schema also stores a strict versioned `RunState` JSON
+ manifest alongside the legacy snapshot. It contains a safe resume cursor
+ (including the stable `stepId` for that pending call), transcript/config
+ fingerprints, and bounded reconstruction selectors, but not
+ raw tool input, transcript bodies, source content, secrets, callbacks, or
+ process objects. The resume cursor is a versioned union: `tool_call` describes a
+ single pending step, and `tool_call_batch` describes a whole assistant turn as an
+ ordered, duplicate-free `steps` list with contiguous call ordinals. The host
+ writes the turn-level cursor on the last continuation of a sequential turn, once
+ every tool call of the persisted assistant message has a durable record, and
+ keeps the per-step cursor while a turn is still incomplete. `RunState` also
+  carries a serializable `agent` block (`agentId`, and for delegated runs the
+  `parentAgentId`/`rootRunId`), so a resume can prove it rebuilds the same agent
+  identity instead of trusting the caller's start input; a continuation whose
+  agent block names a parent agent is refused until the agent chain itself is
+  rebuildable. The continuation record also stores the requesting agent's chain in
+  its own `agent_chain_json` column, so the refusal does not depend on a run state
+  being present at all. Explicit resume prefers
+ valid `RunState`, falls back to the legacy snapshot, and rejects identity,
+ step-identity, agent-identity, or transcript drift. A batch resume additionally
+ requires the recorded cursor to cover exactly the replayed continuations in
+ persisted order and to match the persisted assistant turn (same message, same
+ tool-call count, same call order); the same transcript proof guards a
+ single-step resume, so replaying one call of a multi-tool turn is refused before
+ any lease is claimed. The detached daemon runs a bounded
+
+ startup scan before schedules and listener publication, but only resumes a
+ single, root, decided, server-owned built-in tool when the persisted
+ session has the exact stale-process marker and the transcript/config identity
+ still matches. The snapshot and `RunState` persist the session's real
+ tool-execution mode, and `LocalRuntimeHost` forwards `maxParallelToolCalls`
+ into the agent config, so a replayed session keeps the recorded mode instead of
+ silently degrading to sequential execution. A one-call turn replays identically
+ in either mode and stays eligible; only multi-tool turns are marked
+ `parallel_or_ambiguous` and stay on the manual path until the turn is provably
+ complete. A multi-tool turn can be recovered when every one of
+ its tool calls has a decided continuation record: the scan then groups records
+ by session/run/iteration/assistant message, requires contiguous call ordinals,
+ and resumes them together through `LocalRuntimeHost.resumePendingRunBatch` and
+ `AgentRuntime.resumePendingToolBatch`, which replays the turn in the recorded
+ execution mode under each call's own step identity. The Hub `session.resume` command also accepts
+ `continuationKeys` for the same batch operation, and `HubRuntimeHost` exposes
+ `resumePendingRunBatch` to hub clients. A2A sessions are eligible only when the snapshot carries the
+ server-derived stable recovery owner and the trusted daemon workspace config;
+ client-contributed tools, teams/sub-agents, unowned/executing
+ records, incomplete tool-call groups, and missing snapshots remain on the explicit
+ `LocalRuntimeHost.resumePendingRun` / Hub `session.resume` path.
+
+`LocalRuntimeHost` can claim a decided single-tool record and call
+`AgentRuntime.resumePendingToolCall` with the original run/iteration and
+persisted assistant message. Every tool call also carries a stable `stepId`
+(`step:<runId>:<iteration>:<callIndex>`) through the tool context, approval
+request, middleware, telemetry, and Effect Ledger, so reconciliation can name the
+exact step across restarts. Unsupported transformed-input or missing-runtime
+cases fail closed. `executing` records require an explicit
+`reclaimExecuting: true` decision because their outcome is uncertain. A
+process-level e2e fixture exercises the built SDK across a seed process that
+abruptly exits and a fresh recover process; it uses a deterministic fake leaf
+agent, so external tool side-effect idempotency remains future work. If an
+approval is decided after a daemon restart, the Hub approval boundary triggers
+a bounded per-session recovery scan; the existing continuation lease/fencing
+rules still apply. Each agent turn or continuation acquires a detached,
+deeply frozen in-memory source snapshot before agent execution; rules, skills,
+and workflows consumed during that run cannot observe a later source update.
+The persisted recovery snapshot remains hash-only: before resuming a
+source-bearing run, the host recomputes the aggregate reference and fails closed
+on drift; source text is never loaded from the snapshot. Broad multi-agent
+continuation remains future work.
+
+A delegated (sub-agent or teammate) tool call is requested by an agent other than
+the session's lead agent, and its transcript is that agent's own conversation. The
+host only owns the lead agent, so it cannot observe the delegated transcript: the
+`ToolApprovalRequest` therefore carries the requesting agent's `parentAgentId` and
+`rootRunId`, and `LocalRuntimeHost` records the continuation under the requesting
+agent's identity and chain **without** a recovery snapshot or run state, because
+any recovery state built from the lead transcript would replay the wrong turn.
+Such a continuation is refused by both `resumePendingRun` and the daemon startup
+scan with `requires agent chain recovery`. Making it resumable requires persisting
+the delegated conversation at approval time and rebuilding the parent chain plus the
+child tool set; the chain identity itself is now durable and propagated
+(`AgentToolContext`/`ToolApprovalRequest` carry the parent and chain-root run, and
+`SessionRuntime` keeps the chain root separate from its own first run id).
+
 ### Hub-Backed Runtime
 
 1. Host constructs a `RuntimeHost` through `@cline/core`.
@@ -149,6 +404,7 @@ event payload and `source` field.
 7. Hub event forwarding preserves structured streaming lifecycle boundaries: text/reasoning deltas, final text/reasoning completion, tool start/finish, and agent done events are translated across the hub transport so host UIs can reliably close loading/streaming state.
 8. Hub client adapters exported from `@cline/core/hub` (`NodeHubClient`, `HubSessionClient`, `HubUIClient`, `connectToHub`) translate command/reply and event streams into host-facing APIs.
 9. Hub `session.get` records include both canonical root-session usage and explicit aggregate usage from the hub-owned `RuntimeHost`, so attached clients can intentionally render either root-only or root-plus-teammate costs without replaying event streams.
+10. The detached daemon passes one `LocalRuntimeHost` to both hub sessions and scheduled runtime handlers, keeping one execution-scope Effect Ledger, one durable approval coordinator, and one session lifecycle owner.
 
 Detached daemon startup retries transient `ETXTBSY` spawn failures before
 polling discovery. This covers package-manager updates that replace the CLI
@@ -184,15 +440,31 @@ routes at all.
 
 When enabled, the server constructs an `A2AServer` over the live
 `HubServerTransport` rather than a parallel runtime: JSON-RPC commands
-(`session.create`, `session.send_input`, `session.get`, `session.list`,
-`run.abort`) are translated into real hub command envelopes issued under a
-dedicated `a2a_<uuid>` client id, and the hub event stream for a session is
-subscribed through the same transport, which drives A2A `message/stream` SSE
-task updates. The Agent Card defaults to hub identity/version with the
-effective base path as its endpoint URL.
+(`session.create`, `run.start`, `session.send_input`, `session.get`,
+`session.list`, `run.abort`, `approval.respond`) are translated into real hub
+command envelopes issued under a dedicated stable A2A principal derived from
+the hub owner, data namespace, and trusted workspace (or an explicitly
+configured `a2a.clientId`). A new task
+is created without starting a run; `SendStreamingMessage` first registers the
+session-scoped event listener and emits the initial task, then starts the run,
+ensuring the current run's start, delta, tool, approval, and terminal events
+cannot be published before subscription. Approval state is projected as a
+redacted descriptor in `GetTask` and `approval.requested` status metadata. A
+follow-up `SendMessage` accepts one reserved `Part.data` object with
+`type: "cline.approval.decision"`, routes it through the authoritative
+`approval.respond` command, and leaves live continuation to the existing
+approval waiter. The Agent Card defaults to hub identity/version with the
+effective base path as its endpoint URL and advertises text plus JSON input.
+Detached `--a2a` startup supplies the daemon working directory as trusted
+default session config, forces A2A sessions to disable spawn/team execution,
+and stores only the stable recovery owner in the continuation snapshot;
+external request metadata, paths, credentials, callbacks, and capability
+payloads do not select or expand the server-owned runtime. The stable principal
+is an approval provenance/reconnect identity, not task-scoped authorization;
+the hub bearer boundary remains mandatory.
 
 Both A2A routes reuse the existing hub bearer-token contract: `GET
-<a2aBasePath>/.well-known/agent.json` and `POST <a2aBasePath>` require the same
+<a2aBasePath>/.well-known/agent-card.json` and `POST <a2aBasePath>` require the same
 `Authorization: Bearer` token from the owner discovery record as `/status` and
 `/shutdown`, validated with the same constant-time comparison; unauthenticated
 requests are rejected with 401 before reaching A2A dispatch. The mount stays

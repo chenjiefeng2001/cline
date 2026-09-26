@@ -5,6 +5,10 @@ import type {
 } from "@cline/shared";
 import type { SessionAccumulatedUsage } from "../../runtime/host/runtime-host";
 import type { SessionRecord as LocalSessionRecord } from "../../types/sessions";
+import {
+	redactCredentialRecord,
+	redactCredentialText,
+} from "./credential-redaction";
 
 export type HubSessionState = {
 	createdByClientId?: string;
@@ -55,7 +59,10 @@ function cloneSessionMetadata(
 	if (session.model?.trim()) metadata.model = session.model;
 	if (session.source?.trim()) metadata.source = session.source;
 	if (typeof session.pid === "number") metadata.pid = session.pid;
-	return Object.keys(metadata).length > 0 ? metadata : undefined;
+	// Any client may read a session record, so the metadata projection is a
+	// broadcast surface: redact before it leaves the server.
+	const redacted = redactCredentialRecord(metadata);
+	return Object.keys(redacted).length > 0 ? redacted : undefined;
 }
 
 export function toHubSessionRecord(
@@ -82,9 +89,11 @@ export function toHubSessionRecord(
 				typeof session.metadata?.mode === "string"
 					? (session.metadata.mode as "act" | "plan" | "yolo")
 					: undefined,
+			// A system prompt is user content that routinely contains a pasted key,
+			// so it is redacted like any other projection.
 			systemPrompt:
 				typeof session.metadata?.systemPrompt === "string"
-					? session.metadata.systemPrompt
+					? redactCredentialText(session.metadata.systemPrompt)
 					: undefined,
 		},
 		runtimeSession: session.agentId

@@ -8,8 +8,77 @@ import {
 	statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { PluginManifest } from "..";
+
+/**
+ * True when `childPath` resolves to `parentPath` itself or to something inside
+ * it. Purely lexical: it defeats `..` traversal and absolute-path escapes, but
+ * NOT symlinks. Anything reading from disk must resolve the real path of both
+ * sides first — see `resolveContainedPath`.
+ */
+export function isPathWithin(parentPath: string, childPath: string): boolean {
+	const relativePath = relative(resolve(parentPath), resolve(childPath));
+	return (
+		relativePath === "" ||
+		(!relativePath.startsWith("..") && !isAbsolute(relativePath))
+	);
+}
+
+/**
+ * Thrown when a caller-supplied path resolves outside the root it was confined
+ * to. Distinct from an fs error so callers can treat a policy rejection
+ * differently from a missing file.
+ */
+export class PathEscapesRootError extends Error {
+	constructor(
+		readonly candidate: string,
+		readonly root: string,
+	) {
+		super(`Path escapes the allowed root: ${candidate} is outside ${root}`);
+		this.name = "PathEscapesRootError";
+	}
+}
+
+/**
+ * Resolve `candidate` and require it to stay inside `root` after symlinks are
+ * followed. This is the containment check for anything a caller outside the
+ * process supplies: a lexical check alone still lets a symlink inside the
+ * workspace point at `/etc/shadow`.
+ *
+ * `realpath` is applied to the root too, so a workspace that is itself reached
+ * through a symlink compares correctly.
+ */
+export async function resolveContainedPath(
+	root: string,
+	candidate: string,
+	options: { mustExist?: boolean } = {},
+): Promise<string> {
+	const { realpath } = await import("node:fs/promises");
+	const realRoot = await realpath(resolve(root));
+	const resolved = resolve(realRoot, candidate);
+	let realCandidate: string;
+	try {
+		realCandidate = await realpath(resolved);
+	} catch (error) {
+		if (options.mustExist) {
+			throw error;
+		}
+		// The target does not exist yet. Its nearest existing ancestor still has
+		// to be inside the root, otherwise a create-through-traversal would slip
+		// through the gap between the lexical check and the write.
+		const parent = dirname(resolved);
+		if (parent === resolved) {
+			throw error;
+		}
+		const realParent = await realpath(parent);
+		realCandidate = resolve(realParent, relative(parent, resolved));
+	}
+	if (!isPathWithin(realRoot, realCandidate)) {
+		throw new PathEscapesRootError(candidate, root);
+	}
+	return realCandidate;
+}
 
 const DEPRECATED_CONFIG_DIR = ".clinerules";
 const CLINE_CONFIG_DIR = ".cline";
