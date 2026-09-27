@@ -12,10 +12,13 @@ export interface RemoteConfigSetting {
 
 function toggleRemoteConfigSetting(settingName: string) {
 	// TODO(ENG): The backend handler is not implemented yet and currently
-	// rejects. Handle the result (e.g. update UI state) once toggling is wired
-	// up; for now swallow the rejection so it doesn't surface as an unhandled
-	// promise rejection.
-	RemoteConfigServiceClient.toggleRemoteConfigSetting({ value: settingName }).catch(() => {})
+	// rejects, so the rejection is intentionally swallowed to avoid an
+	// unhandled promise rejection. It is still logged: the toggle is wired to a
+	// real button, so a silent catch here is indistinguishable from a dead
+	// control, and this is the only trace that the RPC was even attempted.
+	RemoteConfigServiceClient.toggleRemoteConfigSetting({ value: settingName }).catch((error) => {
+		console.error(`[RemoteConfig] toggleRemoteConfigSetting("${settingName}") failed:`, error)
+	})
 }
 
 export default function useRemoteConfigSettings(isVisible: boolean): RemoteConfigSetting[] {

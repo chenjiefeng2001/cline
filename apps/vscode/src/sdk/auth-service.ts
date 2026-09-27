@@ -412,7 +412,9 @@ export class AuthService {
 					this._authenticated = false
 					clearClineCredentials()
 					setImmediate(() => {
-						this.sendAuthStatusUpdate().catch(() => {})
+						this.sendAuthStatusUpdate().catch((error) => {
+							Logger.error("[SdkAuthService] Failed to publish cleared-credentials status:", error)
+						})
 					})
 					return undefined
 				}

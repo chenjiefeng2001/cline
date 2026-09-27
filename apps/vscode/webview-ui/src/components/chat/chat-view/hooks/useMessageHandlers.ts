@@ -293,7 +293,22 @@ export function useMessageHandlers(messages: ClineMessage[], chatState: ChatStat
 		setActiveQuote(null)
 		// Clear the local optimistic bubble before the authoritative empty snapshot arrives.
 		setPendingUserMessage(undefined)
-		await TaskServiceClient.clearTask(EmptyRequest.create({}))
+		// clearTask is what moves the backend to `idle` and bumps the replica fence,
+		// so a failure here is not cosmetic: the bubble above is already gone, the
+		// task is still open on the extension side, and the webview keeps the old
+		// transcript. That combination is a dead end - the send path is gated on
+		// turnState.phase, so the composer goes dead with no way back. Log it with
+		// the task context, then rethrow so the caller (executeButtonAction ->
+		// ActionButtons' latch) still sees the failure and re-enables the buttons.
+		try {
+			await TaskServiceClient.clearTask(EmptyRequest.create({}))
+		} catch (error) {
+			console.error(
+				`[ChatView] startNewTask: clearTask failed (messages=${messages.length}); the task was not cleared.`,
+				error,
+			)
+			throw error
+		}
 	}, [messages.length, setActiveQuote, setPendingUserMessage])
 
 	// Clear input state helper

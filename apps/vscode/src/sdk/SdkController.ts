@@ -507,7 +507,7 @@ export class Controller {
 						{ type: "status", payload: { sessionId, status: "error" } },
 					)
 				}
-				this.postStateToWebview().catch(() => {})
+				this.postStateToWebview().catch((err) => Logger.error("[SdkController] Failed to post state to webview:", err))
 			},
 			onAutoRetry: (attempt, maxRetries, delayMs, error) => {
 				const errorMsg = error instanceof Error ? error.message : String(error)
@@ -525,7 +525,7 @@ export class Controller {
 					],
 					{ type: "status", payload: { sessionId: "", status: "retrying" } },
 				)
-				this.postStateToWebview().catch(() => {})
+				this.postStateToWebview().catch((err) => Logger.error("[SdkController] Failed to post state to webview:", err))
 			},
 		})
 		this.sessionRebuilds = new SdkSessionRebuildScheduler({ sessions: this.sessions })
@@ -1212,7 +1212,7 @@ export class Controller {
 			},
 		})
 
-		this.postStateToWebview().catch(() => {})
+		this.postStateToWebview().catch((err) => Logger.error("[SdkController] Failed to post state to webview:", err))
 	}
 
 	/**
@@ -1277,7 +1277,7 @@ export class Controller {
 			},
 		})
 
-		this.postStateToWebview().catch(() => {})
+		this.postStateToWebview().catch((err) => Logger.error("[SdkController] Failed to post state to webview:", err))
 	}
 
 	// ---- Task lifecycle ----
