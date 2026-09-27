@@ -6,7 +6,7 @@ import { useCallback, useRef } from "react"
 import { useExtensionState, useMessagesState } from "@/context/ExtensionStateContext"
 import { SlashServiceClient, TaskServiceClient, UiServiceClient } from "@/services/grpc-client"
 import type { ButtonActionType } from "../shared/buttonConfig"
-import { isFollowupPhase } from "../shared/turnUiContract"
+import { isFollowupPhase, sendOutcomeFor } from "../shared/turnUiContract"
 import type { ChatState, MessageDelivery, MessageHandlers } from "../types/chatTypes"
 
 /**
@@ -71,7 +71,26 @@ export function useMessageHandlers(messages: ClineMessage[], chatState: ChatStat
 			}
 
 			if (hasContent) {
-				console.log("[ChatView] handleSendMessage - Sending message:", messageToSend)
+				// [TurnUi] Resolve and log the routing decision BEFORE acting on it,
+				// with every input. Until now a submission that matched no branch left
+				// no trace on either side: the webview discarded it and no RPC was
+				// made, so the extension log showed nothing and the only symptom was
+				// the user's text reappearing. sendOutcomeFor encodes the same branch
+				// order as the code below, so this line reports the decision that is
+				// actually taken rather than a parallel guess.
+				const tailMessage = messages[messages.length - 1]
+				const tailLooksRunning =
+					tailMessage?.partial === true || (tailMessage?.type === "say" && tailMessage.say === "api_req_started")
+				const outcome = sendOutcomeFor({
+					phase: turnState?.phase,
+					hasMessages: messages.length > 0,
+					hasOpenAsk: Boolean(clineAsk),
+					isTaskRunning: tailLooksRunning,
+				})
+				console.log(
+					`[TurnUi] handleSendMessage -> ${outcome} (phase=${turnState?.phase ?? "none"}, ` +
+						`messages=${messages.length}, openAsk=${clineAsk ?? "none"}, textLength=${messageToSend.length})`,
+				)
 				let messageSent = false
 				const trackPromptSubmitted = (hasActiveTask: boolean) => {
 					UiServiceClient.trackIntent(

@@ -185,7 +185,16 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 
 	// Apply truncation if state exceeds warning threshold
 	if (sizeBytes > STATE_SIZE_WARNING_THRESHOLD) {
-		Logger.warn(`[subscribeToState] State size ${(sizeBytes / 1024).toFixed(1)}KB exceeds threshold, applying truncation`)
+		// [TurnUi] This is the only place a state large enough to starve the webview
+		// is observable. It used to be silent until truncation, so a session creeping
+		// toward the limit gave no warning at all, and after truncation the original
+		// size was logged but never the size actually sent. Log all three: before,
+		// after each tier, and what the webview is left holding.
+		Logger.warn(
+			`[TurnUi] state ${(sizeBytes / 1024).toFixed(1)}KB exceeds the ${(STATE_SIZE_WARNING_THRESHOLD / 1024).toFixed(0)}KB ` +
+				`threshold (hard limit ${(STATE_SIZE_HARD_LIMIT / 1024).toFixed(0)}KB, messages=${state.clineMessages?.length ?? 0}, ` +
+				`taskHistory=${state.taskHistory?.length ?? 0}, turn=${state.turnState?.phase ?? "none"}) - truncating`,
+		)
 		const truncatedState = truncateStateForIpc(state)
 		const truncatedJson = JSON.stringify(truncatedState)
 		const truncatedSize = Buffer.byteLength(truncatedJson, "utf8")
@@ -242,6 +251,15 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 
 		return { stateJson: truncatedJson, wasTruncated: true }
 	}
+
+	// Near the limit but under it. Silent until now, so a session creeping toward
+	// the ceiling produced no signal at all; the next tier to trip would be a cliff.
+	Logger.debug(
+		`[TurnUi] state ${(sizeBytes / 1024).toFixed(1)}KB is within ` +
+			`${((STATE_SIZE_WARNING_THRESHOLD - sizeBytes) / 1024).toFixed(0)}KB of the ` +
+			`${(STATE_SIZE_WARNING_THRESHOLD / 1024).toFixed(0)}KB threshold ` +
+			`(messages=${state.clineMessages?.length ?? 0}, taskHistory=${state.taskHistory?.length ?? 0})`,
+	)
 
 	return { stateJson: JSON.stringify(state), wasTruncated: false }
 }

@@ -43,6 +43,19 @@ const FOLLOWUP_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>(["com
 /** Phases where the composer accepts a submission while the turn is live. */
 const QUEUEABLE_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>(["streaming", "awaiting_approval"])
 
+/**
+ * Every one of the three decisions below logs to the webview console under a
+ * single `[TurnUi]` prefix, with its inputs.
+ *
+ * The inputs are the point. Logging only the outcome leaves you unable to tell
+ * a correct decision from a wrong one, and these are the decisions where a
+ * silent-drop bug is invisible from the outside: the composer simply refuses
+ * input, or a submission vanishes, and the extension log shows nothing at all
+ * because no RPC was ever made. Grep `[TurnUi]` in the webview devtools console
+ * to replay the whole decision chain; the extension log carries the matching
+ * `[TurnUi]` phase/epoch lines.
+ */
+
 export function isFollowupPhase(phase: TurnPhaseName | undefined): boolean {
 	return phase !== undefined && FOLLOWUP_PHASES.has(phase)
 }
@@ -63,8 +76,18 @@ export function isComposerEnabled(args: {
 	legacyTaskRunning?: boolean
 }): boolean {
 	const { phase, sendingDisabled, legacyTaskRunning = false } = args
-	const allowQueuedSubmit = isQueueablePhase(phase) || legacyTaskRunning
-	return !(sendingDisabled && !allowQueuedSubmit)
+	const queueable = isQueueablePhase(phase)
+	const allowQueuedSubmit = queueable || legacyTaskRunning
+	const enabled = !(sendingDisabled && !allowQueuedSubmit)
+	// Only the disabled case is worth a line: an enabled composer fires on every
+	// render, and a disabled one is the state users cannot explain.
+	if (!enabled) {
+		console.warn(
+			`[TurnUi] composer DISABLED (phase=${phase ?? "none"}, sendingDisabled=${sendingDisabled}, ` +
+				`queueable=${queueable}, legacyRunning=${legacyTaskRunning}, allowQueuedSubmit=${allowQueuedSubmit})`,
+		)
+	}
+	return enabled
 }
 
 /**
@@ -93,17 +116,32 @@ export function sendOutcomeFor(args: {
 	const { phase, hasMessages, hasOpenAsk, isTaskRunning = false } = args
 
 	if (!hasMessages) {
+		console.log(`[TurnUi] send -> new-task (phase=${phase ?? "none"}, messages=0)`)
 		return "new-task"
 	}
 	if (phase === "awaiting_approval") {
+		console.log(`[TurnUi] send -> reject-approval (phase=${phase})`)
 		return "reject-approval"
 	}
 	if (hasOpenAsk) {
+		console.log(`[TurnUi] send -> ask-response (phase=${phase ?? "none"}, openAsk=true)`)
 		return "ask-response"
 	}
 	if (isFollowupPhase(phase) || isTaskRunning) {
+		console.log(
+			`[TurnUi] send -> continue-turn (phase=${phase ?? "none"}, followupPhase=${isFollowupPhase(phase)}, isTaskRunning=${isTaskRunning})`,
+		)
 		return "continue-turn"
 	}
+	// The case that has no branch in handleSendMessage and therefore produces no
+	// request, no state change and no error anywhere - the user sees their text
+	// come back with nothing having happened. Logged at warn so it stands out, and
+	// with every input, because whether the phase or the transcript is the odd one
+	// out is exactly the question that has to be answered from the log.
+	console.warn(
+		`[TurnUi] send DROPPED (phase=${phase ?? "none"}, messages>0, openAsk=false, isTaskRunning=${isTaskRunning}, ` +
+			`isFollowupPhase=${isFollowupPhase(phase)}) - no branch handles this; the submission is discarded silently`,
+	)
 	return "dropped"
 }
 export { buttonsForPhase as footerActionsForPhase } from "./buttonConfig"

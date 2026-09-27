@@ -1367,6 +1367,13 @@ export class Controller {
 
 	async clearTask(): Promise<void> {
 		this.pendingClineAuthRetryPrompt = undefined
+		// [TurnUi] Start a runnable trace for the "Start New Task" flow. Every step
+		// below can independently leave the UI dead-ended, and until now a failure
+		// was invisible: the webview dropped the submission with no log line on this
+		// side at all. Grep [TurnUi] to see the whole sequence for one click.
+		Logger.log(
+			`[TurnUi] clearTask: start (epoch=${this.messageTranslatorState.getMinter().epoch}, phase=${this.turnStateTracker.currentPhase})`,
+		)
 		// Clearing the task is a conversation boundary, so the replica fence has to
 		// move. resetMessageTranslatorAndFence() documents itself as being called at
 		// every such boundary (task start/clear, history open, reinit, mode rebuild)
@@ -1382,12 +1389,14 @@ export class Controller {
 		// disabled and sending was silently dropped, with no error anywhere.
 		//
 		// Bump synchronously before any await, as the helper requires, so stragglers
-		// from the cleared task are dropped rather than resurrecting it.
+		// from the cleared task are dropped instead of resurrecting it.
 		this.resetMessageTranslatorAndFence()
 		// No active task — UI returns to idle (input enabled, no buttons/thinking).
 		this.turnStateTracker.set("idle")
 		await this.taskControl.clearTask()
+		Logger.log(`[TurnUi] clearTask: taskControl.clearTask done, posting state`)
 		await this.postStateToWebview()
+		Logger.log(`[TurnUi] clearTask: complete (epoch=${this.messageTranslatorState.getMinter().epoch})`)
 	}
 
 	async handleTaskCreation(prompt: string): Promise<void> {
@@ -2133,8 +2142,16 @@ export class Controller {
 	 * and is dropped by the webview. Order matters: bump synchronously here, before any await.
 	 */
 	resetMessageTranslatorAndFence(): void {
+		const before = this.messageTranslatorState.getMinter().epoch
 		this.messageTranslatorState.reset()
-		this.messageTranslatorState.getMinter().bumpEpoch()
+		const after = this.messageTranslatorState.getMinter().bumpEpoch()
+		// [TurnUi] The epoch is the conversation fence. The webview only replaces its
+		// transcript when the snapshot's epoch is newer; at the same epoch it merges
+		// and deliberately never shrinks. So a boundary that clears a task without
+		// bumping the epoch leaves the webview holding the old messages, and any
+		// phase that is not "continuable" then turns the composer into a dead end
+		// with no error. Every boundary must therefore be visible here.
+		Logger.debug(`[TurnUi] replica fence bumped: epoch ${before} -> ${after} (bumpEpoch)`)
 	}
 
 	async getStateToPostToWebview(): Promise<ExtensionState> {

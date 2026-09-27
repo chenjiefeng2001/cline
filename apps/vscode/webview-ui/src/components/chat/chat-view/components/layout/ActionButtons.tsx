@@ -89,7 +89,18 @@ export const ActionButtons: React.FC<ActionButtonsProps> = ({ task, messages, ch
 
 	const handleActionClick = useCallback(
 		(action: ButtonActionType, text?: string, images?: string[], files?: string[]) => {
-			if (processedAskRef.current?.identity === askIdentity && processedAskRef.current?.seq === turnState?.seq) {
+			const latched = processedAskRef.current
+			const alreadyLatched = latched?.identity === askIdentity && latched?.seq === turnState?.seq
+			// [TurnUi] A swallowed click is invisible from the outside: the button goes
+			// dead, no RPC is made, and neither this console nor the extension log shows
+			// anything. The latch was the cause of a permanently dead footer, so both
+			// outcomes are recorded with the identity and the seq that produced them.
+			console.log(
+				`[TurnUi] footer click ${action} (actionId=${alreadyLatched ? "REJECTED-latch" : "accepted"}, ` +
+					`phase=${turnState?.phase ?? "none"}, seq=${turnState?.seq ?? "none"}, ` +
+					`latchedSeq=${latched?.seq ?? "none"}, identity="${askIdentity}")`,
+			)
+			if (alreadyLatched) {
 				return
 			}
 			// Latch this ask as processed and force a render so the buttons disable immediately.

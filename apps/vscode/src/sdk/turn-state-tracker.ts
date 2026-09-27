@@ -1,4 +1,5 @@
 import type { ConnectionStatus, TurnPhase, TurnState } from "@shared/ExtensionMessage"
+import { Logger } from "@/shared/services/Logger"
 import type { MessageIdMinter } from "./message-id-minter"
 
 // Authoritative UI-mode tracker for the current agent turn.
@@ -26,6 +27,7 @@ export class TurnStateTracker {
 
 	/** Set the phase (and optional anchor message ts), advancing seq. No-op metadata if unchanged. */
 	set(phase: TurnPhase, anchorTs?: number): void {
+		const previous = this.phase
 		this.phase = phase
 		this.anchorTs = anchorTs
 		this.seq = this.minter.nextSeq()
@@ -37,14 +39,32 @@ export class TurnStateTracker {
 		} else if (phase === "error") {
 			this.connectionStatus = "error"
 		}
+		// [TurnUi] The phase drives the footer buttons, the composer and whether a
+		// submission is accepted or dropped, and the webview gates on seq. A wrong
+		// phase is therefore indistinguishable from a dead UI, so every transition
+		// records where it came from, where it went, and the anchor it will be
+		// matched against. anchorTs=undefined is normal and load-bearing: the webview
+		// then keys its button identity on the message tail instead, which is how a
+		// footer identity can go stale.
+		Logger.log(
+			`[TurnUi] phase ${previous} -> ${phase} (seq=${this.seq}, anchorTs=${anchorTs ?? "none"}, connection=${this.connectionStatus})`,
+		)
 	}
 
 	/** Update connection status (e.g. "reconnecting" during auto-retry). */
 	setConnectionStatus(status: ConnectionStatus, attempt?: number, maxRetries?: number): void {
+		const previous = this.connectionStatus
 		this.connectionStatus = status
 		if (attempt !== undefined) this.retryAttempt = attempt
 		if (maxRetries !== undefined) this.retryMax = maxRetries
 		this.seq = this.minter.nextSeq()
+		// [TurnUi] This advances seq without changing the phase. The webview's
+		// TurnState gate is seq-based, so this makes a same-phase snapshot look
+		// newer to it while the UI mode is unchanged. Worth recording because a seq
+		// that moves with no phase change is the signature of a stale-phase bug.
+		Logger.debug(
+			`[TurnUi] connection ${previous} -> ${status} (phase stays ${this.phase}, seq=${this.seq}, attempt=${this.retryAttempt}/${this.retryMax})`,
+		)
 	}
 
 	/** Current immutable snapshot for inclusion in the state payload. */

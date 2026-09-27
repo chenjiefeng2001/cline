@@ -395,6 +395,10 @@ export const ExtensionStateContextProvider: React.FC<{
 	const [expandTaskHeader, setExpandTaskHeader] = useState(true)
 	const [didHydrateState, setDidHydrateState] = useState(false)
 	const [hydrationTimedOut, setHydrationTimedOut] = useState(false)
+	// [TurnUi] Timing for the first snapshot. Only the failure path used to log, so
+	// a slow-but-successful load was indistinguishable from a stuck one. Recorded on
+	// success too, so `didHydrate` timings are in the log either way.
+	const hydrationStartedAtRef = useRef<number>(Date.now())
 
 	const [showWelcome, setShowWelcome] = useState(false)
 	const [onboardingModels, setOnboardingModels] = useState<OnboardingModelGroup | undefined>(undefined)
@@ -587,6 +591,12 @@ export const ExtensionStateContextProvider: React.FC<{
 								}
 								setDidHydrateState(true)
 								setHydrationTimedOut(false)
+								console.log(
+									`[TurnUi] hydrated in ${Date.now() - hydrationStartedAtRef.current}ms ` +
+										`(snapshotStateVersion=${incomingStateVersion}, messages=${stateData.clineMessages?.length ?? 0}, ` +
+										`truncated=${stateData.messageTruncated ?? false}, phase=${stateData.turnState?.phase ?? "none"}, ` +
+										`epoch=${stateData.epoch ?? "none"}, stateBytes=${response.stateJson.length})`,
+								)
 								return newState
 							})
 							lastSnapshotVersionRef.current = Math.max(lastSnapshotVersionRef.current, incomingStateVersion)
@@ -888,6 +898,11 @@ export const ExtensionStateContextProvider: React.FC<{
 
 							setDidHydrateState(true)
 							setHydrationTimedOut(false)
+							console.log(
+								`[TurnUi] hydrated from full sync in ${Date.now() - hydrationStartedAtRef.current}ms ` +
+									`(snapshotStateVersion=${incomingStateVersion}, messages=${stateData.clineMessages?.length ?? 0}, ` +
+									`truncated=${stateData.messageTruncated ?? false}, phase=${stateData.turnState?.phase ?? "none"})`,
+							)
 
 							return newState
 						})
