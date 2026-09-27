@@ -1501,6 +1501,23 @@ function translateAgentEvent(event: AgentEvent, state: MessageTranslatorState): 
 // ---------------------------------------------------------------------------
 
 /**
+ * Compile-time exhaustiveness guard.
+ *
+ * Calling this in a `default` branch makes the branch a compile error if the
+ * discriminated union grows a variant that the switch does not handle, which is
+ * the point: this switch used to end in `default: { Logger.warn(...); break }`,
+ * so every event type the SDK added after the fact was silently discarded at
+ * runtime with a single warn line. `session_snapshot` was dropped that way for
+ * the whole life of the SDK path. A build failure is a far better outcome than
+ * a quiet behavioural divergence.
+ */
+function assertNever(value: never, exhaustive: true): never {
+	void value
+	void exhaustive
+	throw new Error("unreachable")
+}
+
+/**
  * Translate an SDK CoreSessionEvent into a TranslationResult.
  *
  * This is the primary entry point for event translation. It handles
@@ -1658,10 +1675,33 @@ export function translateSessionEvent(event: CoreSessionEvent, state: MessageTra
 			break
 		}
 
-		default: {
-			Logger.warn(`[MessageTranslator] Unhandled session event type: ${(event as CoreSessionEvent).type}`)
+		case "session_snapshot": {
+			// Deliberately not consumed here, and deliberately explicit rather than
+			// falling through to a default that swallows it.
+			//
+			// The SDK emits this from every emitStatus() call and it carries the
+			// whole session: { sessionId, snapshot } where the snapshot includes every
+			// persisted message plus usage (local-runtime-host createCoreSessionSnapshot).
+			// The hub consumes it - session-event-projector republishes it as
+			// session.updated - but this extension builds its own ExtensionState from
+			// StateManager plus the task's message state handler instead.
+			//
+			// So whether the extension needs it is a real open question, not something
+			// to guess at: two independent sources feed the webview and nothing asserts
+			// they agree. What is not acceptable is dropping it by accident, so it is
+			// named here and logged loudly. If the snapshot channel should drive the
+			// webview, this is the place to wire it.
+			Logger.warn(
+				`[MessageTranslator] session_snapshot for ${event.payload.sessionId} is not consumed by the extension; ` +
+					`the webview is fed from getStateToPostToWebview() instead.`,
+			)
 			break
 		}
+
+		default:
+			// Exhaustiveness guard: adding a CoreSessionEvent variant without a case
+			// above is a build error, not a silent drop.
+			assertNever(event, true)
 	}
 
 	return result
