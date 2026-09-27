@@ -1367,6 +1367,23 @@ export class Controller {
 
 	async clearTask(): Promise<void> {
 		this.pendingClineAuthRetryPrompt = undefined
+		// Clearing the task is a conversation boundary, so the replica fence has to
+		// move. resetMessageTranslatorAndFence() documents itself as being called at
+		// every such boundary (task start/clear, history open, reinit, mode rebuild)
+		// and it was missing here.
+		//
+		// Without the epoch bump the webview's applyStateSnapshot takes its same-epoch
+		// path, which merges and deliberately never shrinks the transcript (pinned by
+		// "a same-epoch snapshot with an empty transcript does NOT clear an existing
+		// one"). So the backend cleared the task and reported `idle`, but the webview
+		// kept the old messages. That combination is a dead end: messages.length > 0
+		// routes the send into the branch gated on turnState.phase, and `idle` is in
+		// neither turnAllowsFollowup nor allowQueuedSubmit - so the composer was
+		// disabled and sending was silently dropped, with no error anywhere.
+		//
+		// Bump synchronously before any await, as the helper requires, so stragglers
+		// from the cleared task are dropped rather than resurrecting it.
+		this.resetMessageTranslatorAndFence()
 		// No active task — UI returns to idle (input enabled, no buttons/thinking).
 		this.turnStateTracker.set("idle")
 		await this.taskControl.clearTask()
