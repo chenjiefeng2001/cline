@@ -438,7 +438,19 @@ export class Controller {
 			onSendComplete: async () => {
 				// Normal flows close their diff sessions inline; anything left here is orphaned.
 				void this.diffEdits.discardAllPreviews("turn complete")
-				this.turnStateTracker.setConnectionStatus("idle")
+
+				// A finished turn has to land on `completed`, not merely flip the
+				// connection status. The webview reads turnState.phase as the
+				// authoritative UI mode: `completed` is what makes a conversation
+				// continuable (it is one of the phases that permits a follow-up and
+				// shows the optimistic user message) and what renders the "Start New
+				// Task" footer. Previously this only called setConnectionStatus, which
+				// advances seq but leaves `phase` at whatever the turn last set, so a
+				// completed conversation could neither be continued reliably nor have
+				// a stable footer - and handleSendMessage silently skipped the send
+				// when the resulting phase was not continuable.
+				const lastMessage = this.task?.messageStateHandler.getClineMessages().at(-1)
+				this.turnStateTracker.set("completed", lastMessage?.ts)
 
 				this.postStateToWebview().catch((err) => {
 					Logger.error("[SdkController] Failed to post state after turn:", err)
