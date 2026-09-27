@@ -1,0 +1,139 @@
+import type { ClineMessage, TurnState } from "@shared/ExtensionMessage"
+import { buttonsForPhase } from "./buttonConfig"
+
+/**
+ * The turn/UI contract, in one place.
+ *
+ * Three separate places used to decide "what can the user do right now" from
+ * `turnState.phase`, each with its own inline phase list, and the lists did not
+ * agree. `turnAllowsFollowup` in useMessageHandlers omits `idle`, which combined
+ * with a retained transcript made the composer a dead end. Keeping the three
+ * decisions side by side here makes the divergence reviewable and lets
+ * turnUiContract.test.ts state the intended semantics as a table instead of
+ * leaving them as three untested expressions.
+ *
+ * These are pure functions deliberately: they are the contract, and the
+ * components are just callers.
+ */
+
+/** Every phase the backend can report. Keep in sync with TurnPhase. */
+export const TURN_PHASES = [
+	"idle",
+	"streaming",
+	"completed",
+	"resumable",
+	"error",
+	"awaiting_followup",
+	"awaiting_approval",
+] as const
+
+export type TurnPhaseName = (typeof TURN_PHASES)[number]
+
+/**
+ * Phases in which a turn is live or awaiting the user, so a composer submission
+ * is a follow-up (or an interrupt) rather than a new task.
+ *
+ * `idle` is deliberately NOT here. `idle` means "no turn in progress", and with a
+ * populated transcript it is ambiguous: the user may want to keep talking, or may
+ * be looking at a task they have not submitted yet. Nothing may be invented for
+ * that case without a product decision - see the KNOWN GAP test.
+ */
+const FOLLOWUP_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>(["completed", "awaiting_followup", "streaming"])
+
+/** Phases where the composer accepts a submission while the turn is live. */
+const QUEUEABLE_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>(["streaming", "awaiting_approval"])
+
+export function isFollowupPhase(phase: TurnPhaseName | undefined): boolean {
+	return phase !== undefined && FOLLOWUP_PHASES.has(phase)
+}
+
+export function isQueueablePhase(phase: TurnPhaseName | undefined): boolean {
+	return phase !== undefined && QUEUEABLE_PHASES.has(phase)
+}
+
+/**
+ * Whether the composer is enabled. Mirrors InputSection: a submission is
+ * allowed while the turn is live (so it can be queued or steered) or when the
+ * active button set does not claim to be mid-send.
+ */
+export function isComposerEnabled(args: {
+	phase: TurnPhaseName | undefined
+	sendingDisabled: boolean
+	/** Fallback for pre-TurnState state: does the message tail look like a live turn? */
+	legacyTaskRunning?: boolean
+}): boolean {
+	const { phase, sendingDisabled, legacyTaskRunning = false } = args
+	const allowQueuedSubmit = isQueueablePhase(phase) || legacyTaskRunning
+	return !(sendingDisabled && !allowQueuedSubmit)
+}
+
+/**
+ * What a composer submission does, mirroring the branch order in
+ * useMessageHandlers.handleSendMessage. The point of this function is the
+ * `dropped` case: it must be a reachable, named outcome rather than the absence
+ * of an else branch, so it can be asserted on.
+ */
+export type SendOutcome =
+	| "new-task"
+	| "reject-approval"
+	| "ask-response"
+	| "continue-turn"
+	/** No branch handled it. This is a dead end and must always be treated as a defect. */
+	| "dropped"
+
+export function sendOutcomeFor(args: {
+	phase: TurnPhaseName | undefined
+	/** Messages currently rendered in the webview. */
+	hasMessages: boolean
+	/** Is there an unresolved ask the composer should answer? */
+	hasOpenAsk: boolean
+	/** Does the message tail look like a live turn (legacy fallback path)? */
+	isTaskRunning?: boolean
+}): SendOutcome {
+	const { phase, hasMessages, hasOpenAsk, isTaskRunning = false } = args
+
+	if (!hasMessages) {
+		return "new-task"
+	}
+	if (phase === "awaiting_approval") {
+		return "reject-approval"
+	}
+	if (hasOpenAsk) {
+		return "ask-response"
+	}
+	if (isFollowupPhase(phase) || isTaskRunning) {
+		return "continue-turn"
+	}
+	return "dropped"
+}
+export { buttonsForPhase as footerActionsForPhase } from "./buttonConfig"
+
+/**
+ * The composer state for a phase, derived from that phase's real button config
+ * rather than from an assumed `sendingDisabled`. `sendingDisabled` is a property
+ * of the config object the footer mirrors into chat state, so treating it as an
+ * independent input makes it possible to assert a state that can never occur -
+ * which is exactly how a first pass of this test "passed" while the real
+ * composer was disabled for phases the user must be able to type into.
+ */
+export function composerStateForPhase(
+	phase: TurnPhaseName,
+	anchoredMessage?: ClineMessage,
+): {
+	sendingDisabled: boolean
+	composerEnabled: boolean
+} {
+	const config = buttonsForPhase({ phase, anchorTs: anchoredMessage?.ts, seq: 0 } as TurnState, anchoredMessage, false)
+	const sendingDisabled = config.sendingDisabled
+	return { sendingDisabled, composerEnabled: isComposerEnabled({ phase, sendingDisabled }) }
+}
+
+/**
+ * Whether a phase that can drop a submission still gives the user a way forward
+ * through the footer. A dropped send is only acceptable if the phase also
+ * advertises an action, because that is what the user can click instead.
+ */
+export function footerEscapeAction(phase: TurnPhaseName, anchoredMessage?: ClineMessage): string | undefined {
+	const config = buttonsForPhase({ phase, anchorTs: anchoredMessage?.ts, seq: 0 } as TurnState, anchoredMessage, false)
+	return config.primaryAction ?? config.secondaryAction
+}

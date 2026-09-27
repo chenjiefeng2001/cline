@@ -2,6 +2,7 @@ import React from "react"
 import ChatTextArea from "@/components/chat/ChatTextArea"
 import QuotedMessagePreview from "@/components/chat/QuotedMessagePreview"
 import { useMessagesState } from "@/context/ExtensionStateContext"
+import { isComposerEnabled } from "../../shared/turnUiContract"
 import { ChatState, MessageHandlers, ScrollBehavior } from "../../types/chatTypes"
 
 interface InputSectionProps {
@@ -46,8 +47,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
 	const legacyTaskRunning =
 		turnState === undefined &&
 		(lastMessage?.partial === true || (lastMessage?.type === "say" && lastMessage.say === "api_req_started"))
-	const allowQueuedSubmit = turnState?.phase === "streaming" || turnState?.phase === "awaiting_approval" || legacyTaskRunning
-	const submitDisabled = sendingDisabled && !allowQueuedSubmit
+	const submitDisabled = !isComposerEnabled({ phase: turnState?.phase, sendingDisabled, legacyTaskRunning })
 
 	return (
 		<>

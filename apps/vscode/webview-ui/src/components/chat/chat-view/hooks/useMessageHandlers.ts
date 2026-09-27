@@ -6,6 +6,7 @@ import { useCallback, useRef } from "react"
 import { useExtensionState, useMessagesState } from "@/context/ExtensionStateContext"
 import { SlashServiceClient, TaskServiceClient, UiServiceClient } from "@/services/grpc-client"
 import type { ButtonActionType } from "../shared/buttonConfig"
+import { isFollowupPhase } from "../shared/turnUiContract"
 import type { ChatState, MessageDelivery, MessageHandlers } from "../types/chatTypes"
 
 /**
@@ -226,15 +227,16 @@ export function useMessageHandlers(messages: ClineMessage[], chatState: ChatStat
 					//      of truth.
 					//   2. Legacy fallback (no turnState): the task looks actively running from the
 					//      message tail.
+					//
+					// When neither holds there is no branch to fall into and the submission is
+					// dropped. That is a dead end by construction, so the contract lives in
+					// turnUiContract.sendOutcomeFor() and is table-tested in
+					// turnUiContract.test.ts rather than left as an absent else.
 					const lastMessage = messages[messages.length - 1]
 					const isTaskRunning =
 						lastMessage.partial === true || (lastMessage.type === "say" && lastMessage.say === "api_req_started")
-					const turnAllowsFollowup =
-						turnState?.phase === "completed" ||
-						turnState?.phase === "awaiting_followup" ||
-						turnState?.phase === "streaming"
 
-					if (turnAllowsFollowup || isTaskRunning) {
+					if (isFollowupPhase(turnState?.phase) || isTaskRunning) {
 						// Continue the conversation / interrupt with feedback.
 						await sendAskResponseWithPendingState(
 							AskResponseRequest.create({
