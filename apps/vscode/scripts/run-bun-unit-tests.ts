@@ -94,8 +94,26 @@ function parseCounts(output: string): { pass: number; fail: number } {
 
 const PER_FILE_TIMEOUT_MS = 120_000
 
+/**
+ * Per-test budget handed to each `bun test` child, overriding bun's 5s default.
+ *
+ * The hook suites under src/core/hooks spawn a real interpreter per assertion -
+ * writeHookScriptForPlatform emits a .ps1 on Windows - so a single case costs
+ * 1.0-2.3s just to start the process. Against a 5s default that leaves no
+ * headroom, and since this runner keeps four files in flight at once, a loaded CI
+ * runner pushed individual cases over the line: on 2026-09-28 three separate hook
+ * files failed at 5017ms, 5184ms and 6698ms, while the same files passed on a
+ * developer machine and on the Linux runner. Every one of those was a timeout,
+ * never an assertion, and none of them were in code that had changed.
+ *
+ * 20s gives a 7x margin over the slowest observed case (6.7s) while still
+ * bounding a genuine hang, and stays well inside PER_FILE_TIMEOUT_MS so a stuck
+ * child is still reaped at the file level rather than running to 20s x N cases.
+ */
+const TEST_TIMEOUT_MS = 20_000
+
 async function runOne(file: string): Promise<FileResult> {
-	const proc = Bun.spawn(["bun", "test", file], {
+	const proc = Bun.spawn(["bun", "test", "--timeout", String(TEST_TIMEOUT_MS), file], {
 		cwd: projectRoot,
 		stdout: "pipe",
 		stderr: "pipe",
