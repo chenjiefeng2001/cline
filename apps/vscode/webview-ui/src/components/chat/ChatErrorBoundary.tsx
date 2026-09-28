@@ -1,4 +1,5 @@
 import React from "react"
+import { reportWebviewError } from "../../utils/reportWebviewError"
 
 interface ChatErrorBoundaryProps {
 	children: React.ReactNode
@@ -29,6 +30,22 @@ class ChatErrorBoundary extends React.Component<ChatErrorBoundaryProps, ChatErro
 	componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
 		console.error("Error in ChatErrorBoundary:", error.message)
 		console.error("Component stack:", errorInfo.componentStack)
+
+		// A boundary is precisely the component that prevents an error from reaching
+		// window.onerror, which is where the webview load guard listens. So every
+		// boundary-caught failure was invisible outside the devtools console: the panel
+		// showed "Something went wrong displaying this content" and Cline.log said
+		// nothing at all. VS Code discards that console when the panel closes, so the
+		// report was gone by the time anyone looked. Forward it to the extension, which
+		// is the one artifact that survives. The component stack is included because
+		// "an error happened somewhere in a chat widget" is not actionable on its own.
+		reportWebviewError({
+			phase: "runtime",
+			message: `React error boundary caught: ${error.message}`,
+			// componentStack is React.ErrorInfo's, typed `string | null`; normalise to
+			// undefined so the optional field stays optional.
+			stack: error.stack ?? errorInfo.componentStack ?? undefined,
+		})
 	}
 
 	render() {

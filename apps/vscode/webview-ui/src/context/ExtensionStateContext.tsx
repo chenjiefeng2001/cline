@@ -37,6 +37,7 @@ import {
 	UiServiceClient,
 } from "../services/grpc-client"
 import { createFrameCoalescer, type FrameCoalescer, scheduleAnimationFrame } from "../utils/messageFrameScheduler"
+import { reportWebviewError } from "../utils/reportWebviewError"
 
 export type ProviderId = string
 
@@ -1176,103 +1177,128 @@ export const ExtensionStateContextProvider: React.FC<{
 			},
 		})
 
-		// Fetch available terminal profiles on launch
-		StateServiceClient.getAvailableTerminalProfiles(EmptyRequest.create({}))
-			.then((response) => {
-				setAvailableTerminalProfiles(response.profiles)
-			})
-			.catch((error) => {
-				console.error("Failed to fetch available terminal profiles:", error)
-			})
-
-		// Subscribe to relinquish control events
-		relinquishControlUnsubscribeRef.current = UiServiceClient.subscribeToRelinquishControl(EmptyRequest.create({}), {
-			onResponse: () => {
-				// Call all registered callbacks
-				relinquishControlCallbacks.current.forEach((callback) => {
-					callback()
-				})
-			},
-			onError: (error: any) => {
-				console.error("Error in relinquishControl subscription:", error)
-			},
-			onComplete: () => {},
-		})
-
 		// Signal to the extension host that the webview is ready to receive state.
 		// This replaces the 2-second fallback timeout in VscodeWebviewProvider and
 		// ensures state is pushed only after subscriptions are wired up.
+		//
+		// Sent HERE, immediately after the state subscription above, rather than at the
+		// end of this effect. This signal is what tells VscodeWebviewProvider the webview
+		// is alive; without it the watchdog reports a blank panel and the user sees an
+		// error screen. Everything below it is optional wiring (terminal profiles,
+		// relinquish control, account button) whose failure must not cost us the ready
+		// signal - and, because a throw also discards the cleanup function, must not
+		// leak the state subscription into the next mount. The state channel is wired,
+		// and that is the only precondition this signal actually has.
 		PLATFORM_CONFIG.postMessage({ type: "webview_ready" })
 
-		// Clean up subscriptions when component unmounts
-		return () => {
-			// Persist replica state before cleanup for recovery on re-creation
-			persistReplicaState()
+		// Optional wiring from here to the end of the effect, guarded so a failure is
+		// reported rather than silently degrading the panel.
+		let cleanup: (() => void) | undefined
+		try {
+			// Fetch available terminal profiles on launch
+			StateServiceClient.getAvailableTerminalProfiles(EmptyRequest.create({}))
+				.then((response) => {
+					setAvailableTerminalProfiles(response.profiles)
+				})
+				.catch((error) => {
+					console.error("Failed to fetch available terminal profiles:", error)
+				})
 
-			// Reset the delta version counter so re-mount starts fresh; otherwise
-			// a stale high-water mark from a previous lifecycle would trigger a
-			// spurious gap detection on the very first delta after reconnection.
-			lastStateVersionRef.current = 0
-			// Cancel any pending frame-coalesced message flush.
-			messageFlushSchedulerRef.current?.cancel()
-			messageFlushSchedulerRef.current = null
-			if (stateSubscriptionRef.current) {
-				stateSubscriptionRef.current()
-				stateSubscriptionRef.current = null
+			// Subscribe to relinquish control events
+			relinquishControlUnsubscribeRef.current = UiServiceClient.subscribeToRelinquishControl(EmptyRequest.create({}), {
+				onResponse: () => {
+					// Call all registered callbacks
+					relinquishControlCallbacks.current.forEach((callback) => {
+						callback()
+					})
+				},
+				onError: (error: any) => {
+					console.error("Error in relinquishControl subscription:", error)
+				},
+				onComplete: () => {},
+			})
+
+			// Clean up subscriptions when component unmounts
+			cleanup = () => {
+				// Persist replica state before cleanup for recovery on re-creation
+				persistReplicaState()
+
+				// Reset the delta version counter so re-mount starts fresh; otherwise
+				// a stale high-water mark from a previous lifecycle would trigger a
+				// spurious gap detection on the very first delta after reconnection.
+				lastStateVersionRef.current = 0
+				// Cancel any pending frame-coalesced message flush.
+				messageFlushSchedulerRef.current?.cancel()
+				messageFlushSchedulerRef.current = null
+				if (stateSubscriptionRef.current) {
+					stateSubscriptionRef.current()
+					stateSubscriptionRef.current = null
+				}
+				if (mcpButtonUnsubscribeRef.current) {
+					mcpButtonUnsubscribeRef.current()
+					mcpButtonUnsubscribeRef.current = null
+				}
+				if (marketplaceButtonUnsubscribeRef.current) {
+					marketplaceButtonUnsubscribeRef.current()
+					marketplaceButtonUnsubscribeRef.current = null
+				}
+				if (historyButtonClickedSubscriptionRef.current) {
+					historyButtonClickedSubscriptionRef.current()
+					historyButtonClickedSubscriptionRef.current = null
+				}
+				if (chatButtonUnsubscribeRef.current) {
+					chatButtonUnsubscribeRef.current()
+					chatButtonUnsubscribeRef.current = null
+				}
+				if (accountButtonClickedSubscriptionRef.current) {
+					accountButtonClickedSubscriptionRef.current()
+					accountButtonClickedSubscriptionRef.current = null
+				}
+				if (settingsButtonClickedSubscriptionRef.current) {
+					settingsButtonClickedSubscriptionRef.current()
+					settingsButtonClickedSubscriptionRef.current = null
+				}
+				if (worktreesButtonClickedSubscriptionRef.current) {
+					worktreesButtonClickedSubscriptionRef.current()
+					worktreesButtonClickedSubscriptionRef.current = null
+				}
+				if (partialMessageUnsubscribeRef.current) {
+					partialMessageUnsubscribeRef.current()
+					partialMessageUnsubscribeRef.current = null
+				}
+				if (openRouterModelsUnsubscribeRef.current) {
+					openRouterModelsUnsubscribeRef.current()
+					openRouterModelsUnsubscribeRef.current = null
+				}
+				if (liteLlmModelsUnsubscribeRef.current) {
+					liteLlmModelsUnsubscribeRef.current()
+					liteLlmModelsUnsubscribeRef.current = null
+				}
+				if (workspaceUpdatesUnsubscribeRef.current) {
+					workspaceUpdatesUnsubscribeRef.current()
+					workspaceUpdatesUnsubscribeRef.current = null
+				}
+				if (relinquishControlUnsubscribeRef.current) {
+					relinquishControlUnsubscribeRef.current()
+					relinquishControlUnsubscribeRef.current = null
+				}
+				if (mcpServersSubscriptionRef.current) {
+					mcpServersSubscriptionRef.current()
+					mcpServersSubscriptionRef.current = null
+				}
 			}
-			if (mcpButtonUnsubscribeRef.current) {
-				mcpButtonUnsubscribeRef.current()
-				mcpButtonUnsubscribeRef.current = null
-			}
-			if (marketplaceButtonUnsubscribeRef.current) {
-				marketplaceButtonUnsubscribeRef.current()
-				marketplaceButtonUnsubscribeRef.current = null
-			}
-			if (historyButtonClickedSubscriptionRef.current) {
-				historyButtonClickedSubscriptionRef.current()
-				historyButtonClickedSubscriptionRef.current = null
-			}
-			if (chatButtonUnsubscribeRef.current) {
-				chatButtonUnsubscribeRef.current()
-				chatButtonUnsubscribeRef.current = null
-			}
-			if (accountButtonClickedSubscriptionRef.current) {
-				accountButtonClickedSubscriptionRef.current()
-				accountButtonClickedSubscriptionRef.current = null
-			}
-			if (settingsButtonClickedSubscriptionRef.current) {
-				settingsButtonClickedSubscriptionRef.current()
-				settingsButtonClickedSubscriptionRef.current = null
-			}
-			if (worktreesButtonClickedSubscriptionRef.current) {
-				worktreesButtonClickedSubscriptionRef.current()
-				worktreesButtonClickedSubscriptionRef.current = null
-			}
-			if (partialMessageUnsubscribeRef.current) {
-				partialMessageUnsubscribeRef.current()
-				partialMessageUnsubscribeRef.current = null
-			}
-			if (openRouterModelsUnsubscribeRef.current) {
-				openRouterModelsUnsubscribeRef.current()
-				openRouterModelsUnsubscribeRef.current = null
-			}
-			if (liteLlmModelsUnsubscribeRef.current) {
-				liteLlmModelsUnsubscribeRef.current()
-				liteLlmModelsUnsubscribeRef.current = null
-			}
-			if (workspaceUpdatesUnsubscribeRef.current) {
-				workspaceUpdatesUnsubscribeRef.current()
-				workspaceUpdatesUnsubscribeRef.current = null
-			}
-			if (relinquishControlUnsubscribeRef.current) {
-				relinquishControlUnsubscribeRef.current()
-				relinquishControlUnsubscribeRef.current = null
-			}
-			if (mcpServersSubscriptionRef.current) {
-				mcpServersSubscriptionRef.current()
-				mcpServersSubscriptionRef.current = null
-			}
+		} catch (error) {
+			// Readiness was already signalled, so the extension will push state. Report
+			// what did not get wired so this is diagnosable from Cline.log rather than
+			// being a silently degraded panel. The cleanup built so far is still
+			// returned below, so whatever did get wired can still be torn down.
+			reportWebviewError({
+				phase: "runtime",
+				message: `Optional webview wiring failed after ready: ${error instanceof Error ? error.message : String(error)}`,
+				stack: error instanceof Error ? error.stack : undefined,
+			})
 		}
+		return cleanup
 	}, [])
 
 	const refreshOpenRouterModels = useCallback(() => {
