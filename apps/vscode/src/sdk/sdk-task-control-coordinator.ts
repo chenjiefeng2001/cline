@@ -195,6 +195,16 @@ export class SdkTaskControlCoordinator {
 				() => this.cancelTask(),
 			)
 			if (cleanedMessages.length > 0) {
+				// These ids were minted by an earlier extension host process and are about
+				// to be pushed to the webview, where ts is the message identity. The minter
+				// restarts at 1 on every host start, so reserve past the highest one first -
+				// otherwise the next interaction message re-mints ts=1 and
+				// messageReducer.applyMessage overwrites the first historical message
+				// instead of appending. Must happen after the resume markers are appended,
+				// since those use Date.now() and are the highest values in the transcript.
+				this.options.interactions.ensureMessageTsAbove(
+					cleanedMessages.reduce((max, m) => (typeof m.ts === "number" && m.ts > max ? m.ts : max), 0),
+				)
 				task.messageStateHandler.addMessages(cleanedMessages)
 			}
 			this.options.setTask(task)

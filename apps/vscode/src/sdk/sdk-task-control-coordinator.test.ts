@@ -345,6 +345,7 @@ function makeCoordinator(input: Partial<MakeCoordinatorInput> = {}) {
 		},
 		interactions: {
 			clearPending: vi.fn(),
+			ensureMessageTsAbove: vi.fn(),
 		},
 		messages: {
 			appendAndEmit: vi.fn(),
@@ -392,7 +393,10 @@ function makeCoordinator(input: Partial<MakeCoordinatorInput> = {}) {
 			endActiveSession: ReturnType<typeof vi.fn>
 			setRunning: ReturnType<typeof vi.fn>
 		}
-		interactions: SdkTaskControlCoordinatorOptions["interactions"] & { clearPending: ReturnType<typeof vi.fn> }
+		interactions: SdkTaskControlCoordinatorOptions["interactions"] & {
+			clearPending: ReturnType<typeof vi.fn>
+			ensureMessageTsAbove: ReturnType<typeof vi.fn>
+		}
 		messages: SdkTaskControlCoordinatorOptions["messages"] & {
 			appendAndEmit: ReturnType<typeof vi.fn>
 			appendMessages: ReturnType<typeof vi.fn>
@@ -449,3 +453,32 @@ function makeTask(taskId: string, messages: ClineMessage[] = []) {
 		},
 	}
 }
+
+// The load path must reserve minter ids past the transcript it just read. The
+// minter is per-process and restarts at 1, while persisted messages keep the
+// ids minted by the previous host. Without this reservation the first message
+// minted after the load re-uses ts=1, and because messageReducer.applyMessage
+// treats ts as identity (findIndex -> messages[index] = incoming) it overwrites
+// the first historical message instead of appending.
+it("reserves message ids above the transcript it loaded, so a restarted host cannot overwrite history", async () => {
+	const { coordinator, options, state } = makeCoordinator({
+		activeSession: makeActiveSession(),
+		task: makeTask("old-task"),
+		hasHistoryItem: true,
+		clineMessages: [
+			{ ts: 1, type: "say", say: "task", text: "a" },
+			{ ts: 2, type: "say", say: "text", text: "b" },
+		],
+		sessionStatus: "completed",
+	})
+
+	await coordinator.showTaskWithId("task-1")
+
+	expect(options.interactions.ensureMessageTsAbove).toHaveBeenCalled()
+	const reserved = options.interactions.ensureMessageTsAbove.mock.calls.at(-1)?.[0] as number
+	// Must cover the resume marker appended with Date.now() (largest value) as
+	// well as the persisted ids, or the next minted id would sort before it.
+	const loadedTs = state.task!.messageStateHandler.getClineMessages().map((m) => m.ts as number)
+	expect(reserved).toBeGreaterThanOrEqual(Math.max(...loadedTs))
+	expect(loadedTs.filter((ts) => ts === 1 || ts === 2)).toHaveLength(2)
+})

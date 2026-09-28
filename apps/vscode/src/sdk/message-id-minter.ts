@@ -44,6 +44,29 @@ export class MessageIdMinter {
 	}
 
 	/**
+	 * Ensure every future id is strictly greater than `ts`.
+	 *
+	 * The counter only lives as long as the extension host process, but messages
+	 * outlive it: they are persisted to task history and read back after a reload
+	 * with their original ids intact (finalizeMessagesForSave never rewrites ts).
+	 * Without this, a restarted process restarts at 1 and re-mints ids that history
+	 * already uses - and `ts` is the message's identity, not just an ordering hint.
+	 * messageReducer.applyMessage looks up `findIndex(m => m.ts === incoming.ts)`
+	 * and assigns `messages[index] = incoming` on a hit, so a repeated id does not
+	 * append, it silently overwrites a historical message.
+	 *
+	 * Call this with the maximum ts of any transcript being loaded. It also keeps
+	 * array order equal to ts order: the resume markers appended on load use
+	 * Date.now() (~1.8e12), so without this the next counter-minted message (1, 2,
+	 * 3...) would sort *before* them, and SdkController.loadHistoryBatch sorts by ts.
+	 */
+	ensureAbove(ts: number): void {
+		if (Number.isFinite(ts) && ts > this.idCounter) {
+			this.idCounter = ts
+		}
+	}
+
+	/**
 	 * Advance and return the freshness counter. Call synchronously at the moment a message is
 	 * created/updated AND at the moment a state snapshot is assembled — before any await — so
 	 * the resulting total order matches causal order regardless of delivery timing.

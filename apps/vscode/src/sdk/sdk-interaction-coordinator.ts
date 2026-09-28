@@ -299,6 +299,20 @@ export class SdkInteractionCoordinator {
 		return this.getMinter().nextId()
 	}
 
+	/**
+	 * Reserve ids above `ts` on the SHARED minter, so a transcript loaded from history
+	 * can never be overwritten by messages minted after the fact.
+	 *
+	 * Owned here because this coordinator owns the minter, but driven by the history
+	 * load path: ids are per-process while messages are persisted, so after a host
+	 * restart the counter restarts at 1 and would re-mint ids that persisted messages
+	 * already carry. See MessageIdMinter.ensureAbove for why that is destructive
+	 * rather than cosmetic.
+	 */
+	ensureMessageTsAbove(ts: number): void {
+		this.getMinter().ensureAbove(ts)
+	}
+
 	private fallbackMinter: MessageIdMinter | undefined
 	private getMinter(): MessageIdMinter {
 		if (this.options.getMinter) {
