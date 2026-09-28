@@ -254,11 +254,23 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 
 	// Near the limit but under it. Silent until now, so a session creeping toward
 	// the ceiling produced no signal at all; the next tier to trip would be a cliff.
+	//
+	// `messages` here is the WINDOW, not the conversation. getStateToPostToWebview
+	// sends only the most recent INITIAL_MESSAGE_WINDOW (200) messages and flags the
+	// rest as loadable via loadHistoryBatch, so this number stops growing once the
+	// window saturates - it read a flat messages=200 across 105 consecutive posts of a
+	// 25 minute session, which looks like a stuck pipeline and is actually a full
+	// window. Report the true total alongside it, because the gap between the two IS
+	// the frontend/backend divergence and nothing else in the log states it.
+	const windowCount = state.clineMessages?.length ?? 0
+	const totalCount = state.totalMessageCount ?? windowCount
+	const isWindowed = windowCount > 0 && totalCount > windowCount
 	Logger.debug(
 		`[TurnUi] state ${(sizeBytes / 1024).toFixed(1)}KB is within ` +
 			`${((STATE_SIZE_WARNING_THRESHOLD - sizeBytes) / 1024).toFixed(0)}KB of the ` +
 			`${(STATE_SIZE_WARNING_THRESHOLD / 1024).toFixed(0)}KB threshold ` +
-			`(messages=${state.clineMessages?.length ?? 0}, taskHistory=${state.taskHistory?.length ?? 0})`,
+			`(messages=${windowCount}${isWindowed ? ` of ${totalCount}` : ""}, ` +
+			`taskHistory=${state.taskHistory?.length ?? 0})`,
 	)
 
 	return { stateJson: JSON.stringify(state), wasTruncated: false }

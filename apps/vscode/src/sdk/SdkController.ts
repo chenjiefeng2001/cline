@@ -1738,7 +1738,30 @@ export class Controller {
 		// Filter to messages strictly before beforeTs
 		const beforeIndex = beforeTs > 0 ? sorted.findIndex((m) => (m.ts || 0) < beforeTs) : 0
 
+		// This is the whole frontend/backend reconciliation path, and it was silent.
+		// The webview only ever holds the most recent 200 messages
+		// (getStateToPostToWebview INITIAL_MESSAGE_WINDOW); everything older exists
+		// solely because this RPC answers. A dead cursor here - beforeIndex === -1, or
+		// a batch that returns nothing while hasMore is still true - shows up in the
+		// UI only as a conversation that is missing its own history, with nothing in
+		// Cline.log to explain it. Log the request and the resolution, including the
+		// window the webview is paging within, so the two sides can be compared.
+		Logger.debug(
+			`[TurnUi] loadHistoryBatch(task=${taskId}, beforeTs=${beforeTs}, limit=${limit}) ` +
+				`over ${totalCount} messages, window slice=[${Math.max(0, beforeIndex)}..${Math.min(totalCount, beforeIndex + limit)})]`,
+		)
+
 		if (beforeIndex === -1) {
+			// beforeTs is at or below the oldest message we hold, so there is nothing
+			// older to hand back. Reaching this means the webview's cursor does not
+			// correspond to a position in this transcript - the two sides disagree about
+			// message order, which is worth calling out rather than reporting as
+			// "no more messages" and leaving the UI to look truncated forever.
+			Logger.warn(
+				`[TurnUi] loadHistoryBatch(task=${taskId}, beforeTs=${beforeTs}) matched no position in ` +
+					`${totalCount} messages (oldest ts=${sorted.at(-1)?.ts ?? "none"}). ` +
+					`The webview cursor is not in this transcript's order; older history will not load.`,
+			)
 			// No messages before the cursor
 			return LoadHistoryBatchResponse.create({
 				messages: [],
@@ -1752,6 +1775,14 @@ export class Controller {
 
 		// Convert internal ClineMessage[] to proto ClineMessage[]
 		const protoMessages: ProtoClineMessage[] = batchSlice.map((msg) => convertClineMessageToProto(msg))
+
+		// Outcome. An empty batch with hasMore=true would loop the webview against a
+		// cursor that never advances, so the returned count is logged for the same
+		// reason the request is.
+		Logger.debug(
+			`[TurnUi] loadHistoryBatch(task=${taskId}) -> ${protoMessages.length} messages, ` +
+				`hasMore=${hasMore}, total=${totalCount}`,
+		)
 
 		return LoadHistoryBatchResponse.create({
 			messages: protoMessages,
