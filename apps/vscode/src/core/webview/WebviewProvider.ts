@@ -184,6 +184,39 @@ export abstract class WebviewProvider {
 							var r = e && e.reason;
 							report("runtime", "Unhandled rejection: " + (r && r.message ? r.message : String(r)));
 						});
+
+						// Attribute service worker registration attempts.
+						//
+						// A webview document's origin is vscode-webview://<id>, which is not a
+						// secure context, so navigator.serviceWorker.register() there always
+						// rejects with InvalidStateError ("The document is in an invalid
+						// state"). Something in this environment is attempting a registration
+						// and VS Code surfaces it as a webview load error, but a repo-wide and
+						// install-wide search finds no register() call in Cline, in any
+						// installed extension, or in VSCodium itself.
+						//
+						// Static analysis cannot answer "is it this document", because a
+						// rejection with no handler is invisible to the listeners above once
+						// the caller swallows it. Wrapping register here can: this is the only
+						// code that runs in this document, so a hit proves Cline's webview is
+						// the source and names the caller, and silence rules the document out
+						// entirely. Report-only; the original is always called and its result
+						// passed through untouched, so behaviour is unchanged either way.
+						try {
+							if (navigator.serviceWorker && typeof navigator.serviceWorker.register === "function") {
+								var originalRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+								navigator.serviceWorker.register = function (scriptURL, options) {
+									var stack = new Error("service worker registration attempted").stack || "";
+									report("runtime", "navigator.serviceWorker.register called with: " + String(scriptURL), {
+										source: String(scriptURL),
+									});
+									report("runtime", "register() caller stack: " + stack);
+									return originalRegister(scriptURL, options);
+								};
+							}
+						} catch (e) {
+							report("runtime", "Could not instrument serviceWorker.register: " + e);
+						}
 					})();
 				</script>
 				<script type="module" nonce="${nonce}" src="${scriptUrl}"></script>

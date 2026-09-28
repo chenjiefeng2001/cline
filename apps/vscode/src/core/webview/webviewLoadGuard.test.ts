@@ -28,6 +28,10 @@ function htmlTemplate(): string {
 
 describe("webview HTML load guard", () => {
 	const html = htmlTemplate()
+	// HTML comments stripped: the guard's own explanatory comments spell out the very
+	// API names the assertions below count, so counting against raw markup would
+	// match the prose as well as the code.
+	const executable = html.replace(/<!--[\s\S]*?-->/g, "")
 
 	it("installs a guard before the bundle script tag", () => {
 		const guard = html.indexOf("webview_error")
@@ -51,10 +55,19 @@ describe("webview HTML load guard", () => {
 		expect(html).toContain("unhandledrejection")
 	})
 
+	it("instruments serviceWorker.register so an attempt can be attributed", () => {
+		// A repo-wide and install-wide search finds no register() call in Cline, in any
+		// installed extension, or in VSCodium, yet VS Code surfaces a registration
+		// failure when this panel opens. This is the only code that runs in this
+		// document, so wrapping register() is what turns "cannot find the caller" into
+		// a named stack - and silence rules this document out. Report-only: the
+		// original must still be called, or the guard would be changing behaviour.
+		expect(executable).toContain("navigator.serviceWorker.register")
+		expect(executable).toContain("register() caller stack")
+		expect(executable).toContain("originalRegister")
+	})
+
 	it("acquires the VS Code API and hands the instance to the app", () => {
-		// VS Code throws on a second acquireVsCodeApi(), which would take down the whole
-		// webview. Count real call sites in the executable markup, with HTML comments
-		// stripped: the explanatory comment above the guard also spells the name.
 		const executable = html.replace(/<!--[\s\S]*?-->/g, "")
 		const callSites = executable.match(/acquireVsCodeApi\s*\(\s*\)/g) ?? []
 		expect(callSites).toHaveLength(1)
