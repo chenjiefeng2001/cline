@@ -158,7 +158,7 @@ export abstract class DiffViewProvider {
 	 *
 	 * @returns true if the file was saved.
 	 */
-	protected abstract saveDocument(): Promise<Boolean>
+	protected abstract saveDocument(): Promise<boolean>
 
 	/**
 	 * Closes all open diff views.

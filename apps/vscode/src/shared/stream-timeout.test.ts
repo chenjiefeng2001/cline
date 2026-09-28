@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest"
-import { withFirstChunkTimeout, FirstChunkTimeoutError } from "./stream-timeout"
+import { describe, expect, it, vi } from "vitest"
+import { FirstChunkTimeoutError, withFirstChunkTimeout } from "./stream-timeout"
 
 describe("withFirstChunkTimeout", () => {
 	it("should yield all chunks from the inner iterable", async () => {
@@ -17,7 +17,9 @@ describe("withFirstChunkTimeout", () => {
 	})
 
 	it("should throw FirstChunkTimeoutError if first chunk is slow", { timeout: 5000 }, async () => {
-		const neverResolve = new Promise<IteratorResult<string>>(() => { /* never */ })
+		const neverResolve = new Promise<IteratorResult<string>>(() => {
+			/* never */
+		})
 		const inner = {
 			[Symbol.asyncIterator]() {
 				return { next: () => neverResolve, return: vi.fn().mockResolvedValue({ value: undefined, done: true }) }
@@ -26,7 +28,9 @@ describe("withFirstChunkTimeout", () => {
 
 		const start = Date.now()
 		await expect(async () => {
-			for await (const _ of withFirstChunkTimeout(inner as AsyncIterable<string>, { timeoutMs: 50 })) { /* */ }
+			for await (const _ of withFirstChunkTimeout(inner as AsyncIterable<string>, { timeoutMs: 50 })) {
+				/* */
+			}
 		}).rejects.toThrow(FirstChunkTimeoutError)
 
 		// Should complete within 2s for a 50ms timeout
@@ -48,7 +52,9 @@ describe("withFirstChunkTimeout", () => {
 
 	it("should propagate user-supplied AbortSignal", async () => {
 		const ac = new AbortController()
-		const neverResolve = new Promise<IteratorResult<string>>(() => { /* never */ })
+		const neverResolve = new Promise<IteratorResult<string>>(() => {
+			/* never */
+		})
 		const inner = {
 			[Symbol.asyncIterator]() {
 				return { next: () => neverResolve, return: vi.fn().mockResolvedValue({ value: undefined, done: true }) }
@@ -57,8 +63,11 @@ describe("withFirstChunkTimeout", () => {
 
 		const promise = (async () => {
 			for await (const _ of withFirstChunkTimeout(inner as AsyncIterable<string>, {
-				timeoutMs: 5000, signal: ac.signal,
-			})) { /* */ }
+				timeoutMs: 5000,
+				signal: ac.signal,
+			})) {
+				/* */
+			}
 		})()
 
 		ac.abort(new DOMException("Cancelled", "AbortError"))
@@ -70,14 +79,19 @@ describe("withFirstChunkTimeout", () => {
 		const inner = {
 			[Symbol.asyncIterator]() {
 				return {
-					next: () => new Promise<IteratorResult<string>>(() => { /* hangs forever */ }),
+					next: () =>
+						new Promise<IteratorResult<string>>(() => {
+							/* hangs forever */
+						}),
 					return: returnFn,
 				}
 			},
 		}
 
 		await expect(async () => {
-			for await (const _ of withFirstChunkTimeout(inner as AsyncIterable<string>, { timeoutMs: 50 })) { /* */ }
+			for await (const _ of withFirstChunkTimeout(inner as AsyncIterable<string>, { timeoutMs: 50 })) {
+				/* */
+			}
 		}).rejects.toThrow(FirstChunkTimeoutError)
 
 		expect(returnFn).toHaveBeenCalled()
@@ -86,7 +100,9 @@ describe("withFirstChunkTimeout", () => {
 	it("should handle an already-aborted signal before starting", async () => {
 		const ac = new AbortController()
 		ac.abort(new DOMException("AlreadyCancelled", "AbortError"))
-		const neverResolve = new Promise<IteratorResult<string>>(() => { /* never */ })
+		const neverResolve = new Promise<IteratorResult<string>>(() => {
+			/* never */
+		})
 		const inner = {
 			[Symbol.asyncIterator]() {
 				return { next: () => neverResolve, return: vi.fn().mockResolvedValue({ value: undefined, done: true }) }
@@ -95,8 +111,11 @@ describe("withFirstChunkTimeout", () => {
 
 		await expect(async () => {
 			for await (const _ of withFirstChunkTimeout(inner as AsyncIterable<string>, {
-				timeoutMs: 5000, signal: ac.signal,
-			})) { /* */ }
+				timeoutMs: 5000,
+				signal: ac.signal,
+			})) {
+				/* */
+			}
 		}).rejects.toThrow("AlreadyCancelled")
 	})
 })

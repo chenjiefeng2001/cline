@@ -36,11 +36,7 @@ export interface BuildApiHandlerOptions {
  */
 const THINKING_MODEL_PATTERNS = /deepseek.*r[1-9]|o[1-9]|thinking|reasoner/i
 
-function pickFetchCategory(
-	providerId: string,
-	modelId?: string,
-	requestTimeoutMs?: number,
-): ReturnType<typeof createFetch> {
+function pickFetchCategory(providerId: string, modelId?: string, requestTimeoutMs?: number): ReturnType<typeof createFetch> {
 	const category =
 		providerId === "ollama" || providerId === "lmstudio"
 			? ("local" as const)
@@ -49,8 +45,7 @@ function pickFetchCategory(
 				: ("default" as const)
 
 	// Respect the user-supplied timeout for all providers when set (value > 0).
-	const customTimeoutMs =
-		typeof requestTimeoutMs === "number" && requestTimeoutMs > 0 ? requestTimeoutMs : undefined
+	const customTimeoutMs = typeof requestTimeoutMs === "number" && requestTimeoutMs > 0 ? requestTimeoutMs : undefined
 
 	return createFetch(category, customTimeoutMs !== undefined ? { customTimeoutMs } : undefined)
 }

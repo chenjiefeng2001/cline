@@ -112,12 +112,12 @@ let mockFetch: FetchFunction | undefined
 // killed by a fixed timer.  Activity-based timeouts (see createFetch) ensure
 // stale connections are still detected.
 const DEFAULT_TIMEOUTS: Record<string, number> = {
-	default: 300_000,      // Most API requests (Anthropic, OpenAI, etc.) – 5 min
-	local: 180_000,        // Local models (Ollama, LM Studio, etc.)
-	thinking: 600_000,     // Deep-thinking models (DeepSeek-R1, o1, etc.) – 10 min
-	mcp_sse: 45_000,       // MCP SSE connection / heartbeats
-	market: 10_000,        // Marketplace download
-	oauth: 60_000,         // OAuth callback
+	default: 300_000, // Most API requests (Anthropic, OpenAI, etc.) – 5 min
+	local: 180_000, // Local models (Ollama, LM Studio, etc.)
+	thinking: 600_000, // Deep-thinking models (DeepSeek-R1, o1, etc.) – 10 min
+	mcp_sse: 45_000, // MCP SSE connection / heartbeats
+	market: 10_000, // Marketplace download
+	oauth: 60_000, // OAuth callback
 } as const
 
 /**
@@ -210,26 +210,16 @@ export function createFetch(
 ): typeof globalThis.fetch {
 	const totalTimeoutMs = options?.customTimeoutMs ?? DEFAULT_TIMEOUTS[category] ?? DEFAULT_TIMEOUTS.default
 
-	const timeoutFetch = async function timeoutFetch(
-		input: string | URL | Request,
-		init?: RequestInit,
-	): Promise<Response> {
+	const timeoutFetch = async function timeoutFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
 		const controller = new AbortController()
 		const totalTimer = setTimeout(() => {
-			controller.abort(
-				new DOMException(
-					`Request timed out after ${totalTimeoutMs}ms (category: ${category})`,
-					"TIMEOUT",
-				),
-			)
+			controller.abort(new DOMException(`Request timed out after ${totalTimeoutMs}ms (category: ${category})`, "TIMEOUT"))
 		}, totalTimeoutMs)
 
 		try {
 			const response = await (mockFetch || baseFetch)(input, {
 				...init,
-				signal: init?.signal
-					? anySignal(init.signal, controller.signal)
-					: controller.signal,
+				signal: init?.signal ? anySignal(init.signal, controller.signal) : controller.signal,
 			})
 
 			// ── Activity-based timeout for streaming bodies ──────────────
@@ -412,7 +402,10 @@ export function isExcludedFromProxy(urlOrHost: string): boolean {
 		return false
 	}
 
-	const entries = noProxyRaw.split(",").map((e) => e.trim()).filter(Boolean)
+	const entries = noProxyRaw
+		.split(",")
+		.map((e) => e.trim())
+		.filter(Boolean)
 
 	for (const entry of entries) {
 		if (matchesNoProxyEntry(host, entry)) {

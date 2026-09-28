@@ -14,6 +14,13 @@ https://github.com/microsoft/vscode-webview-ui-toolkit-samples/blob/main/default
 https://github.com/KumarVariable/vscode-extension-sidebar-html/blob/master/src/customSidebarViewProvider.ts
 */
 
+/**
+ * How long to wait for the webview to post webview_ready before declaring the panel
+ * dead. A healthy open signals in well under 500ms; the budget only has to outlast a
+ * slow cold start, and firing early would log a false alarm.
+ */
+const WEBVIEW_READY_TIMEOUT_MS = 4000
+
 export class VscodeWebviewProvider extends WebviewProvider implements vscode.WebviewViewProvider {
 	// Used in package.json as the view's id. This value cannot be changed due to how vscode caches
 	// views based on their id, and updating the id would break existing instances of the extension.
@@ -46,6 +53,8 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 	 */
 	private _webviewReady = false
 	private _pendingStatePush: ReturnType<typeof setTimeout> | null = null
+	/** When the current webview was resolved, so a late ready signal is visible as slow. */
+	private _webviewResolvedAt = 0
 
 	override getWebviewUrl(path: string) {
 		if (!this.webview) {
@@ -112,6 +121,26 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 			}
 
 			this._initialized = true
+
+			// Arm the same ready watchdog the re-created path uses. It used to be
+			// re-creation-only, which left the most common failure unreported: on a
+			// first open, if the webview script never evaluates (bundle load failure, a
+			// module throwing at import, CSP refusal) it never posts webview_ready, the
+			// panel is blank, and the log simply stops after "Webview view resolved"
+			// with no indication anything went wrong. Observed 2026-09-28.
+			this._webviewReady = false
+			if (this._pendingStatePush) {
+				clearTimeout(this._pendingStatePush)
+			}
+			this._pendingStatePush = setTimeout(() => {
+				if (!this._webviewReady) {
+					Logger.error(
+						"[TurnUi] webview never signalled ready after first resolve — the panel is blank because the " +
+							"webview script did not run. Pushing state anyway; look for a preceding 'Webview load error'.",
+					)
+					this.pushStateToWebview()
+				}
+			}, WEBVIEW_READY_TIMEOUT_MS)
 		} else {
 			// ── Webview re-creation (e.g. after VS Code recycling) ─────────
 			// The webview JavaScript context was destroyed, so we MUST re-set HTML
@@ -140,7 +169,7 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 					Logger.warn("[VscodeWebviewProvider] Webview ready signal timeout - pushing state anyway")
 					this.pushStateToWebview()
 				}
-			}, 2000) // 2 second fallback timeout
+			}, WEBVIEW_READY_TIMEOUT_MS)
 		}
 
 		// Logs show up in bottom panel > Debug Console
@@ -242,7 +271,14 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 			}
 			case "webview_ready": {
 				// Webview has confirmed it's ready to receive state
-				Logger.log("[VscodeWebviewProvider] Webview ready signal received")
+				// Report the delay too: a ready signal that arrives seconds late means the
+				// panel sat blank for that long, which is otherwise indistinguishable from
+				// a slow machine. A healthy open lands in well under 500ms.
+				const took = this._webviewResolvedAt ? Date.now() - this._webviewResolvedAt : undefined
+				Logger.log(
+					`[VscodeWebviewProvider] Webview ready signal received` +
+						(took === undefined ? "" : ` (${took}ms after resolve${took > 1000 ? " - SLOW" : ""})`),
+				)
 				this._webviewReady = true
 
 				// Cancel the fallback timeout
@@ -253,6 +289,18 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 
 				// Push current state to the ready webview
 				this.pushStateToWebview()
+				break
+			}
+			case "webview_error": {
+				// The webview console is never written to disk, so without this a blank
+				// panel is undiagnosable: resolveWebviewView logs, state is pushed into a
+				// script that never ran, and nothing anywhere records why.
+				const report = message.webview_error
+				const where = report?.source ? ` at ${report.source}:${report.line ?? "?"}:${report.column ?? "?"}` : ""
+				Logger.error(
+					`[VscodeWebviewProvider] Webview ${report?.phase ?? "runtime"} error: ${report?.message ?? "unknown"}${where}` +
+						(report?.stack ? `\n${report.stack}` : ""),
+				)
 				break
 			}
 			default: {

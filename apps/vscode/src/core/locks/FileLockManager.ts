@@ -41,9 +41,7 @@ export class FileLockManager {
 
 	registerInstance(hostAddress: string): void {
 		this.withLockSync((locks) => {
-			const filtered = locks.filter(
-				(l) => !(l.lock_type === "instance" && l.held_by === this.instanceAddress),
-			)
+			const filtered = locks.filter((l) => !(l.lock_type === "instance" && l.held_by === this.instanceAddress))
 			filtered.push({
 				held_by: this.instanceAddress,
 				lock_type: "instance",
@@ -55,11 +53,7 @@ export class FileLockManager {
 	}
 
 	removeInstanceByAddress(instanceAddress: string): void {
-		this.withLockSync((locks) =>
-			locks.filter(
-				(l) => !(l.lock_type === "instance" && l.held_by === instanceAddress),
-			),
-		)
+		this.withLockSync((locks) => locks.filter((l) => !(l.lock_type === "instance" && l.held_by === instanceAddress)))
 	}
 
 	unregisterInstance(): void {
@@ -69,20 +63,14 @@ export class FileLockManager {
 	getInstanceByPort(port: number): { instanceAddress: string; hostAddress: string } | null {
 		const locks = this.readLocksSync()
 		const result = locks.find(
-			(l) =>
-				l.lock_type === "instance" &&
-				(l.held_by.endsWith(`:${port}`) || l.lock_target.endsWith(`:${port}`)),
+			(l) => l.lock_type === "instance" && (l.held_by.endsWith(`:${port}`) || l.lock_target.endsWith(`:${port}`)),
 		)
-		return result
-			? { instanceAddress: result.held_by, hostAddress: result.lock_target }
-			: null
+		return result ? { instanceAddress: result.held_by, hostAddress: result.lock_target } : null
 	}
 
 	async getFolderLockByTarget(lockTarget: string): Promise<LockRow | null> {
 		const locks = this.readLocksSync()
-		const lock = locks.find(
-			(l) => l.lock_type === "folder" && l.lock_target === lockTarget,
-		)
+		const lock = locks.find((l) => l.lock_type === "folder" && l.lock_target === lockTarget)
 		return lock ? this.toLockRow(lock) : null
 	}
 
@@ -90,9 +78,7 @@ export class FileLockManager {
 		heldBy = this.instanceAddress
 		let conflicting: LockRow | null = null
 		this.withLockSync((locks) => {
-			const existing = locks.find(
-				(l) => l.lock_type === "folder" && l.lock_target === lockTarget,
-			)
+			const existing = locks.find((l) => l.lock_type === "folder" && l.lock_target === lockTarget)
 			if (existing) {
 				if (existing.held_by === heldBy) {
 					return locks
@@ -114,26 +100,15 @@ export class FileLockManager {
 	async releaseFolderLockByTarget(heldBy: string, lockTarget: string): Promise<void> {
 		heldBy = this.instanceAddress
 		this.withLockSync((locks) =>
-			locks.filter(
-				(l) =>
-					!(
-						l.lock_type === "folder" &&
-						l.held_by === heldBy &&
-						l.lock_target === lockTarget
-					),
-			),
+			locks.filter((l) => !(l.lock_type === "folder" && l.held_by === heldBy && l.lock_target === lockTarget)),
 		)
 	}
 
 	cleanupOrphanedFolderLocks(): void {
 		this.withLockSync((locks) => {
-			const activeInstances = new Set(
-				locks.filter((l) => l.lock_type === "instance").map((l) => l.held_by),
-			)
+			const activeInstances = new Set(locks.filter((l) => l.lock_type === "instance").map((l) => l.held_by))
 			const before = locks.length
-			const filtered = locks.filter(
-				(l) => l.lock_type !== "folder" || activeInstances.has(l.held_by),
-			)
+			const filtered = locks.filter((l) => l.lock_type !== "folder" || activeInstances.has(l.held_by))
 			const removed = before - filtered.length
 			if (removed > 0) {
 				Logger.log(`[FileLockManager] Cleaned up ${removed} orphaned folder lock(s)`)
@@ -157,9 +132,7 @@ export class FileLockManager {
 			if (!raw) return []
 			const locks: StoredLock[] = JSON.parse(raw)
 			const now = Date.now()
-			return locks.filter(
-				(l) => now - l.locked_at < FileLockManager.STALE_LOCK_TIMEOUT,
-			)
+			return locks.filter((l) => now - l.locked_at < FileLockManager.STALE_LOCK_TIMEOUT)
 		} catch (error) {
 			Logger.error(`[FileLockManager] Failed to read lock file: ${error}`)
 			return []
@@ -189,10 +162,20 @@ export class FileLockManager {
 			}
 			Logger.error(`[FileLockManager] Lock acquisition failed: ${error}`)
 		} finally {
-			if (fd !== null) { try { fs.closeSync(fd) } catch { /* ok */ } }
+			if (fd !== null) {
+				try {
+					fs.closeSync(fd)
+				} catch {
+					/* ok */
+				}
+			}
 			try {
-				if (existsSync(lockFilePath)) { unlinkSync(lockFilePath) }
-			} catch { /* ok */ }
+				if (existsSync(lockFilePath)) {
+					unlinkSync(lockFilePath)
+				}
+			} catch {
+				/* ok */
+			}
 		}
 	}
 
@@ -205,7 +188,9 @@ export class FileLockManager {
 				unlinkSync(lockFilePath)
 				Logger.warn(`[FileLockManager] Removed stale lock file: ${lockFilePath}`)
 			}
-		} catch { /* best-effort */ }
+		} catch {
+			/* best-effort */
+		}
 	}
 
 	private sleepSync(ms: number): void {

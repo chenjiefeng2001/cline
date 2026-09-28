@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { CompositeDisposable } from "./disposable"
 
 describe("CompositeDisposable", () => {
@@ -37,7 +37,9 @@ describe("CompositeDisposable", () => {
 	})
 
 	it("should guard against one callback throwing (others still run)", () => {
-		const fn1 = vi.fn(() => { throw new Error("boom") })
+		const fn1 = vi.fn(() => {
+			throw new Error("boom")
+		})
 		const fn2 = vi.fn()
 
 		const c = new CompositeDisposable()

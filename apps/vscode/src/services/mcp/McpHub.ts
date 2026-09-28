@@ -34,6 +34,8 @@ import chokidar, { type FSWatcher } from "chokidar"
 import deepEqual from "fast-deep-equal"
 import * as fs from "fs/promises"
 import { nanoid } from "nanoid"
+import pLimit from "p-limit"
+import pTimeout from "p-timeout"
 import ReconnectingEventSource from "reconnecting-eventsource"
 import { z } from "zod"
 import { HostProvider } from "@/hosts/host-provider"
@@ -41,15 +43,13 @@ import { fetch } from "@/shared/net"
 import { ShowMessageType } from "@/shared/proto/host/window"
 import { Logger } from "@/shared/services/Logger"
 import { expandEnvironmentVariables } from "@/utils/envExpansion"
-import pLimit from "p-limit"
-import pTimeout from "p-timeout"
 import type { TelemetryService } from "../telemetry/TelemetryService"
 import { DEFAULT_REQUEST_TIMEOUT_MS } from "./constants"
-import { SseHeartbeat } from "./SseHeartbeat"
 import { McpOAuthManager } from "./McpOAuthManager"
-import { updateMcpSettingsFile } from "./settingsLock"
+import { SseHeartbeat } from "./SseHeartbeat"
 import { StreamableHttpReconnectHandler } from "./StreamableHttpReconnectHandler"
 import { BaseConfigSchema, McpSettingsSchema, ServerConfigSchema } from "./schemas"
+import { updateMcpSettingsFile } from "./settingsLock"
 import type { McpConnection, McpServerConfig, Transport } from "./types"
 export class McpHub {
 	getMcpServersPath: () => Promise<string>
@@ -960,10 +960,7 @@ export class McpHub {
 	): Promise<void> {
 		return this.connectionLimit(async () => {
 			try {
-				await pTimeout(
-					this.connectToServer(name, config, source),
-					{ milliseconds: McpHub.CONNECTION_TIMEOUT_MS },
-				)
+				await pTimeout(this.connectToServer(name, config, source), { milliseconds: McpHub.CONNECTION_TIMEOUT_MS })
 			} catch (error) {
 				Logger.error(`Failed to connect to MCP server "${name}" (concurrent limit ${3}):`, error)
 				throw error

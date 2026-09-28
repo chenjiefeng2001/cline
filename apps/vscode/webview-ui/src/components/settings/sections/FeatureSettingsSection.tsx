@@ -196,7 +196,9 @@ const NumberSettingField = memo(
 			const parsed = Number.parseInt(text, 10)
 			if (Number.isNaN(parsed) || parsed < min || (max !== undefined && parsed > max)) {
 				setError(
-					max !== undefined ? `Enter a whole number between ${min} and ${max}` : `Enter a whole number of at least ${min}`,
+					max !== undefined
+						? `Enter a whole number between ${min} and ${max}`
+						: `Enter a whole number of at least ${min}`,
 				)
 				return
 			}
@@ -309,8 +311,8 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 									max={100}
 									min={50}
 									onCommit={(value) => updateSetting("autoCompactThreshold", value)}
-									value={autoCompactThreshold ?? 90}
 									placeholder="90"
+									value={autoCompactThreshold ?? 90}
 								/>
 							</div>
 							<div className="pt-3">

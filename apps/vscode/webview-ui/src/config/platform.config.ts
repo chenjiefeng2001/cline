@@ -51,8 +51,13 @@ declare global {
 	function acquireVsCodeApi(): any
 }
 
-// Initialize the vscode API if available
-const vsCodeApi = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null
+// Initialize the vscode API if available.
+// The webview HTML installs a load guard before the bundle evaluates, and it calls
+// acquireVsCodeApi() itself - VS Code permits exactly one call per webview, so a
+// second call here would throw and take the whole app down. Reuse the guard's
+// instance when it is present.
+const preAcquiredApi = typeof window !== "undefined" ? (window as any).__clineVsCodeApi : undefined
+const vsCodeApi = preAcquiredApi ?? (typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null)
 
 // Expose the VSCode API for debug harness access
 if (vsCodeApi && typeof window !== "undefined") {

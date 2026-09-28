@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { withLogContext, getLogContext, formatLogContext } from "@/shared/services/log-context"
+import { formatLogContext, getLogContext, withLogContext } from "@/shared/services/log-context"
 
 describe("log-context", () => {
 	describe("withLogContext / getLogContext", () => {

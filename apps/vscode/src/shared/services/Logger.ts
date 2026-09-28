@@ -10,7 +10,7 @@
  * `withLogContext()` is used around the caller. No manual context passing
  * needed. See `log-context.ts` for details.
  */
-import { getLogContext, formatLogContext } from "./log-context"
+import { formatLogContext, getLogContext } from "./log-context"
 
 /**
  * Minimal interface matching VS Code's `LogOutputChannel`.

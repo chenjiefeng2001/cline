@@ -64,8 +64,10 @@ export class SseHeartbeat {
 			})
 		})
 
-		Logger.log(`[SseHeartbeat:${name}] Started monitoring (every ${SseHeartbeat.HEARTBEAT_INTERVAL_MS / 1000}s, ` +
-			`timeout ${SseHeartbeat.INACTIVITY_TIMEOUT_MS / 1000}s)`)
+		Logger.log(
+			`[SseHeartbeat:${name}] Started monitoring (every ${SseHeartbeat.HEARTBEAT_INTERVAL_MS / 1000}s, ` +
+				`timeout ${SseHeartbeat.INACTIVITY_TIMEOUT_MS / 1000}s)`,
+		)
 
 		return () => heartbeat.dispose()
 	}

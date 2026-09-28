@@ -186,10 +186,7 @@ export const CommandOutputRow = memo(
 		return (
 			<>
 				{commandHeader}
-				<div
-					className="bg-code rounded-sm border border-editor-group-border"
-					style={{}}
-				>
+				<div className="bg-code rounded-sm border border-editor-group-border" style={{}}>
 					{command && (
 						<div className="bg-code flex items-center justify-between px-2 py-2.5 border-b border-editor-group-border rounded-sm rounded-b-none overflow-hidden">
 							<div className="flex items-center gap-2 flex-1 m-w-0">
@@ -238,8 +235,8 @@ export const CommandOutputRow = memo(
 						<CommandOutputContent
 							isContainerExpanded={true}
 							isOutputFullyExpanded={isOutputFullyExpanded}
-							onToggle={() => setIsOutputFullyExpanded(!isOutputFullyExpanded)}
 							onOutputChange={onOutputChange}
+							onToggle={() => setIsOutputFullyExpanded(!isOutputFullyExpanded)}
 							output={output}
 						/>
 					)}

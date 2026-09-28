@@ -124,6 +124,68 @@ export abstract class WebviewProvider {
 			<body>
 				<noscript>You need to enable JavaScript to run this app.</noscript>
 				<div id="root"></div>
+				<!--
+					Load guard. This is the only code that runs when the bundle itself fails to
+					load or evaluate, which is precisely the case it exists for: a script that
+					never evaluates never reaches main.tsx, so the application-level handlers
+					cannot report it, the root element stays empty, the panel is blank, and the
+					extension log ends at "Webview view resolved" with no explanation. VS Code
+					does not persist the webview console, so forwarding to the extension is the
+					only way the failure survives long enough to be diagnosed.
+
+					Also acquires the VS Code API and stashes it on window, because acquireVsCodeApi()
+					may only be called once per webview; platform.config.ts reuses this instance.
+				-->
+				<script nonce="${nonce}">
+					(function () {
+						var api = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null;
+						window.__clineVsCodeApi = api;
+						function report(phase, message, extra) {
+							try {
+								if (!api) {
+									return;
+								}
+								var payload = { phase: phase, message: String(message) };
+								if (extra) {
+									for (var k in extra) {
+										if (Object.prototype.hasOwnProperty.call(extra, k) && extra[k] !== undefined) {
+											payload[k] = extra[k];
+										}
+									}
+								}
+								api.postMessage({ type: "webview_error", webview_error: payload });
+							} catch (e) {
+								/* reporting must never throw */
+							}
+						}
+						// Capture phase: resource load failures (the bundle, a stylesheet) fire
+						// on the element and do not bubble, so a bubble-phase listener would
+						// never see them.
+						window.addEventListener(
+							"error",
+							function (e) {
+								var t = e && e.target;
+								if (t && t !== window && t.tagName) {
+									report(
+										"load",
+										"Failed to load <" + String(t.tagName).toLowerCase() + ">" + (t.src ? ": " + t.src : ""),
+									);
+									return;
+								}
+								report("runtime", (e && e.message) || "unknown error", {
+									source: e && e.filename,
+									line: e && e.lineno,
+									column: e && e.colno,
+								});
+							},
+							true,
+						);
+						window.addEventListener("unhandledrejection", function (e) {
+							var r = e && e.reason;
+							report("runtime", "Unhandled rejection: " + (r && r.message ? r.message : String(r)));
+						});
+					})();
+				</script>
 				<script type="module" nonce="${nonce}" src="${scriptUrl}"></script>
 			</body>
 		</html>

@@ -228,11 +228,7 @@ export async function executeWithRetry<T>(
 				throw error
 			}
 
-			const delayMs = calculateDelay(
-				policy.baseDelayMs * Math.pow(2, attempt - 1),
-				policy.maxDelayMs,
-				policy.jitter,
-			)
+			const delayMs = calculateDelay(policy.baseDelayMs * 2 ** (attempt - 1), policy.maxDelayMs, policy.jitter)
 
 			Logger.warn(
 				`[retry] ${context ?? "request"} failed (attempt ${attempt}/${policy.maxAttempts}, ` +

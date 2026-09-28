@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { Logger, type LogOutputChannel } from "./Logger"
 
 describe("Logger", () => {
@@ -49,7 +49,9 @@ describe("Logger", () => {
 
 	it("should not fail when outputChannel throws", () => {
 		const ch: LogOutputChannel = {
-			trace: vi.fn(() => { throw new Error("channel fail") }),
+			trace: vi.fn(() => {
+				throw new Error("channel fail")
+			}),
 			debug: vi.fn(),
 			info: vi.fn(),
 			warn: vi.fn(),

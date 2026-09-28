@@ -1,9 +1,9 @@
 import { ChildProcess, spawn } from "child_process"
-import { terminateProcessTree } from "@/utils/process-termination"
-import { isWindowsJobObjectSupported } from "@/utils/windows-job-object"
 import { EventEmitter } from "events"
 import { Logger } from "@/shared/services/Logger"
 import { resolveWindowsPowerShellExecutable } from "@/utils/powershell"
+import { terminateProcessTree } from "@/utils/process-termination"
+import { isWindowsJobObjectSupported } from "@/utils/windows-job-object"
 import { HookProcessRegistry } from "./HookProcessRegistry"
 import { escapeShellPath } from "./shell-escape"
 

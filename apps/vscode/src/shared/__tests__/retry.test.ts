@@ -43,10 +43,7 @@ describe("executeWithRetry", () => {
 	})
 
 	it("retries on network error and succeeds", async () => {
-		const fn = vi
-			.fn()
-			.mockRejectedValueOnce({ code: "ECONNREFUSED" })
-			.mockResolvedValueOnce("ok")
+		const fn = vi.fn().mockRejectedValueOnce({ code: "ECONNREFUSED" }).mockResolvedValueOnce("ok")
 
 		const result = await executeWithRetry(fn, undefined, "test")
 		expect(result).toBe("ok")
