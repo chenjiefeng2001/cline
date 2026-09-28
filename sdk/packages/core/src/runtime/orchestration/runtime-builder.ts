@@ -20,6 +20,11 @@ import {
 	registerMcpServersFromSettingsFile,
 	resolveDefaultMcpSettingsPath,
 } from "../../extensions/mcp";
+import { join } from "node:path";
+import { resolveClineDataDir } from "@cline/shared/storage";
+import { SqliteMemoryStore } from "../../memory/stores/sqlite-memory-store";
+import { createMemoryRecallTool } from "../../memory/recall-tool";
+import { createMemoryRememberTool } from "../../memory/remember-tool";
 import type { FileBoundary } from "../../extensions/tools/executors/file-boundary";
 import {
 	createBuiltinTools,
@@ -248,8 +253,50 @@ function isSkillsToolEnabledForSession(input: {
 
 const SKILLS_PROBE_EXECUTOR = (async () => "") as SkillsExecutorWithMetadata;
 
-async function loadConfiguredMcpTools(logger?: BasicLogger): Promise<{
-	tools: AgentTool[];
+/**
+ * Build the memory tools for a session, if memory is enabled for it.
+ *
+ * Three independent switches, because the two write paths have very different
+ * risk profiles and a single toggle cannot express that:
+ *
+ * - `memory.enabled` is the master. Off, no store is opened and no tool is exposed.
+ * - `memory.recallEnabled` exposes `recall_memory`, which only reads. It is on by
+ *   default because a read of a store that is empty is harmless.
+ * - `memory.writeEnabled` exposes `remember`, which lets the model persist records
+ *   that outlive the conversation. It is off by default: that is data retention
+ *   outside the transcript, and it should be something the user turned on rather
+ *   than something they inherited.
+ * - `memory.autoCaptureEnabled` turns on the automatic write path.
+ *
+ * With no write path enabled the store can never be populated, so the recall tool
+ * would be advertised to the model while being incapable of returning anything.
+ * Rather than show an empty tool, recall is withheld too - a capability that cannot
+ * succeed is worse than an absent one, because the model will plan around it.
+ */
+async function buildMemoryTools(config: CoreSessionConfig): Promise<AgentTool<unknown, unknown>[]> {
+	const memory = config.memory;
+	if (!memory?.enabled) {
+		return [];
+	}
+	if (!memory.writeEnabled && !memory.autoCaptureEnabled) {
+		// Nothing can write, so nothing can be recalled. Return empty rather than
+		// exposing a permanently empty read.
+		return [];
+	}
+	const dbPath = memory.dbPath ?? join(resolveClineDataDir(), "memory.db");
+	const store = new SqliteMemoryStore({ dbPath });
+	await store.init();
+	const tools: AgentTool<unknown, unknown>[] = [];
+	if (memory.recallEnabled !== false) {
+		tools.push(createMemoryRecallTool({ store, workspacePath: config.workspaceRoot ?? config.cwd }) as AgentTool<unknown, unknown>);
+	}
+	if (memory.writeEnabled) {
+		tools.push(createMemoryRememberTool({ store, workspacePath: config.workspaceRoot ?? config.cwd }) as AgentTool<unknown, unknown>);
+	}
+	return tools;
+}
+
+async function loadConfiguredMcpTools(logger?: BasicLogger): Promise<{	tools: AgentTool[];
 	shutdown?: () => Promise<void>;
 }> {
 	const settingsPath = resolveDefaultMcpSettingsPath();
@@ -285,7 +332,7 @@ async function loadConfiguredMcpTools(logger?: BasicLogger): Promise<{
 			createMcpTools({ serverName: r.name, provider: manager }),
 		),
 	);
-	const tools: AgentTool[] = [];
+	const tools: AgentTool<unknown, unknown>[] = [];
 	for (const [i, result] of results.entries()) {
 		if (result.status === "fulfilled") {
 			tools.push(...result.value);
@@ -421,7 +468,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 		const fileBoundary = resolveFileBoundary(config, config.cwd);
 		const effectiveToolPolicies = input.toolPolicies ?? config.toolPolicies;
 		const globallyDisabledToolNames = resolveDisabledToolNames();
-		const tools: AgentTool[] = [];
+		const tools: AgentTool<unknown, unknown>[] = [];
 		const effectiveTeamName = config.teamName?.trim() || createTeamName();
 		const teamStoreKey = config.sessionId?.trim() || effectiveTeamName;
 		const configuredAgents = normalized.enableSpawnAgent
@@ -616,6 +663,11 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 				const mcpRuntime = await loadConfiguredMcpTools(config.logger);
 				tools.push(...mcpRuntime.tools);
 				mcpShutdown = mcpRuntime.shutdown;
+			}
+
+			const memoryTools = await buildMemoryTools(config);
+			if (memoryTools.length > 0) {
+				tools.push(...memoryTools);
 			}
 		}
 

@@ -330,6 +330,18 @@ const USER_SETTINGS_FIELDS = {
 	// would silently round-trip as a joined string. Accepts either a JSON array or a
 	// newline/comma separated list; see readStringArray in cline-session-factory.
 	fileBoundaryAdditionalRoots: { default: "" as string },
+	// Cross-session project memory. The store and the recall tool existed but no host
+	// instantiated them and nothing called append(), so the layer could only ever come
+	// back empty. Split into switches rather than one flag because the write paths
+	// retain data outside the conversation and should be opted into deliberately.
+	// Master switch: opens no store and exposes no tool.
+	memoryEnabled: { default: false as boolean },
+	// recall_memory, which only reads. Harmless when the store is empty.
+	memoryRecallEnabled: { default: true as boolean },
+	// remember, the agent-initiated write path.
+	memoryWriteEnabled: { default: false as boolean },
+	// Automatic extraction of memories from completed turns.
+	memoryAutoCaptureEnabled: { default: false as boolean },
 	worktreesEnabled: { default: false as boolean },
 	preferredLanguage: { default: "English" as string },
 	mode: { default: "act" as Mode },

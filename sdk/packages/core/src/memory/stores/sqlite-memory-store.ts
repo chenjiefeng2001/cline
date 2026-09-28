@@ -199,9 +199,16 @@ export class SqliteMemoryStore implements MemoryStore {
 	}
 
 	private run(sql: string, params: unknown[] = []): void {
+		// SQLite cannot bind `undefined` - it is neither null nor a value - and reports
+		// the failure by the parameter's position, which points at a column rather than
+		// at the caller's intent. A semantic append with no confidence, workspacePath or
+		// tags therefore failed with "cannot be bound to SQLite parameter 5", which
+		// reads as a subject/fact problem and is neither. Normalising at the boundary
+		// means an absent optional is stored as NULL, which is what every insert here
+		// already does explicitly, and a future column cannot reintroduce this.
 		this.getRawDb()
 			.prepare(sql)
-			.run(...params);
+			.run(...params.map((param) => (param === undefined ? null : param)));
 	}
 
 	private selectRows(sql: string, params: unknown[] = []): MemoryRow[] {

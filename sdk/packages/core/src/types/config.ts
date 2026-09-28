@@ -47,6 +47,38 @@ export interface FileBoundaryConfig {
 
 export type { FileBoundary };
 
+/**
+ * Cross-session project memory: what the agent chose to carry forward.
+ *
+ * The store and the recall tool existed but no host instantiated them, and nothing
+ * anywhere called `append()`, so the layer could only ever return empty. The write
+ * paths and these switches are what make it a real capability.
+ *
+ * The two write paths have different risk. `writeEnabled` lets the model persist
+ * records on its own initiative; `autoCaptureEnabled` extracts them from completed
+ * turns. Both retain data outside the conversation, so both default off.
+ */
+export interface MemoryConfig {
+/** Master switch. No store is opened and no tool is exposed when false. */
+enabled?: boolean;
+/**
+ * Expose `recall_memory`.
+ * @default true when enabled
+ */
+recallEnabled?: boolean;
+/**
+ * Expose `remember`, the agent-initiated write path.
+ * @default false
+ */
+writeEnabled?: boolean;
+/**
+ * Run the automatic write path over completed turns.
+ * @default false
+ */
+autoCaptureEnabled?: boolean;
+/** SQLite file. Defaults to the session data directory. */
+dbPath?: string;
+}
 export type CoreAgentMode = AgentMode;
 
 export interface CoreModelConfig {
@@ -303,6 +335,8 @@ export interface CoreSessionConfig
 	 * multi-root workspace legitimately spans several directories.
 	 */
 	fileBoundary?: FileBoundaryConfig;
+	memory?: MemoryConfig;
+
 	systemPrompt: string;
 	teamName?: string;
 	missionLogIntervalSteps?: number;

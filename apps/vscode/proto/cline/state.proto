@@ -298,6 +298,10 @@ message Settings {
   optional int32 run_budget_max_total_cost = 191;
   optional bool file_boundary_enabled = 192;
   optional string file_boundary_additional_roots = 193;
+  optional bool memory_enabled = 194;
+  optional bool memory_recall_enabled = 195;
+  optional bool memory_write_enabled = 196;
+  optional bool memory_auto_capture_enabled = 197;
 }
 
 message State {

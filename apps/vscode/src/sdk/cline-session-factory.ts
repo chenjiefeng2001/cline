@@ -869,6 +869,22 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	const fileBoundaryAdditionalRoots = readStringArray(stateManager.getGlobalSettingsKey("fileBoundaryAdditionalRoots"))
 	const fileBoundary = fileBoundaryEnabled ? { additionalRoots: fileBoundaryAdditionalRoots } : undefined
 
+	// Cross-session memory. Three switches, because the two write paths carry
+	// different risk: recall only reads, while `remember` and automatic capture both
+	// retain data past the conversation. All default off, so nothing is persisted
+	// outside the transcript until the user asks for it.
+	const memoryEnabled = stateManager.getGlobalSettingsKey("memoryEnabled") ?? false
+	const memoryWriteEnabled = stateManager.getGlobalSettingsKey("memoryWriteEnabled") ?? false
+	const memoryAutoCaptureEnabled = stateManager.getGlobalSettingsKey("memoryAutoCaptureEnabled") ?? false
+	const memory = memoryEnabled
+		? {
+				enabled: true,
+				recallEnabled: stateManager.getGlobalSettingsKey("memoryRecallEnabled") ?? true,
+				writeEnabled: memoryWriteEnabled,
+				autoCaptureEnabled: memoryAutoCaptureEnabled,
+			}
+		: undefined
+
 	// Subagents and teams. These were hard-coded false, which left the whole
 	// orchestration surface unreachable from the IDE: spawn_agent, the 18 team tools,
 	// the YAML subagent config system, and a subagent approval UI plus cost rollup
@@ -967,6 +983,7 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		// Resolved by the SDK to workspaceRoot ?? cwd, with these as the extra
 		// permitted roots. Undefined leaves the tools unconstrained.
 		...(fileBoundary ? { fileBoundary } : {}),
+		...(memory ? { memory } : {}),
 		checkpoint: {
 			enabled: enableCheckpoints,
 		},

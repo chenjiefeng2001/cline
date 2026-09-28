@@ -535,6 +535,46 @@ by this text-streaming adapter.
 
 This keeps reusable remote-config behavior in `shared` while the session-specific bridge remains in `core`.
 
+## Cross-session project memory
+
+`MemoryStore` (SQLite), a `recall_memory` tool and a full record model shipped
+without a single host instantiating them and with nothing anywhere calling
+`append()`. The layer was structurally incapable of returning anything: a read-only
+view over a store that could never be written.
+
+Two write paths now exist, because they carry different risk and one switch cannot
+express that:
+
+- **`remember`** - the agent decides a decision, pitfall or codebase fact is worth
+  carrying forward and names it. The two record kinds are validated differently
+  because they are different claims: an episodic record is history and stays true;
+  a semantic record is the current state of a subject and supersedes the previous
+  active record for it, so a later correction replaces the earlier belief instead of
+  sitting beside it.
+- **automatic capture** - extraction over completed turns, without the model asking.
+
+Exposure is gated on `CoreSessionConfig.memory`:
+
+| Field | Default | Effect |
+|---|---|---|
+| `enabled` | `false` | Master. No store opened, no tool exposed. |
+| `recallEnabled` | `true` when enabled | Exposes `recall_memory`. |
+| `writeEnabled` | `false` | Exposes `remember`. |
+| `autoCaptureEnabled` | `false` | Runs the automatic write path. |
+
+All three default off: both write paths retain data past the conversation, so that
+is something a user turns on rather than inherits.
+
+**A write path is required for recall to be exposed at all.** With no write path the
+store is empty forever, and a `recall_memory` the model plans around but that can
+never answer is worse than no such tool. The builder returns an empty tool set in
+that case rather than a permanently empty read.
+
+`SqliteMemoryStore.run` normalises `undefined` parameters to `null`. SQLite cannot
+bind `undefined`, and it reports the failure by parameter position, so an absent
+optional surfaced as "cannot be bound to SQLite parameter 5" - which reads as a
+problem with the record's content and is not.
+
 ## MCP protocol negotiation
 
 The stdio MCP client advertises the newest revision in
