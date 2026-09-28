@@ -1,13 +1,22 @@
 import type { CoreSessionEvent } from "@cline/core"
 import type { AgentEvent } from "@cline/shared"
 import type { ClineAskUseMcpServer } from "@shared/ExtensionMessage"
-import { describe, expect, it } from "vitest"
+import { Logger } from "@shared/services/Logger"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
 	extractToolOutputText,
 	historyItemToSessionFields,
 	MessageTranslatorState,
 	translateSessionEvent,
 } from "./message-translator"
+
+/**
+ * Spy on the real Logger statics rather than mocking the module: the module has
+ * load-time behaviour that other tests in this file rely on, and replacing it
+ * wholesale broke the status-event test.
+ */
+let loggerWarn: ReturnType<typeof vi.spyOn>
+let loggerDebug: ReturnType<typeof vi.spyOn>
 
 // ---------------------------------------------------------------------------
 // MessageTranslatorState
@@ -3184,5 +3193,72 @@ describe("MCP tool rendering (serverName__toolName convention)", () => {
 		expect(result.messages).toHaveLength(1)
 		expect(result.messages[0].say).toBe("use_mcp_server")
 		expect(result.messages[0].partial).toBe(false)
+	})
+})
+
+// ---------------------------------------------------------------------------
+// translateSessionEvent — session_snapshot log volume
+// ---------------------------------------------------------------------------
+
+describe("translateSessionEvent — unconsumed session_snapshot logging", () => {
+	beforeEach(() => {
+		loggerWarn = vi.spyOn(Logger, "warn").mockImplementation(() => {})
+		loggerDebug = vi.spyOn(Logger, "debug").mockImplementation(() => {})
+	})
+
+	afterEach(() => {
+		loggerWarn.mockRestore()
+		loggerDebug.mockRestore()
+	})
+
+	const snapshot = (sessionId: string): CoreSessionEvent =>
+		({
+			type: "session_snapshot",
+			payload: { sessionId, snapshot: {} },
+		}) as unknown as CoreSessionEvent
+
+	it("warns once per session, not once per event", () => {
+		const state = new MessageTranslatorState()
+
+		translateSessionEvent(snapshot("vol-1"), state)
+		expect(loggerWarn).toHaveBeenCalledTimes(1)
+		expect(String(loggerWarn.mock.calls[0][0])).toContain("vol-1")
+
+		// emitStatus() re-emits this on every status change, so a single turn can
+		// produce hundreds. Warning each time made this the noisiest line in
+		// Cline.log (348 warns / 7% of a real log) while adding nothing after the
+		// first occurrence.
+		for (let i = 0; i < 200; i++) {
+			translateSessionEvent(snapshot("vol-1"), state)
+		}
+		expect(loggerWarn).toHaveBeenCalledTimes(1)
+		expect(loggerDebug).toHaveBeenCalled()
+	})
+
+	it("announces each new session again, so the condition is not silently forgotten", () => {
+		const state = new MessageTranslatorState()
+		translateSessionEvent(snapshot("vol-2"), state)
+		translateSessionEvent(snapshot("vol-2"), state)
+		expect(loggerWarn).toHaveBeenCalledTimes(1)
+
+		translateSessionEvent(snapshot("vol-3"), state)
+		expect(loggerWarn).toHaveBeenCalledTimes(2)
+		expect(String(loggerWarn.mock.calls[1][0])).toContain("vol-3")
+	})
+
+	it("counts up to a periodic debug line rather than logging every repeat", () => {
+		const state = new MessageTranslatorState()
+		translateSessionEvent(snapshot("vol-4"), state)
+		loggerDebug.mockClear()
+
+		// 50 is the report interval: 49 repeats stay quiet, the 50th reports.
+		for (let i = 0; i < 48; i++) {
+			translateSessionEvent(snapshot("vol-4"), state)
+		}
+		expect(loggerDebug).not.toHaveBeenCalled()
+
+		translateSessionEvent(snapshot("vol-4"), state)
+		expect(loggerDebug).toHaveBeenCalledTimes(1)
+		expect(String(loggerDebug.mock.calls[0][0])).toContain("50 so far")
 	})
 })

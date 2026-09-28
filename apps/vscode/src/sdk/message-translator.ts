@@ -1517,6 +1517,18 @@ function assertNever(value: never, exhaustive: true): never {
 	throw new Error("unreachable")
 }
 
+/** How many unconsumed `session_snapshot` events to let pass before logging a count. */
+const SESSION_SNAPSHOT_REPORT_EVERY = 50
+
+/**
+ * Per-session tally of `session_snapshot` events this extension does not consume.
+ *
+ * Keyed by sessionId and never pruned: a session is created per task, and the map
+ * holds one small number per conversation rather than one entry per event, so an
+ * unbounded log is not a concern.
+ */
+const sessionSnapshotLogState = new Map<string, { count: number }>()
+
 /**
  * Translate an SDK CoreSessionEvent into a TranslationResult.
  *
@@ -1689,12 +1701,31 @@ export function translateSessionEvent(event: CoreSessionEvent, state: MessageTra
 			// So whether the extension needs it is a real open question, not something
 			// to guess at: two independent sources feed the webview and nothing asserts
 			// they agree. What is not acceptable is dropping it by accident, so it is
-			// named here and logged loudly. If the snapshot channel should drive the
-			// webview, this is the place to wire it.
-			Logger.warn(
-				`[MessageTranslator] session_snapshot for ${event.payload.sessionId} is not consumed by the extension; ` +
-					`the webview is fed from getStateToPostToWebview() instead.`,
-			)
+			// named here. If the snapshot channel should drive the webview, this is the
+			// place to wire it.
+			//
+			// The first snapshot of a session warns; the rest are counted and reported
+			// on a log line, because emitStatus fires it continuously and warning every
+			// time buried the rest of the log - one session produced 348 warns, 7% of a
+			// real Cline.log, which made this the noisiest line in the file while adding
+			// nothing after the first. The condition is per session, not global, so a
+			// new conversation is announced again.
+			const sessionId = event.payload.sessionId
+			const seen = sessionSnapshotLogState.get(sessionId)
+			if (seen === undefined) {
+				sessionSnapshotLogState.set(sessionId, { count: 1 })
+				Logger.warn(
+					`[MessageTranslator] session_snapshot for ${sessionId} is not consumed by the extension; ` +
+						`the webview is fed from getStateToPostToWebview() instead.`,
+				)
+			} else {
+				seen.count++
+				if (seen.count % SESSION_SNAPSHOT_REPORT_EVERY === 0) {
+					Logger.debug(
+						`[MessageTranslator] session_snapshot for ${sessionId} still not consumed ` + `(${seen.count} so far).`,
+					)
+				}
+			}
 			break
 		}
 
