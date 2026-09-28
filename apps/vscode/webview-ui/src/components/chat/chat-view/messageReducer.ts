@@ -1,4 +1,5 @@
 import type { ClineMessage, TurnState } from "@shared/ExtensionMessage"
+import { reportWebviewDiagnostic } from "../../../utils/reportWebviewError"
 
 // Convergent-replica reducer for the webview's clineMessages transcript.
 //
@@ -132,6 +133,15 @@ export function applyMessage(state: ReplicaState, incoming: ClineMessage): Repli
 	const incomingEpoch = epochOf(incoming)
 
 	if (incomingEpoch < state.epoch) {
+		// A silent return is indistinguishable from a hang from the outside: the host
+		// pushed, the webview received, and the message simply never appears - which is
+		// exactly the "list stopped refreshing" report, with an extension log that looks
+		// healthy because it did nothing wrong. The drop is correct; the invisibility
+		// is the defect. Rate limited upstream, since a straggler can repeat.
+		reportWebviewDiagnostic(
+			"drop-stale-epoch",
+			`dropped message ts=${incoming.ts}: epoch ${incomingEpoch} is older than the replica's ${state.epoch}`,
+		)
 		return state
 	}
 

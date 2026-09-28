@@ -1,4 +1,5 @@
 import type { ClineMessage, TurnState } from "@shared/ExtensionMessage"
+import { reportWebviewDiagnostic } from "../../../../utils/reportWebviewError"
 import { buttonsForPhase } from "./buttonConfig"
 
 /**
@@ -84,6 +85,15 @@ export function isComposerEnabled(args: {
 	if (!enabled) {
 		console.warn(
 			`[TurnUi] composer DISABLED (phase=${phase ?? "none"}, sendingDisabled=${sendingDisabled}, ` +
+				`queueable=${queueable}, legacyRunning=${legacyTaskRunning}, allowQueuedSubmit=${allowQueuedSubmit})`,
+		)
+		// Forwarded as well, because "the input box is disabled and I don't know why"
+		// is the question the user actually asks, and a console that vanishes with the
+		// panel cannot answer it. Rate limited upstream: this runs on every render
+		// while disabled.
+		reportWebviewDiagnostic(
+			"composer-disabled",
+			`composer DISABLED (phase=${phase ?? "none"}, sendingDisabled=${sendingDisabled}, ` +
 				`queueable=${queueable}, legacyRunning=${legacyTaskRunning}, allowQueuedSubmit=${allowQueuedSubmit})`,
 		)
 	}

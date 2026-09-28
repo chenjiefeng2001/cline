@@ -12,8 +12,13 @@ export interface WebviewMessage {
 }
 
 export type WebviewErrorReport = {
-	/** "load" = the bundle never evaluated, "runtime" = threw after mount. */
-	phase: "load" | "runtime"
+	/**
+	 * "load" = the bundle never evaluated, "runtime" = threw after mount,
+	 * "diagnostic" = not an error at all, a webview decision worth recording.
+	 * Diagnostics arrive on the same channel so the webview needs one transport;
+	 * the extension logs them without the "error" severity.
+	 */
+	phase: "load" | "runtime" | "diagnostic"
 	message: string
 	stack?: string
 	source?: string

@@ -297,10 +297,18 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 				// script that never ran, and nothing anywhere records why.
 				const report = message.webview_error
 				const where = report?.source ? ` at ${report.source}:${report.line ?? "?"}:${report.column ?? "?"}` : ""
-				Logger.error(
-					`[VscodeWebviewProvider] Webview ${report?.phase ?? "runtime"} error: ${report?.message ?? "unknown"}${where}` +
-						(report?.stack ? `\n${report.stack}` : ""),
-				)
+				// Diagnostics are decisions, not failures. Logging them at error severity
+				// would drown real errors, and not logging them at all is what left a user
+				// with a frozen message list and a Cline.log showing a perfectly healthy
+				// extension that never received their interaction.
+				const line =
+					`[TurnUi] webview ${report?.phase ?? "runtime"}: ${report?.message ?? "unknown"}${where}` +
+					(report?.stack ? `\n${report.stack}` : "")
+				if (report?.phase === "diagnostic") {
+					Logger.debug(line)
+				} else {
+					Logger.error(line)
+				}
 				break
 			}
 			default: {

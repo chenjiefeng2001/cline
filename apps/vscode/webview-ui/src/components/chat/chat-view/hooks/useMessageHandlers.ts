@@ -5,6 +5,7 @@ import { IntentEvent } from "@shared/proto/cline/ui"
 import { useCallback, useRef } from "react"
 import { useExtensionState, useMessagesState } from "@/context/ExtensionStateContext"
 import { SlashServiceClient, TaskServiceClient, UiServiceClient } from "@/services/grpc-client"
+import { reportWebviewDiagnostic } from "../../../../utils/reportWebviewError"
 import type { ButtonActionType } from "../shared/buttonConfig"
 import { isFollowupPhase, sendOutcomeFor } from "../shared/turnUiContract"
 import type { ChatState, MessageDelivery, MessageHandlers } from "../types/chatTypes"
@@ -89,6 +90,17 @@ export function useMessageHandlers(messages: ClineMessage[], chatState: ChatStat
 				})
 				console.log(
 					`[TurnUi] handleSendMessage -> ${outcome} (phase=${turnState?.phase ?? "none"}, ` +
+						`messages=${messages.length}, openAsk=${clineAsk ?? "none"}, textLength=${messageToSend.length})`,
+				)
+				// Also forward to the extension. A submission that matched no branch
+				// made no RPC and produced no error anywhere, so the host log was silent
+				// and the only evidence was the user's text reappearing. Sends are
+				// user-initiated and infrequent, so this is not a volume concern - and it
+				// is the difference between being able to say the send was dropped and
+				// having no idea what the webview did.
+				reportWebviewDiagnostic(
+					"send",
+					`handleSendMessage -> ${outcome} (phase=${turnState?.phase ?? "none"}, ` +
 						`messages=${messages.length}, openAsk=${clineAsk ?? "none"}, textLength=${messageToSend.length})`,
 				)
 				let messageSent = false
