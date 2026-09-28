@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams } from "node:child_process";
+import { advertisedMcpProtocolVersion, isSupportedMcpProtocolVersion } from "./mcp-protocol";
 import { spawnPlatformCommand } from "../../utils/shell-spawn";
 import { StringDecoder } from "node:string_decoder";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -38,7 +39,7 @@ type JsonRpcMessage = {
 
 type StdioProtocolMode = "newline" | "framed";
 
-const MCP_PROTOCOL_VERSION = "2024-11-05";
+const MCP_PROTOCOL_VERSION = advertisedMcpProtocolVersion();
 const MCP_REQUEST_TIMEOUT_MS = 5_000;
 const MCP_CONNECT_TIMEOUT_MS = 1_500;
 const DEFAULT_HTTP_MCP_REDIRECT_URL =
@@ -141,6 +142,12 @@ class StdioMcpClient implements McpServerClient {
 	private stderrBuffer = "";
 	private connected = false;
 	private protocolMode: StdioProtocolMode = "newline";
+	/**
+	 * Protocol revision the server actually agreed to, as opposed to the one this
+	 * client advertised. Recorded during connect so a pairing that is not what was
+	 * asked for is visible rather than inferred.
+	 */
+	private negotiatedProtocolVersion: string | undefined;
 
 	constructor(registration: McpServerRegistration) {
 		this.registration = registration;
@@ -163,7 +170,7 @@ class StdioMcpClient implements McpServerClient {
 			await this.disconnect().catch(() => {});
 			this.spawnProcess(protocolMode);
 			try {
-				await this.request(
+				const result = (await this.request(
 					"initialize",
 					{
 						protocolVersion: MCP_PROTOCOL_VERSION,
@@ -174,7 +181,22 @@ class StdioMcpClient implements McpServerClient {
 						},
 					},
 					MCP_CONNECT_TIMEOUT_MS,
-				);
+				)) as { protocolVersion?: unknown } | undefined;
+
+				// The server's answer is authoritative and was previously discarded
+				// entirely, so a version mismatch was invisible: the client advertised
+				// one revision, ignored whatever came back, and carried on regardless.
+				// That made an incompatible pairing look like a working one until
+				// something failed much later with an unrelated symptom.
+				const negotiated = typeof result?.protocolVersion === "string" ? result.protocolVersion : undefined;
+				if (!isSupportedMcpProtocolVersion(negotiated)) {
+					throw new Error(
+						`MCP server "${this.registration.name}" negotiated protocol ${negotiated}, ` +
+							`which this client does not speak (supported: ${advertisedMcpProtocolVersion()} and older).`,
+					);
+				}
+				this.negotiatedProtocolVersion = negotiated ?? MCP_PROTOCOL_VERSION;
+
 				this.notify("notifications/initialized");
 				this.connected = true;
 				this.protocolMode = protocolMode;
@@ -188,6 +210,16 @@ class StdioMcpClient implements McpServerClient {
 			lastError ??
 			new Error(`Failed to connect to MCP server "${this.registration.name}".`)
 		);
+	}
+
+	/**
+	 * Protocol revision the server agreed to during connect, or undefined before a
+	 * successful connect. Exposed because a mismatch used to be invisible: the
+	 * advertised revision was sent, the answer was discarded, and the two sides could
+	 * then disagree for the rest of the session.
+	 */
+	get negotiatedProtocol(): string | undefined {
+		return this.negotiatedProtocolVersion;
 	}
 
 	async disconnect(): Promise<void> {

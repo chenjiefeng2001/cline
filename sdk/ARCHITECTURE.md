@@ -535,6 +535,26 @@ by this text-streaming adapter.
 
 This keeps reusable remote-config behavior in `shared` while the session-specific bridge remains in `core`.
 
+## MCP protocol negotiation
+
+The stdio MCP client advertises the newest revision in
+`SUPPORTED_MCP_PROTOCOL_VERSIONS` (`extensions/mcp/mcp-protocol.ts`) and then
+**honours the server's answer**. The `initialize` response's `protocolVersion` is
+read, checked against the supported set, and recorded on the client as
+`negotiatedProtocol`.
+
+The list is a floor as well as a ceiling. `2024-11-05` stays in it because that is
+what the installed population of servers overwhelmingly speaks, and
+`tools/list` and `tools/call` - the only two calls made - kept their shapes across
+every revision listed. A server answering with an older supported revision
+proceeds; one answering with anything else is refused at connect time with an error
+naming the revision, rather than being talked to for the rest of the session with a
+protocol the client does not implement.
+
+This used not to happen at all: the client sent `2024-11-05`, discarded the
+response entirely, and connected regardless of the answer, so a mismatched pairing
+was indistinguishable from a working one.
+
 ## Design Seams
 
 The codebase relies on a few repeated seams instead of one-off integration paths.
