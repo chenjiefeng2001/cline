@@ -112,9 +112,9 @@ message Secrets {
 // in src/shared/storage/state-keys.ts and use the scripts/generate-state-proto.mjs
 // script to regenerate this list.
 message Settings {
- reserved so a
-  // future generator run cannot hand 144, 154 or 176 to a different setting: a
-  // reused number would silently reinterpret persisted user settings.
+  // Field numbers and names retired from this message. Kept reserved so no
+  // regenerated field can take them: a reused number would silently
+  // reinterpret values that clients have already persisted.
   reserved 144, 154, 176;
   reserved "cline_web_tools_enabled", "enable_parallel_tool_calling", "double_check_completion_enabled";
 

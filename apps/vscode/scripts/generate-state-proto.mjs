@@ -410,14 +410,31 @@ function extractReservedBlock(protoContent, messageName) {
 	if (!match) {
 		return ""
 	}
-	const body = match[1]
-	const reservedRegex = /((?:^[ \t]*\/\/[^\n]*\n)?[ \t]*reserved[^;]*;[ \t]*\n?)/gm
-	const blocks = []
-	let found
-	while ((found = reservedRegex.exec(body)) !== null) {
-		blocks.push(found[1])
+	// Only the reserved statements themselves are captured. An earlier version also
+	// tried to capture the preceding comment lines, and produced a corrupt proto: the
+	// optional comment group in the pattern matched a partial line and emitted a
+	// fragment (" reserved so a") as though it were a field, which protoc rejected and
+	// which the formatter then also flagged. The explanation is owned here and written
+	// fresh on every run, so it cannot be corrupted by whatever shape the file is in.
+	// A trailing line comment is stripped before the test and not re-emitted, so
+	// `reserved 3; // was MINIMAL` round-trips as a bare reservation.
+	const statements = []
+	for (const line of match[1].split("\n")) {
+		const withoutComment = line.replace(/\/\/.*$/, "").trim()
+		if (/^reserved\b/.test(withoutComment)) {
+			statements.push(withoutComment)
+		}
 	}
-	return blocks.join("")
+	if (statements.length === 0) {
+		return ""
+	}
+	return [
+		"  // Field numbers and names retired from this message. Kept reserved so no",
+		"  // regenerated field can take them: a reused number would silently",
+		"  // reinterpret values that clients have already persisted.",
+		...statements.map((s) => `  ${s}`),
+		"",
+	].join("\n")
 }
 
 /** Put a captured reserved block back at the top of a regenerated message body. */
