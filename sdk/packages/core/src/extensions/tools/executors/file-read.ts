@@ -8,7 +8,8 @@ import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createInterface } from "node:readline";
-import type { AgentToolContext } from "@cline/shared";
+import type { AgentToolContext } from "@cline/shared"
+import { resolveBoundedPath, type FileBoundary } from "./file-boundary";
 import { resolveExistingFilePath } from "@cline/shared/storage";
 import type { ReadFileRequest } from "../schemas";
 import type { FileReadExecutor } from "../types";
@@ -31,6 +32,12 @@ const IMAGE_MEDIA_TYPES = new Map<string, string>([
  */
 export interface FileReadExecutorOptions {
 	/**
+	 * Optional workspace boundary. When set, resolved paths must stay inside it.
+	 * When absent the executor accepts any path, which is the historical behaviour.
+	 */
+	boundary?: FileBoundary;
+
+	/**
 	 * Maximum file size to read in bytes
 	 * @default 10_000_000 (10MB)
 	 */
@@ -49,7 +56,9 @@ export interface FileReadExecutorOptions {
 	includeLineNumbers?: boolean;
 }
 
-const DEFAULT_FILE_READ_OPTIONS: Required<FileReadExecutorOptions> = {
+// boundary is intentionally absent: it is a host-supplied constraint, not a default,
+// so it is excluded from the Required spread below.
+const DEFAULT_FILE_READ_OPTIONS: Required<Omit<FileReadExecutorOptions, 'boundary'>> = {
 	maxFileSizeBytes: 10_000_000, // 10MB default limit
 	encoding: "utf-8", // Default to UTF-8 encoding
 	includeLineNumbers: true, // Include line numbers by default
@@ -208,12 +217,14 @@ export function createFileReadExecutor(
 		...DEFAULT_FILE_READ_OPTIONS,
 		...options,
 	};
+	const boundary = options.boundary;
 
 	return async (request: ReadFileRequest, context: AgentToolContext) => {
 		const { path: filePath, start_line, end_line } = request;
-		const initialPath = path.isAbsolute(filePath)
-			? path.normalize(filePath)
-			: path.resolve(process.cwd(), filePath);
+		// Containment is applied before the file is touched, and before resolveExistingFilePath,
+		// so a path outside the boundary never reaches the filesystem. With no boundary
+		// configured this is the previous behaviour verbatim: any absolute path is accepted.
+		const initialPath = await resolveBoundedPath(process.cwd(), filePath, boundary);
 		// Tolerate Unicode-whitespace mismatches (e.g. macOS Sonoma+
 		// screenshot paths where the on-disk filename contains U+202F but
 		// the caller's string has a regular space).

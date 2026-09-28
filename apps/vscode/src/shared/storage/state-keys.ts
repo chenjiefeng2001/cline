@@ -296,7 +296,23 @@ const USER_SETTINGS_FIELDS = {
 	yoloModeToggled: { default: false as boolean },
 	autoApproveAllToggled: { default: false as boolean },
 	useAutoCondense: { default: false as boolean },
-	subagentsEnabled: { default: false as boolean },
+	// Subagent delegation. This key already existed and was mirrored into extension
+	// state, but nothing ever read it into CoreSessionConfig, so the UI switch was
+	// inert while enableSpawnAgent was hard-coded false. Default is now true because
+	// the feature is no longer deliberately dark; set false to restore the old
+	// single-agent surface.
+	subagentsEnabled: { default: true as boolean },
+	// The 18-tool multi-agent team surface. Kept off by default and read
+	// independently: turning it on changes the model's tool set far more than
+	// delegation does, so it is a separate decision from subagentsEnabled.
+	agentTeamsEnabled: { default: false as boolean },
+	// Model round-trips allowed per turn. Previously absent, which meant an
+	// unbounded loop; max_iterations is a finish reason, not a crash.
+	maxIterationsSetting: { default: 50 as number },
+	// Spend ceiling in USD for a single agent run. AgentRunBudget was implemented
+	// and conformance-tested in the SDK with no caller; budget_exhausted is a finish
+	// reason and the in-flight turn still completes.
+	runBudgetMaxTotalCost: { default: 5 as number },
 	worktreesEnabled: { default: false as boolean },
 	preferredLanguage: { default: "English" as string },
 	mode: { default: "act" as Mode },

@@ -287,6 +287,30 @@ token; completion is fenced by that token. An expired pending lease becomes
 safe `failed` outcome that permits another attempt. Structured unsuccessful
 results, including mixed result arrays, are not recorded as successful effects.
 
+## Default tool middleware chain
+
+`LocalRuntimeHost.createToolWrapper` composes two middleware around every tool the
+session exposes, outermost first:
+
+1. `createIdempotencyMiddleware` — the Effect Ledger, so a duplicate tool call is
+   answered from a recorded outcome instead of re-entering the tool.
+2. `createRedactionMiddleware` — scrubs credentials and PII out of the result
+   before it reaches the model, the transcript, or telemetry. Its default patterns
+   cover bearer tokens, `sk-` API keys, `ghp_` GitHub tokens, AWS `AKIA` keys, and
+   email addresses; plain objects are rebuilt and class instances pass through
+   untouched so buffers and dates are not destroyed.
+
+Order is deliberate. Idempotency stays outermost so a repeat call is resolved from
+the ledger, and redaction sits closest to the executor so the value being scrubbed
+is the raw one on both the fresh and the ledger-cached path. Redaction filters a
+result; it never blocks a call.
+
+The redaction middleware was previously implemented, exported and unit-tested but
+never added to this chain, so default tool results were unfiltered. It is covered
+through the host's own `wrapTools` hook in `local-runtime-host.test.ts` rather than
+in isolation, because a test of the middleware alone stays green if the chain loses
+it again.
+
 Checkpoint restore re-keys all source-session effects before workspace mutation
 and before the restored session can execute its optional prompt. Succeeded
 effects replay, pending/in-doubt effects remain blocked, and explicitly failed

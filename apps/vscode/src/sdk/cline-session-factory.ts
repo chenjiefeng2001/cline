@@ -809,6 +809,51 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	const enableCheckpoints = stateManager.getGlobalSettingsKey("enableCheckpointsSetting") ?? true
 	const useAutoCondense = input.taskSettings?.useAutoCondense ?? globalUseAutoCondense
 
+	// Safety limits. The settings exist and are editable in the UI, but until now
+	// none of them reached CoreSessionConfig, so every one of these knobs was inert
+	// and the SDK fell back to its own defaults (or none).
+	//
+	// maxConsecutiveMistakes in particular read as configurable while the effective
+	// cap was the SDK's hard-coded 6: the setting said 3, the run allowed 6, and
+	// nothing reported the difference. Read defensively - a malformed stored value
+	// must not become an unbounded loop, so a non-positive or non-finite read falls
+	// back to the SDK default rather than disabling the guard.
+	const readBoundedInt = (value: unknown, fallback: number): number => {
+		const n = typeof value === "number" ? value : Number(value)
+		return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+	}
+	const readBoundedNumber = (value: unknown, fallback: number): number => {
+		const n = typeof value === "number" ? value : Number(value)
+		return Number.isFinite(n) && n > 0 ? n : fallback
+	}
+	const maxConsecutiveMistakes = readBoundedInt(stateManager.getGlobalSettingsKey("maxConsecutiveMistakes"), 3)
+	// Bound on model round-trips for one turn. Unbounded previously, which meant a
+	// confused agent could spend an arbitrary amount of the user's tokens; the
+	// runtime reports max_iterations as a finish reason and still runs its
+	// after-run hooks, so the transcript stays valid.
+	const maxIterations = readBoundedInt(stateManager.getGlobalSettingsKey("maxIterationsSetting"), 50)
+	// Spend ceiling for a single run. AgentRunBudget is fully implemented in the
+	// SDK and is conformance-tested, but nothing in the extension ever set it.
+	// Only total cost is capped by default: a token cap would fight the user's own
+	// context-window choice, whereas cost is the thing that cannot be undone.
+	const runBudgetMaxTotalCost = readBoundedNumber(stateManager.getGlobalSettingsKey("runBudgetMaxTotalCost"), 5)
+
+	// Subagents and teams. These were hard-coded false, which left the whole
+	// orchestration surface unreachable from the IDE: spawn_agent, the 18 team tools,
+	// the YAML subagent config system, and a subagent approval UI plus cost rollup
+	// that is already fully built and tested. The CLI enables both.
+	//
+	// The subagentsEnabled setting existed in the UI, was mirrored into extension
+	// state, and never reached CoreSessionConfig - a switch that looked live and did
+	// nothing. It is now the source of truth, defaulting to true so the feature is
+	// no longer silently dark, and the two surfaces are read independently: enabling
+	// delegation does not force the 18-tool team surface on, which is a much larger
+	// change to the model's tool set.
+	const subagentsEnabled = stateManager.getGlobalSettingsKey("subagentsEnabled") ?? true
+	const agentTeamsEnabled = stateManager.getGlobalSettingsKey("agentTeamsEnabled") ?? false
+	const enableSpawnAgent = subagentsEnabled
+	const enableAgentTeams = agentTeamsEnabled && subagentsEnabled
+
 	// V16 §2 — prompt-caching wiring: the final prompt is now complete (base +
 	// rules + preferred language). Track it so successive builds (and Plan ⇄ Act
 	// switches) can be measured for shared-prefix stability. A stable prefix is
@@ -891,8 +936,25 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		checkpoint: {
 			enabled: enableCheckpoints,
 		},
-		enableSpawnAgent: false,
-		enableAgentTeams: false,
+		enableSpawnAgent,
+		enableAgentTeams,
+		// Mistake escalation cap. Previously absent, so the SDK used its hard-coded 6
+		// while the UI advertised the user's configured value - the setting looked live
+		// and was not.
+		execution: {
+			maxConsecutiveMistakes,
+		},
+		// Bound on model round-trips for one turn. Unbounded previously, so a confused
+		// agent could spend an arbitrary amount of the user's tokens. Exceeding it is a
+		// finish reason (max_iterations), not a crash: after-run hooks still run, so
+		// the transcript stays valid.
+		maxIterations,
+		// Spend guardrail. Exceeding it is likewise a finish reason
+		// (budget_exhausted), and the in-flight turn always completes so every tool
+		// call still receives a result.
+		budget: {
+			maxTotalCost: runBudgetMaxTotalCost,
+		},
 		...(useAutoCondense
 			? {
 					compaction: {
@@ -907,7 +969,6 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		...reasoningConfig,
 		...(maxTokensPerTurn !== undefined ? { maxTokensPerTurn } : {}),
 		...(temperature !== undefined ? { temperature } : {}),
-		maxIterations: undefined,
 		logger: sdkLogger,
 		extensionContext: {
 			user: distinctId ? { distinctId } : undefined,

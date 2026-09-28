@@ -39,7 +39,11 @@ const mocks = vi.hoisted(() => {
 				actModeApiModelId: "claude-sonnet-4-6",
 				apiKey: "test-key",
 			})),
-			getGlobalSettingsKey: vi.fn((key: string): boolean | undefined => {
+			// Typed as unknown because global settings are not booleans: numeric
+			// settings such as maxConsecutiveMistakes and maxIterationsSetting are read
+			// through this same accessor, and a boolean-only signature made those
+			// unwritable from a test.
+			getGlobalSettingsKey: vi.fn((key: string): unknown => {
 				if (key === "subagentsEnabled" || key === "useAutoCondense") {
 					return false
 				}
@@ -1069,5 +1073,109 @@ describe("updateHistoryItem", () => {
 		expect(result).toHaveLength(2)
 		expect(result[0].id).toBe("task-new")
 		expect(result[1].id).toBe("task-old")
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Execution limits and orchestration switches
+//
+// Every one of these settings existed and was editable before this, and none of
+// them reached CoreSessionConfig. maxConsecutiveMistakes read as configurable
+// while the effective cap was the SDK's hard-coded 6; maxIterations was
+// explicitly undefined, so the loop was unbounded; AgentRunBudget was
+// implemented and conformance-tested in the SDK with no caller at all; and
+// enableSpawnAgent/enableAgentTeams were hard-coded false, leaving the
+// subagent UI that is already built and tested unreachable from the IDE.
+// ---------------------------------------------------------------------------
+
+describe("buildSessionConfig - execution limits", () => {
+	it("applies the configured mistake cap instead of the SDK's hard-coded default", async () => {
+		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+			if (key === "maxConsecutiveMistakes") return 4
+			return undefined
+		})
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.execution?.maxConsecutiveMistakes).toBe(4)
+	})
+
+	it("falls back to a bounded cap when the setting is missing or nonsense", async () => {
+		// A malformed stored value must never widen the guard: a non-positive or
+		// non-finite read would otherwise be equivalent to no limit at all.
+		for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "abc", null]) {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "maxConsecutiveMistakes") return bad as never
+				return undefined
+			})
+			const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+			const applied = config.execution?.maxConsecutiveMistakes
+			expect(applied).toBeGreaterThan(0)
+			expect(Number.isFinite(applied as number)).toBe(true)
+		}
+	})
+
+	it("caps model round-trips per turn rather than looping without bound", async () => {
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.maxIterations).toBeGreaterThan(0)
+
+		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+			if (key === "maxIterationsSetting") return 12
+			return undefined
+		})
+		const configured = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(configured.maxIterations).toBe(12)
+	})
+
+	it("sets a spend guardrail, which nothing in the extension did before", async () => {
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.budget?.maxTotalCost).toBeGreaterThan(0)
+	})
+})
+
+describe("buildSessionConfig - orchestration switches", () => {
+	it("enables subagent delegation from the setting rather than a hard-coded false", async () => {
+		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+			if (key === "subagentsEnabled") return true
+			return undefined
+		})
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.enableSpawnAgent).toBe(true)
+	})
+
+	it("defaults subagent delegation on, so the surface is no longer silently dark", async () => {
+		// Unset, not false: the shared mock answers false for subagentsEnabled to keep
+		// older cases on the single-agent surface. Returning undefined here is what
+		// exercises the factory's own default.
+		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+			if (key === "subagentsEnabled") return undefined
+			return undefined
+		})
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.enableSpawnAgent).toBe(true)
+	})
+
+	it("keeps the 18-tool team surface off unless explicitly requested", async () => {
+		// Delegation and teams are read independently on purpose: teams change the
+		// model's tool set far more than delegation does, so it is a separate decision.
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.enableAgentTeams).toBe(false)
+
+		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+			if (key === "subagentsEnabled") return true
+			if (key === "agentTeamsEnabled") return true
+			return undefined
+		})
+		const withTeams = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(withTeams.enableAgentTeams).toBe(true)
+	})
+
+	it("never enables teams when delegation itself is off", async () => {
+		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+			if (key === "subagentsEnabled") return false
+			if (key === "agentTeamsEnabled") return true
+			return undefined
+		})
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.enableSpawnAgent).toBe(false)
+		expect(config.enableAgentTeams).toBe(false)
 	})
 })

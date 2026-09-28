@@ -6,6 +6,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { resolveBoundedPath, type FileBoundary } from "./file-boundary"
 import type { AgentToolContext } from "@cline/shared";
 import type { EditFileInput } from "../schemas";
 import type { EditorExecutor } from "../types";
@@ -14,6 +15,13 @@ import type { EditorExecutor } from "../types";
  * Options for the editor executor
  */
 export interface EditorExecutorOptions {
+	/**
+	 * Optional workspace boundary. When set, resolved paths must stay inside it, including
+	 * absolute paths, which resolveFilePath otherwise accepts unconditionally. When absent
+	 * the historical behaviour is kept.
+	 */
+	boundary?: FileBoundary;
+
 	/**
 	 * File encoding used for read/write operations
 	 * @default "utf-8"
@@ -57,6 +65,27 @@ function resolveFilePath(
 		throw new Error(`Path must stay within cwd: ${inputPath}`);
 	}
 	return resolved;
+}
+
+/**
+ * Editor-side counterpart to the read executor's boundary.
+ *
+ * resolveFilePath above already rejects relative paths that escape cwd, but it
+ * accepts any absolute path and the `..` test is lexical only, so a symlink inside
+ * the workspace could still reach outside. When a boundary is configured, the
+ * check is delegated to resolveBoundedPath, which does the lexical pass and then
+ * the symlink-resolving one. Without a boundary the behaviour is unchanged.
+ */
+async function resolveEditorPath(
+	cwd: string,
+	inputPath: string,
+	restrictToCwd: boolean,
+	boundary: FileBoundary | undefined,
+): Promise<string> {
+	if (boundary) {
+		return resolveBoundedPath(cwd, inputPath, boundary);
+	}
+	return resolveFilePath(cwd, inputPath, restrictToCwd);
 }
 
 function countOccurrences(content: string, needle: string): number {
@@ -208,13 +237,14 @@ export function createEditorExecutor(
 		restrictToCwd = true,
 		maxDiffLines = 200,
 	} = options;
+	const boundary = options.boundary;
 
 	return async (
 		input: EditFileInput,
 		cwd: string,
 		_context: AgentToolContext,
 	): Promise<string> => {
-		const filePath = resolveFilePath(cwd, input.path, restrictToCwd);
+		const filePath = await resolveEditorPath(cwd, input.path, restrictToCwd, boundary);
 
 		if (input.insert_line != null) {
 			return insertInFile(

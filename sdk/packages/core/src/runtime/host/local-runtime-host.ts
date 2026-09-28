@@ -29,6 +29,7 @@ import { DefaultToolNames } from "../../extensions/tools";
 import type { TeamEvent } from "../../extensions/tools/team";
 import type { HookEventPayload } from "../../hooks";
 import { wrapToolsWithMiddleware } from "../../middleware/wrap-tools";
+import { createRedactionMiddleware } from "../../middleware/redaction-middleware";
 import { buildTelemetryAgentIdentity } from "../../services/agent-events";
 import { resolveWorkspacePath } from "../../services/config";
 import { prepareLocalRuntimeBootstrap } from "../../services/local-runtime-bootstrap";
@@ -1136,13 +1137,24 @@ export class LocalRuntimeHost implements RuntimeHost {
 	): (tools: AgentTool[]) => AgentTool[] {
 		const resolveSessionId = (context: { sessionId?: string }): string =>
 			context.sessionId?.trim() || sessionId;
-		const middleware = createIdempotencyMiddleware({
+		const idempotency = createIdempotencyMiddleware({
 			ledger: this.effectLedger,
 			sessionId: resolveSessionId,
 		});
+		// Scrub secrets and PII out of tool results before they reach the model, the
+		// transcript, or telemetry. This middleware existed, was exported, and had its
+		// own tests, but was never added to this chain - the default tool path carried
+		// only the idempotency ledger, so a `sk-...` or `Bearer ...` read out of a file
+		// went verbatim into the conversation and into anything the host persisted.
+		//
+		// Order matters: idempotency stays outermost so a duplicate call is answered
+		// from the ledger without re-entering the tool, and redaction sits closest to
+		// the executor so the value being scrubbed is the raw one in both the fresh and
+		// the cached path.
+		const redaction = createRedactionMiddleware();
 		return (tools) =>
 			wrapToolsWithMiddleware(tools, {
-				chain: [middleware],
+				chain: [idempotency, redaction],
 				sessionId: resolveSessionId,
 			});
 	}

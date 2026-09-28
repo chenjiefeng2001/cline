@@ -112,6 +112,9 @@ message Secrets {
 // in src/shared/storage/state-keys.ts and use the scripts/generate-state-proto.mjs
 // script to regenerate this list.
 message Settings {
+  // Field numbers retired from the Settings schema. They must stay reserved so a
+  // future generator run cannot hand 144, 154 or 176 to a different setting: a
+  // reused number would silently reinterpret persisted user settings.
   reserved 144, 154, 176;
   reserved "cline_web_tools_enabled", "enable_parallel_tool_calling", "double_check_completion_enabled";
 
@@ -288,6 +291,11 @@ message Settings {
   optional OpenRouterModelInfo plan_mode_cline_pass_model_info = 184;
   optional string act_mode_cline_pass_model_id = 185;
   optional OpenRouterModelInfo act_mode_cline_pass_model_info = 186;
+  optional string mode_configurations = 187;
+  optional int32 mode_configuration_version = 188;
+  optional bool agent_teams_enabled = 189;
+  optional int32 max_iterations_setting = 190;
+  optional int32 run_budget_max_total_cost = 191;
 }
 
 message State {

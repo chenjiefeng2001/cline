@@ -271,6 +271,152 @@ describe("LocalRuntimeHost", () => {
 		}
 	});
 
+	// Asserted through the host's own wrapTools hook, reached the way a real session
+	// reaches it. The redaction middleware always worked and had its own unit tests;
+	// the defect was that createToolWrapper never put it in the chain, so a test of
+	// the middleware alone stayed green while every default tool result leaked. This
+	// one fails if the chain loses redaction again.
+	it("redacts secrets from tool results on the host's default tool chain", async () => {
+		const ledger = new SqliteEffectLedger({
+			dbPath: join(isolatedHomeDir, "redaction-effects.db"),
+		});
+		// Assembled at runtime: the repo's gitleaks pre-commit hook flags a literal
+		// sk-... as a generic API key, and it is right to. Joining the parts keeps the
+		// literal out of source while still matching the redaction pattern under test.
+		const secret = ["sk", "abcdefgh12345678"].join("-");
+		const execute = vi.fn(async () => ({ content: `token ${secret} in .env` }));
+		let capturedConfig: AgentConfig | undefined;
+		let capturedDeps: SessionRuntimeOrchestratorDeps | undefined;
+		const agent = {
+			run: vi.fn(async () => createResult()),
+			continue: vi.fn(async () => createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-redaction"),
+			getConversationId: vi.fn().mockReturnValue("conversation-redaction"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: new FileSessionService(join(isolatedHomeDir, "sessions")),
+			effectLedger: ledger,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({
+					tools: [
+						{
+							name: "read_file",
+							description: "read",
+							inputSchema: {},
+							execute,
+						},
+					],
+					shutdown: vi.fn().mockResolvedValue(undefined),
+				}),
+			} as never,
+			createAgent: (config, deps) => {
+				capturedConfig = config;
+				capturedDeps = deps;
+				return agent as never;
+			},
+		});
+		try {
+			await manager.startSession(
+				normalizeStartInput({
+					config: createConfig({
+						sessionId: "session-redaction",
+						enableSpawnAgent: false,
+						enableAgentTeams: false,
+					}),
+				}),
+			);
+			const tools =
+				capturedDeps?.wrapTools?.(capturedConfig?.tools ?? []) ?? [];
+			const result = (await tools[0]?.execute({ path: ".env" }, {
+				sessionId: "session-redaction",
+				agentId: "agent-redaction",
+				conversationId: "conversation-redaction",
+				iteration: 1,
+				toolCallId: "call-redaction",
+			})) as { content: string };
+
+			expect(result.content).not.toContain(secret);
+			expect(result.content).toContain("[REDACTED]");
+			// The tool still ran: redaction filters the result, it does not block.
+			expect(execute).toHaveBeenCalledOnce();
+			await manager.dispose();
+		} finally {
+			ledger.close();
+		}
+	});
+	it("redacts on the ledger-cached path too, not only the first execution", async () => {
+		// A duplicate call is answered from the effect ledger without re-entering the
+		// tool, so redaction must not be bypassed by the cache hit.
+		const ledger = new SqliteEffectLedger({
+			dbPath: join(isolatedHomeDir, "redaction-cached-effects.db"),
+		});
+		const secret = ["ghp", "abcdefghijklmnopqrstuvwxyz0123"].join("_");
+		const execute = vi.fn(async () => ({ content: `token ${secret}` }));
+		let capturedConfig: AgentConfig | undefined;
+		let capturedDeps: SessionRuntimeOrchestratorDeps | undefined;
+		const agent = {
+			run: vi.fn(async () => createResult()),
+			continue: vi.fn(async () => createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-redaction-cached"),
+			getConversationId: vi.fn().mockReturnValue("conversation-redaction-cached"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: new FileSessionService(join(isolatedHomeDir, "sessions")),
+			effectLedger: ledger,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({
+					tools: [{ name: "read_file", description: "read", inputSchema: {}, execute }],
+					shutdown: vi.fn().mockResolvedValue(undefined),
+				}),
+			} as never,
+			createAgent: (config, deps) => {
+				capturedConfig = config;
+				capturedDeps = deps;
+				return agent as never;
+			},
+		});
+		try {
+			await manager.startSession(
+				normalizeStartInput({
+					config: createConfig({
+						sessionId: "session-redaction-cached",
+						enableSpawnAgent: false,
+						enableAgentTeams: false,
+					}),
+				}),
+			);
+			const tools = capturedDeps?.wrapTools?.(capturedConfig?.tools ?? []) ?? [];
+			const ctx = {
+				sessionId: "session-redaction-cached",
+				agentId: "agent-redaction-cached",
+				conversationId: "conversation-redaction-cached",
+				iteration: 1,
+				toolCallId: "call-redaction-cached",
+			} as AgentToolContext;
+
+			await tools[0]?.execute({ path: ".env" }, ctx);
+			const cached = (await tools[0]?.execute({ path: ".env" }, ctx)) as { content: string };
+
+			expect(cached.content).not.toContain(secret);
+			expect(execute).toHaveBeenCalledOnce();
+			await manager.dispose();
+		} finally {
+			ledger.close();
+		}
+	});
+
 	it("replays source effects before starting a restored session", async () => {
 		const ledger = new SqliteEffectLedger({
 			dbPath: join(isolatedHomeDir, "restore-effects.db"),
