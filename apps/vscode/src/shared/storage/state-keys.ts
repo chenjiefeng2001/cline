@@ -295,7 +295,13 @@ const USER_SETTINGS_FIELDS = {
 	hooksEnabled: { default: true as boolean },
 	yoloModeToggled: { default: false as boolean },
 	autoApproveAllToggled: { default: false as boolean },
-	useAutoCondense: { default: false as boolean },
+	// Automatic context compaction. Off by default previously, which meant an
+	// over-long conversation was sent to the provider in full and rejected there:
+	// there is no local guard, no shrink-and-retry, and no overflow-specific handling,
+	// so the user's turn just failed at the far end. Compaction is the only thing
+	// standing between a long session and that failure, so it is on by default and
+	// can be switched off per-task.
+	useAutoCondense: { default: true as boolean },
 	// Subagent delegation. This key already existed and was mirrored into extension
 	// state, but nothing ever read it into CoreSessionConfig, so the UI switch was
 	// inert while enableSpawnAgent was hard-coded false. Default is now true because
@@ -313,6 +319,17 @@ const USER_SETTINGS_FIELDS = {
 	// and conformance-tested in the SDK with no caller; budget_exhausted is a finish
 	// reason and the in-flight turn still completes.
 	runBudgetMaxTotalCost: { default: 5 as number },
+	// File-tool workspace boundary. read_files had no path check at all and editor's
+	// `..` test applied only to relative inputs, so any absolute path was reachable
+	// and the workspace was never a boundary. Set false only if a workflow genuinely
+	// needs to edit outside the workspace - prefer adding the directory to
+	// fileBoundaryAdditionalRoots, which keeps the guard on for everything else.
+	fileBoundaryEnabled: { default: true as boolean },
+	// Stored as a string rather than string[] on purpose: the state-proto generator
+	// has no array handling and would emit a scalar `string` for it, so a real array
+	// would silently round-trip as a joined string. Accepts either a JSON array or a
+	// newline/comma separated list; see readStringArray in cline-session-factory.
+	fileBoundaryAdditionalRoots: { default: "" as string },
 	worktreesEnabled: { default: false as boolean },
 	preferredLanguage: { default: "English" as string },
 	mode: { default: "act" as Mode },

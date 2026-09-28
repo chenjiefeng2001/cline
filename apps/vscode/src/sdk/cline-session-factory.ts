@@ -801,7 +801,11 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	}
 
 	const stateManager = StateManager.get()
-	const globalUseAutoCondense = stateManager.getGlobalSettingsKey("useAutoCondense") ?? false
+	// Mirrors the `useAutoCondense` default in state-keys. These two must agree: if
+	// StateManager ever fails to apply a stored default, this fallback is what decides,
+	// and a divergence would mean the settings UI advertises compaction that the
+	// session never performs.
+	const globalUseAutoCondense = stateManager.getGlobalSettingsKey("useAutoCondense") ?? true
 	const compactionStrategy = readCompactionStrategyGlobally()
 	// User-configurable auto-compact threshold (ratio, 0-1). Undefined keeps
 	// the SDK default (COMPACTION_TRIGGER_RATIO = 0.9).
@@ -826,6 +830,23 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		const n = typeof value === "number" ? value : Number(value)
 		return Number.isFinite(n) && n > 0 ? n : fallback
 	}
+	// A list setting may have been stored as a JSON string or as a real array
+	// depending on which writer persisted it, so accept both and drop anything that
+	// is not a non-empty string rather than passing junk to the boundary.
+	const readStringArray = (value: unknown): string[] => {
+		let raw: unknown = value
+		if (typeof value === "string") {
+			try {
+				raw = JSON.parse(value)
+			} catch {
+				return value
+					.split(/[,\n]/)
+					.map((entry) => entry.trim())
+					.filter((entry) => entry.length > 0)
+			}
+		}
+		return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string" && v.trim().length > 0) : []
+	}
 	const maxConsecutiveMistakes = readBoundedInt(stateManager.getGlobalSettingsKey("maxConsecutiveMistakes"), 3)
 	// Bound on model round-trips for one turn. Unbounded previously, which meant a
 	// confused agent could spend an arbitrary amount of the user's tokens; the
@@ -837,6 +858,16 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	// Only total cost is capped by default: a token cap would fight the user's own
 	// context-window choice, whereas cost is the thing that cannot be undone.
 	const runBudgetMaxTotalCost = readBoundedNumber(stateManager.getGlobalSettingsKey("runBudgetMaxTotalCost"), 5)
+
+	// File-tool workspace boundary. read_files previously had no path check at all
+	// and editor's `..` test applied only to relative inputs, so any absolute path
+	// was readable and writable and the workspace was never a boundary. Enabling the
+	// boundary constrains both to the session workspace; `additionalRoots` is the
+	// supported way to widen it for a multi-root setup rather than switching the
+	// guard off.
+	const fileBoundaryEnabled = stateManager.getGlobalSettingsKey("fileBoundaryEnabled") ?? true
+	const fileBoundaryAdditionalRoots = readStringArray(stateManager.getGlobalSettingsKey("fileBoundaryAdditionalRoots"))
+	const fileBoundary = fileBoundaryEnabled ? { additionalRoots: fileBoundaryAdditionalRoots } : undefined
 
 	// Subagents and teams. These were hard-coded false, which left the whole
 	// orchestration surface unreachable from the IDE: spawn_agent, the 18 team tools,
@@ -933,6 +964,9 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		workspaceRoot,
 		systemPrompt,
 		enableTools: true,
+		// Resolved by the SDK to workspaceRoot ?? cwd, with these as the extra
+		// permitted roots. Undefined leaves the tools unconstrained.
+		...(fileBoundary ? { fileBoundary } : {}),
 		checkpoint: {
 			enabled: enableCheckpoints,
 		},

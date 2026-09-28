@@ -20,12 +20,12 @@ import {
 	registerMcpServersFromSettingsFile,
 	resolveDefaultMcpSettingsPath,
 } from "../../extensions/mcp";
+import type { FileBoundary } from "../../extensions/tools/executors/file-boundary";
 import {
 	createBuiltinTools,
 	DEFAULT_MODEL_TOOL_ROUTING_RULES,
 	resolveToolPresetName,
-	resolveToolRoutingConfig,
-	type SkillsExecutorWithMetadata,
+	resolveToolRoutingConfig,	type SkillsExecutorWithMetadata,
 	type ToolExecutors,
 	ToolPresets,
 	type ToolRoutingRule,
@@ -157,6 +157,7 @@ function createBuiltinToolsList(
 	toolPolicies: CoreSessionConfig["toolPolicies"],
 	skillsExecutor?: SkillsExecutorWithMetadata,
 	executorOverrides?: Partial<ToolExecutors>,
+	fileBoundary?: FileBoundary,
 ): AgentTool[] {
 	const preset = ToolPresets[resolveToolPresetName({ mode })];
 	const toolRoutingConfig = resolveToolRoutingConfig(
@@ -172,6 +173,18 @@ function createBuiltinToolsList(
 			...preset,
 			enableSkills: !!skillsExecutor,
 			...toolRoutingConfig,
+			// The boundary belongs on the executors rather than the tool definitions:
+			// the tools are what the model sees, the executors are what touch the disk.
+			// Omitted when the host did not configure one, which leaves the historical
+			// unrestricted behaviour untouched.
+			...(fileBoundary
+				? {
+						executorOptions: {
+							fileRead: { boundary: fileBoundary },
+							editor: { boundary: fileBoundary },
+						},
+					}
+				: {}),
 			executors: {
 				...(skillsExecutor
 					? {
@@ -183,6 +196,33 @@ function createBuiltinToolsList(
 		}),
 		toolPolicies,
 	);
+}
+
+/**
+ * Resolve the session's file-tool boundary from config.
+ *
+ * Returns undefined when the host did not opt in, or when it opted out explicitly -
+ * "unset" and "disabled" both mean unconstrained, which keeps the historical
+ * behaviour reachable from configuration rather than requiring a code change.
+ */
+export function resolveFileBoundary(
+	// cwd is taken as its own argument rather than picked, because CoreSessionConfig
+	// declares it required and every caller here already has it to hand.
+	config: Pick<CoreSessionConfig, "fileBoundary" | "workspaceRoot">,
+	cwd: string,
+): FileBoundary | undefined {
+	const boundary = config.fileBoundary;
+	if (!boundary || boundary.enabled === false) {
+		return undefined;
+	}
+	const derived = config.workspaceRoot ?? cwd;
+	if (!derived) {
+		return undefined;
+	}
+	return {
+		root: boundary.roots?.[0] ?? derived,
+		additionalRoots: [...(boundary.roots?.slice(1) ?? []), ...(boundary.additionalRoots ?? [])],
+	};
 }
 
 function isSkillsToolEnabledForSession(input: {
@@ -375,6 +415,10 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 		const onTeamEvent = input.onTeamEvent ?? (() => {});
 		const normalized = normalizeConfig(config);
 		const workspaceConfigRoot = config.workspaceRoot ?? config.cwd;
+		// Resolved once and shared by the lead agent, configured subagents and the
+		// team lead, so every agent in a session is bounded identically. Undefined
+		// when the host did not configure one, which leaves the tools unrestricted.
+		const fileBoundary = resolveFileBoundary(config, config.cwd);
 		const effectiveToolPolicies = input.toolPolicies ?? config.toolPolicies;
 		const globallyDisabledToolNames = resolveDisabledToolNames();
 		const tools: AgentTool[] = [];
@@ -565,6 +609,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 					effectiveToolPolicies,
 					undefined,
 					toolExecutors,
+					fileBoundary,
 				),
 			);
 			if (!normalized.disableMcpSettingsTools) {
@@ -639,6 +684,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 														)
 													: undefined,
 												toolExecutors,
+												fileBoundary,
 											),
 											agent,
 										)
@@ -745,6 +791,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 									effectiveToolPolicies,
 									undefined,
 									toolExecutors,
+									fileBoundary,
 								)
 						: undefined,
 					teammateConfigProvider: delegatedAgentConfigProvider,

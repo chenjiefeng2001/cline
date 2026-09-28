@@ -397,6 +397,41 @@ function generateSecretsMessage(secretsKeys, fieldNumbers) {
 /**
  * Replace a message in the proto file content
  */
+/**
+ * Capture the `reserved` declarations inside a message, if it has any.
+ *
+ * Returns the lines verbatim so they can be re-emitted byte-for-byte. Comments inside
+ * the block are kept, since they are where the reason a number is reserved is
+ * recorded.
+ */
+function extractReservedBlock(protoContent, messageName) {
+	const messageRegex = new RegExp(`message\\s+${messageName}\\s*\\{([^{}]*(?:\\{[^{}]*\\}[^{}]*)*)\\}`, "m")
+	const match = protoContent.match(messageRegex)
+	if (!match) {
+		return ""
+	}
+	const body = match[1]
+	const reservedRegex = /((?:^[ \t]*\/\/[^\n]*\n)?[ \t]*reserved[^;]*;[ \t]*\n?)/gm
+	const blocks = []
+	let found
+	while ((found = reservedRegex.exec(body)) !== null) {
+		blocks.push(found[1])
+	}
+	return blocks.join("")
+}
+
+/** Put a captured reserved block back at the top of a regenerated message body. */
+function prependReserved(reservedBlock, messageContent) {
+	if (!reservedBlock) {
+		return messageContent
+	}
+	const open = messageContent.indexOf("{")
+	if (open === -1) {
+		return messageContent
+	}
+	return messageContent.slice(0, open + 1) + "\n" + reservedBlock + messageContent.slice(open + 1)
+}
+
 function replaceMessage(protoContent, messageName, newMessageContent) {
 	// Match the message definition including nested braces
 	const messageRegex = new RegExp(`message\\s+${messageName}\\s*\\{[^}]*(?:\\{[^}]*\\}[^}]*)*\\}`, "g")
@@ -445,9 +480,20 @@ async function main() {
 	// Read existing proto file
 	let protoContent = await fs.readFile(STATE_PROTO_PATH, "utf-8")
 
+	// Preserve the reserved field numbers and names inside the message we are about to
+	// replace.
+	//
+	// These are hand-maintained on purpose: they mark field numbers retired from
+	// Settings, and reusing one would silently reinterpret settings that users already
+	// have persisted. The generator only emits fields it finds in state-keys.ts, so
+	// every run used to drop them - a regeneration with no functional change would
+	// quietly delete the protection, and the next person to add a setting could take a
+	// retired number. Captured from the current file and re-emitted with the message.
+	const reservedBlock = extractReservedBlock(protoContent, "Settings")
+
 	// Replace messages
 	protoContent = replaceMessage(protoContent, "Secrets", secretsMessage)
-	protoContent = replaceMessage(protoContent, "Settings", settingsMessage)
+	protoContent = replaceMessage(protoContent, "Settings", prependReserved(reservedBlock, settingsMessage))
 
 	// Write updated proto file
 	await fs.writeFile(STATE_PROTO_PATH, protoContent)

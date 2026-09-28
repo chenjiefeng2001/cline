@@ -17,7 +17,35 @@ import type {
 } from "@cline/shared";
 import type { ToolRoutingRule } from "../extensions/tools/model-tool-routing";
 import type { TeamEvent } from "../extensions/tools/team";
+import type { FileBoundary } from "../extensions/tools/executors/file-boundary";
 import type { ProviderConfig } from "./provider-settings";
+
+/**
+ * Session-level shape of the file-tool workspace boundary.
+ *
+ * The root is not part of this: the host derives it from `workspaceRoot ?? cwd`, so
+ * a caller opts in to "constrain to this session's workspace" rather than restating
+ * a path the config already carries.
+ */
+export interface FileBoundaryConfig {
+	/**
+	 * Explicit roots. Overrides the derived root when provided, which is what a host
+	 * wants when the real working set is not the workspace (a scratch directory, a
+	 * sibling checkout).
+	 */
+	roots?: string[];
+	/**
+	 * Extra permitted roots, such as each folder of a multi-root workspace.
+	 */
+	additionalRoots?: string[];
+	/**
+	 * Set false to leave the tools unconstrained.
+	 * @default true
+	 */
+	enabled?: boolean;
+}
+
+export type { FileBoundary };
 
 export type CoreAgentMode = AgentMode;
 
@@ -260,6 +288,21 @@ export interface CoreSessionConfig
 	 */
 	sessionId?: string;
 	workspaceRoot?: string;
+	/**
+	 * Constrain the primary file tools (`read_files`, `editor`, `apply_patch`) to a
+	 * set of roots.
+	 *
+	 * These executors historically accepted any absolute path: `read_files` had no
+	 * check at all, and `editor` applied its `..` test only to relative inputs, so the
+	 * workspace was never a boundary and a `.env` or `~/.ssh/id_rsa` one tool call
+	 * away. A boundary is checked by realpath on both sides, so a symlink that sits
+	 * inside the workspace but points outside is rejected too.
+	 *
+	 * Omitted means unconstrained, which is the historical behaviour. Hosts that opt
+	 * in should set `additionalRoots` rather than disabling the boundary, since a
+	 * multi-root workspace legitimately spans several directories.
+	 */
+	fileBoundary?: FileBoundaryConfig;
 	systemPrompt: string;
 	teamName?: string;
 	missionLogIntervalSteps?: number;
