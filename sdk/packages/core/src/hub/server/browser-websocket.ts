@@ -81,7 +81,7 @@ function commandErrorReply(
  * inbound envelopes to that identity so a client cannot act as — or subscribe
  * on behalf of — anyone else.
  */
-class ConnectionIdentity {
+export class ConnectionIdentity {
 	private boundClientId: string | undefined;
 
 	constructor(readonly connectionId: string) {}
