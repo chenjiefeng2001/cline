@@ -8,6 +8,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { resolveBoundedPath, type FileBoundary } from "./file-boundary";
 import type { AgentToolContext } from "@cline/shared";
 import type { ApplyPatchInput } from "../schemas";
 import type { ApplyPatchExecutor } from "../types";
@@ -48,13 +49,45 @@ export interface ApplyPatchExecutorOptions {
 	 * @default true
 	 */
 	restrictToCwd?: boolean;
+
+	/**
+	 * Optional workspace boundary. When set it is authoritative and wins over
+	 * 
+estrictToCwd, because it is the stronger guarantee and is the one that
+	 * realpath-resolves. Unset leaves the historical lexical behaviour in place.
+	 */
+	boundary?: FileBoundary;
 }
 
-function resolveFilePath(
+/**
+ * Resolve a path the patch will read or write.
+ *
+ * When a boundary is configured it is authoritative and this delegates to
+ * `resolveBoundedPath`, which realpaths both sides. That closes two holes the old
+ * lexical check had, and both were reachable:
+ *
+ *   - a symlink *inside* the workspace that points outside it passed `rel.startsWith("..")`
+ *     because nothing resolved the link, so the check could not see where the file
+ *     actually was
+ *   - absolute inputs returned early, because the check only ever applied to
+ *     relative ones, so `C:\...` and `/etc/...` were accepted outright
+ *
+ * A configured boundary also deliberately overrides `restrictToCwd: false`. That
+ * option is the legacy weaker knob; letting it silently defeat an explicitly
+ * configured security boundary would mean a host could turn the boundary off by
+ * leaving an unrelated default in place. With no boundary configured, behaviour is
+ * unchanged: the lexical check still applies to relative paths when
+ * `restrictToCwd` is true.
+ */
+async function resolveFilePath(
 	cwd: string,
 	inputPath: string,
 	restrictToCwd: boolean,
-): string {
+	boundary: FileBoundary | undefined,
+): Promise<string> {
+	if (boundary) {
+		return resolveBoundedPath(cwd, inputPath, boundary)
+	}
 	const isAbsoluteInput = path.isAbsolute(inputPath);
 	const resolved = isAbsoluteInput
 		? path.normalize(inputPath)
@@ -191,6 +224,7 @@ async function loadFiles(
 	cwd: string,
 	encoding: BufferEncoding,
 	restrictToCwd: boolean,
+	boundary: FileBoundary | undefined,
 ): Promise<Record<string, string>> {
 	const filesToLoad = extractFilesForOperations(lines, [
 		PATCH_MARKERS.UPDATE,
@@ -199,7 +233,7 @@ async function loadFiles(
 	const files: Record<string, string> = {};
 
 	for (const filePath of filesToLoad) {
-		const absolutePath = resolveFilePath(cwd, filePath, restrictToCwd);
+		const absolutePath = await resolveFilePath(cwd, filePath, restrictToCwd, boundary);
 		let fileContent: string;
 		try {
 			fileContent = await fs.readFile(absolutePath, encoding);
@@ -277,11 +311,12 @@ async function applyChanges(
 	cwd: string,
 	encoding: BufferEncoding,
 	restrictToCwd: boolean,
+	boundary: FileBoundary | undefined,
 ): Promise<string[]> {
 	const touched: string[] = [];
 
 	for (const [filePath, change] of Object.entries(changes)) {
-		const sourceAbsPath = resolveFilePath(cwd, filePath, restrictToCwd);
+		const sourceAbsPath = await resolveFilePath(cwd, filePath, restrictToCwd, boundary);
 		switch (change.type) {
 			case PatchActionType.DELETE:
 				await fs.rm(sourceAbsPath, { force: true });
@@ -303,10 +338,11 @@ async function applyChanges(
 				}
 
 				if (change.movePath) {
-					const moveAbsPath = resolveFilePath(
+					const moveAbsPath = await resolveFilePath(
 						cwd,
 						change.movePath,
 						restrictToCwd,
+						boundary,
 					);
 					await fs.mkdir(path.dirname(moveAbsPath), { recursive: true });
 					await fs.writeFile(moveAbsPath, change.newContent, { encoding });
@@ -335,13 +371,14 @@ export async function computePatchChanges(
 	cwd: string,
 	options: ApplyPatchExecutorOptions = {},
 ): Promise<{ changes: Record<string, PatchFileChange>; fuzz: number }> {
-	const { encoding = "utf-8", restrictToCwd = true } = options;
+	const { encoding = "utf-8", restrictToCwd = true, boundary } = options;
 	const normalizedInput = normalizePatchInput(patchText);
 	const currentFiles = await loadFiles(
 		normalizedInput.lines,
 		cwd,
 		encoding,
 		restrictToCwd,
+		boundary,
 	);
 	const parser = new PatchParser(normalizedInput.lines, currentFiles);
 	const { patch, fuzz } = parser.parse();
@@ -358,7 +395,7 @@ export async function computePatchChanges(
 export function createApplyPatchExecutor(
 	options: ApplyPatchExecutorOptions = {},
 ): ApplyPatchExecutor {
-	const { encoding = "utf-8", restrictToCwd = true } = options;
+	const { encoding = "utf-8", restrictToCwd = true, boundary } = options;
 
 	return async (
 		input: ApplyPatchInput,
@@ -368,8 +405,15 @@ export function createApplyPatchExecutor(
 		const { changes, fuzz } = await computePatchChanges(input.input, cwd, {
 			encoding,
 			restrictToCwd,
+			boundary,
 		});
-		const touched = await applyChanges(changes, cwd, encoding, restrictToCwd);
+		const touched = await applyChanges(
+			changes,
+			cwd,
+			encoding,
+			restrictToCwd,
+			boundary,
+		);
 
 		const responseLines = [
 			"Successfully applied patch to the following files:",
@@ -378,7 +422,8 @@ export function createApplyPatchExecutor(
 			responseLines.push(file);
 		}
 		if (fuzz > 0) {
-			responseLines.push(`Note: Patch applied with fuzz factor ${fuzz}`);
+			responseLines.push(
+				`\n\nNote: Patch applied with fuzz factor ${fuzz}`);
 		}
 		return responseLines.join("\n");
 	};

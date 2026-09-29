@@ -182,11 +182,17 @@ function createBuiltinToolsList(
 			// the tools are what the model sees, the executors are what touch the disk.
 			// Omitted when the host did not configure one, which leaves the historical
 			// unrestricted behaviour untouched.
+			//
+			// applyPatch is here for the same reason, and its absence was a hole: with
+			// read and write bounded but patch unbounded, the boundary was bypassable by
+			// asking for the other file tool. Anything that writes to a path the model
+			// supplies has to be in this list or the guarantee is decorative.
 			...(fileBoundary
 				? {
 						executorOptions: {
 							fileRead: { boundary: fileBoundary },
 							editor: { boundary: fileBoundary },
+							applyPatch: { boundary: fileBoundary },
 						},
 					}
 				: {}),
