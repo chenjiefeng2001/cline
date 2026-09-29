@@ -346,11 +346,35 @@ async function runHookCommandOnce(
 		child.once("error", (error) => reject(error));
 	});
 
+	// Every listener that can observe the child's lifetime is attached HERE,
+	// synchronously at spawn, and not after an await.
+	//
+	// This is a lost-event bug, not a style preference. `writeToChildStdin` attaches
+	// its own `child.once("close")` to survive a child that exits early, and it is
+	// awaited below. A hook that fails immediately - crashes on an unresolved module,
+	// or exits before reading stdin - closes while that await is pending, and the
+	// `close` is consumed there. If this function then attached its own `close`
+	// listener afterwards, the event had already fired, nothing would ever resolve
+	// the result, and the call would hang until whatever timeout the caller has.
+	//
+	// It reproduces as an intermittent hang, because it is a race: it needs the child
+	// to exit inside that await window, which is more likely on a loaded Windows
+	// runner and for a hook that is failing (the case where you most want an error
+	// rather than a hang).
 	const body = JSON.stringify(payload);
-	await Promise.race([spawned, childError]);
-	await writeToChildStdin(child, body);
+
+	let stdout = "";
+	let stderr = "";
+	let timedOut = false;
+	let timeoutId: NodeJS.Timeout | undefined;
+	let settleResult: ((value: HookCommandResult) => void) | undefined;
+	const result = new Promise<HookCommandResult>((resolve) => {
+		settleResult = resolve;
+	});
 
 	if (options.detached) {
+		await Promise.race([spawned, childError]);
+		await writeToChildStdin(child, body);
 		child.unref();
 		return;
 	}
@@ -358,39 +382,36 @@ async function runHookCommandOnce(
 	if (!child.stdout || !child.stderr) {
 		throw new Error("hook command failed to create stdout/stderr");
 	}
-	let stdout = "";
-	let stderr = "";
-	let timedOut = false;
-	let timeoutId: NodeJS.Timeout | undefined;
 	child.stdout.on("data", (chunk: Buffer | string) => {
 		stdout += chunk.toString();
 	});
 	child.stderr.on("data", (chunk: Buffer | string) => {
 		stderr += chunk.toString();
 	});
-
-	const result = new Promise<HookCommandResult>((resolve) => {
-		if ((options.timeoutMs ?? 0) > 0) {
-			timeoutId = setTimeout(() => {
-				timedOut = true;
-				child.kill("SIGKILL");
-			}, options.timeoutMs);
+	child.once("close", (exitCode) => {
+		if (timeoutId) {
+			clearTimeout(timeoutId);
 		}
-		child.once("close", (exitCode) => {
-			if (timeoutId) {
-				clearTimeout(timeoutId);
-			}
-			const { parsedJson, parseError } = parseHookStdout(stdout);
-			resolve({
-				exitCode,
-				stdout,
-				stderr,
-				parsedJson,
-				parseError,
-				timedOut,
-			});
+		const { parsedJson, parseError } = parseHookStdout(stdout);
+		settleResult?.({
+			exitCode,
+			stdout,
+			stderr,
+			parsedJson,
+			parseError,
+			timedOut,
 		});
 	});
+
+	await Promise.race([spawned, childError]);
+	if ((options.timeoutMs ?? 0) > 0) {
+		timeoutId = setTimeout(() => {
+			timedOut = true;
+			child.kill("SIGKILL");
+		}, options.timeoutMs);
+	}
+	await writeToChildStdin(child, body);
+
 	return await Promise.race([result, childError]);
 }
 
