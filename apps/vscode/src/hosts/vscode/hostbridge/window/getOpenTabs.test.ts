@@ -71,15 +71,22 @@ describe("Hostbridge - Window - getOpenTabs", () => {
 		await createAndOpenTestDocument("open-tabs-1", vscode.ViewColumn.One)
 		await createAndOpenTestDocument("open-tabs-2", vscode.ViewColumn.Two)
 
-		// Wait for tabs to be fully created
+		// Wait for the two documents to be reported.
+		//
+		// The condition is "both expected paths are present", not "the count is exactly
+		// two". The old `=== 2` had a failure mode where it was not merely slow: an
+		// extra entry made the condition unsatisfiable for the full 8s, so the test
+		// reported a TimeoutError and the real cause - one path too many - never
+		// appeared in the message. That is the worst version of a flaky test, because
+		// the diagnostic points at the clock rather than at the data.
 		await pWaitFor(
 			async () => {
 				const request = GetOpenTabsRequest.create({})
 				const response = await getOpenTabs(request)
-				console.log(
-					`[DEBUG] Waiting for 2 tabs, currently found ${response.paths.length}: ${JSON.stringify(response.paths)}`,
-				)
-				return response.paths.length === 2
+				const hasBoth =
+					response.paths.some((p) => p.includes("open-tabs-1")) && response.paths.some((p) => p.includes("open-tabs-2"))
+				console.log(`[DEBUG] waiting for both tabs, found ${response.paths.length}: ${JSON.stringify(response.paths)}`)
+				return hasBoth
 			},
 			{
 				timeout: 8000,
@@ -90,11 +97,19 @@ describe("Hostbridge - Window - getOpenTabs", () => {
 		const request = GetOpenTabsRequest.create({})
 		const response = await getOpenTabs(request)
 
-		// Should have 2 tabs open
+		// Both documents present, and each reported once. A document open in two tabs
+		// is one open file, so a repeated path here is a defect rather than a detail.
+		const open1 = response.paths.filter((p) => p.includes("open-tabs-1"))
+		const open2 = response.paths.filter((p) => p.includes("open-tabs-2"))
 		assert.strictEqual(
-			response.paths.length,
-			2,
-			`Expected 2 tabs, got ${response.paths.length}. Found tabs: ${JSON.stringify(response.paths)}`,
+			open1.length,
+			1,
+			`Expected open-tabs-1 exactly once, got ${open1.length}. All: ${JSON.stringify(response.paths)}`,
+		)
+		assert.strictEqual(
+			open2.length,
+			1,
+			`Expected open-tabs-2 exactly once, got ${open2.length}. All: ${JSON.stringify(response.paths)}`,
 		)
 	})
 
