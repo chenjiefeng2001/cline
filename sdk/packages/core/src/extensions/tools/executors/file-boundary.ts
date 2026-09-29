@@ -52,7 +52,21 @@ export async function resolveBoundedPath(
 	inputPath: string,
 	boundary: FileBoundary | undefined,
 ): Promise<string> {
-	const resolved = path.isAbsolute(inputPath) ? path.normalize(inputPath) : path.resolve(cwd, inputPath)
+	// `path.resolve`, not `path.normalize`, for the absolute branch. On Windows
+	// `path.isAbsolute("/shared/notes.md")` is true, so normalize was taken, and it
+	// returns the path still drive-relative as "\shared\notes.md". The roots go through
+	// realpath and come back drive-qualified as "C:\shared", so the containment check
+	// compared two paths on different bases and `path.relative` reported an escape -
+	// rejecting a path that was genuinely inside a permitted root. Models emit rooted
+	// POSIX-style paths, so this was reachable, not theoretical. Resolving assigns the
+	// drive the same way the roots get theirs, and a genuinely different drive still
+	// fails to contain, which is the correct answer.
+	//
+	// The relative branch keeps `cwd` explicitly: a bare `path.resolve(inputPath)`
+	// would silently resolve against the process directory instead, which happens to
+	// be right only when the host's cwd is the workspace and wrong in every daemon,
+	// test and remote session where it is not.
+	const resolved = path.isAbsolute(inputPath) ? path.resolve(inputPath) : path.resolve(cwd, inputPath)
 	if (!boundary) {
 		return resolved
 	}

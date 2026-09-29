@@ -36,6 +36,16 @@
 			"id": "lead-run-reports-no-agent-chain",
 			"boundary": "runtime-contract",
 			"guarantee": "A lead agent reports no parent or chain root, so ownership is never inferred for a session's own agent."
+		},
+		{
+			"id": "file-boundary-refuses-path-that-escapes-the-root",
+			"boundary": "file-boundary",
+			"guarantee": "A path the model supplies that resolves outside every configured root is refused inside the tool, so the refusal reaches the model as a tool error and never as file contents."
+		},
+		{
+			"id": "file-boundary-honours-configured-additional-roots",
+			"boundary": "file-boundary",
+			"guarantee": "A path inside a configured additional root is allowed, so an opt-in multi-root workspace stays usable without the boundary being widened by default."
 		}
 	]
 }

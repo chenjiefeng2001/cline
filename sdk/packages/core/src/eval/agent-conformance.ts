@@ -21,7 +21,12 @@
  * means adding one entry here rather than inventing a runner.
  */
 
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createAgentRuntime } from "@cline/agents";
+import { resolveBoundedPath } from "../extensions/tools/executors/file-boundary"
+import type { FileBoundary } from "../extensions/tools/executors/file-boundary"
 import type {
 	AgentMessage,
 	AgentModel,
@@ -404,6 +409,137 @@ export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
 			};
 		},
 	},
+	{
+		id: "file-boundary-refuses-path-that-escapes-the-root",
+		boundary: "file-boundary",
+		guarantee:
+			"A path the model supplies that resolves outside every configured root is refused inside the tool, so the refusal reaches the model as a tool error and never as file contents.",
+		async run() {
+			// Real directories, not placeholders: containment is checked by realpath,
+			// which throws for a root that does not exist. A fake root would make the
+			// boundary refuse everything and the case would pass for the wrong reason.
+			const dirs = makeBoundaryFixture();
+			const toolContexts: AgentToolContext[] = [];
+			const toolResultOutputs: unknown[] = [];
+			const { runtime, model } = createHarness({
+				steps: [
+					() => [
+						...toolCall("call-1", "read_bounded", {
+							path: join(dirs.cwd, "..", "outside", "secret.txt"),
+						}),
+						finish("tool-calls"),
+					],
+					() => [textDelta("done"), finish()],
+				],
+				tools: [boundaryTool("read_bounded", dirs.cwd, { root: dirs.root }, toolContexts, toolResultOutputs)],
+			});
+			const result = await runtime.run("go");
+			await dirs.dispose();
+			return {
+				outputText: result.outputText,
+				messages: result.messages,
+				toolContexts,
+				toolResultOutputs,
+				modelRequests: model.requests,
+				runtime,
+			};
+		},
+	},
+	{
+		id: "file-boundary-honours-configured-additional-roots",
+		boundary: "file-boundary",
+		guarantee:
+			"A path inside a configured additional root is allowed, so an opt-in multi-root workspace stays usable without the boundary being widened by default.",
+		async run() {
+			const dirs = makeBoundaryFixture();
+			const toolContexts: AgentToolContext[] = [];
+			const toolResultOutputs: unknown[] = [];
+			const { runtime, model } = createHarness({
+				steps: [
+					() => [
+						...toolCall("call-1", "read_bounded", {
+							path: join(dirs.shared, "notes.md"),
+						}),
+						finish("tool-calls"),
+					],
+					() => [textDelta("done"), finish()],
+				],
+				tools: [
+					boundaryTool(
+						"read_bounded",
+						dirs.cwd,
+						{ root: dirs.root, additionalRoots: [dirs.shared] },
+						toolContexts,
+						toolResultOutputs,
+					),
+				],
+			});
+			const result = await runtime.run("go");
+			await dirs.dispose();
+			return {
+				outputText: result.outputText,
+				messages: result.messages,
+				toolContexts,
+				toolResultOutputs,
+				modelRequests: model.requests,
+				runtime,
+			};
+		},
+	},
 ];
+
+/**
+ * Real directory tree for the boundary cases: a workspace root, a sibling that is
+ * permitted only when configured, and a sibling that is never permitted.
+ */
+function makeBoundaryFixture() {
+	const base = mkdtempSync(join(tmpdir(), "conformance-boundary-"))
+	const root = join(base, "workspace")
+	const shared = join(base, "shared")
+	const outside = join(base, "outside")
+	for (const dir of [root, shared, outside]) {
+		mkdirSync(dir)
+	}
+	return {
+		base,
+		root,
+		shared,
+		outside,
+		cwd: root,
+		dispose: () => rmSync(base, { recursive: true, force: true }),
+	}
+}
+
+/**
+ * A tool that resolves its input against a real file boundary.
+ *
+ * Uses the shipped resolver rather than a re-implementation, so the case fails if
+ * the boundary's behaviour drifts - which is the point of pinning it now that the
+ * boundary is live.
+ */
+function boundaryTool(
+	name: string,
+	cwd: string,
+	boundary: FileBoundary,
+	toolContexts: AgentToolContext[],
+	toolResultOutputs: unknown[],
+): AgentTool<unknown, { echoed: unknown }> {
+	return {
+		name,
+		description: `Conformance tool ${name}`,
+		inputSchema: {
+			type: "object",
+			properties: { path: { type: "string" } },
+			required: ["path"],
+		},
+		execute: async (input: unknown, context) => {
+			toolContexts.push(context);
+			const target = (input as { path: string }).path;
+			const output = { echoed: await resolveBoundedPath(cwd, target, boundary) };
+			toolResultOutputs.push(output);
+			return output;
+		},
+	}
+}
 
 export { toolResults, ScriptedModel };

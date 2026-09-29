@@ -109,6 +109,29 @@ function assertCase(
 			expect(observed?.rootRunId).toBeUndefined();
 			return;
 		}
+		case "file-boundary-refuses-path-that-escapes-the-root": {
+			// The decisive part: the tool never returned anything, and the model got
+			// an error result instead. A boundary that ran after the read, or that
+			// swallowed the refusal, would still hand over the contents.
+			expect(context.toolResultOutputs).toHaveLength(0);
+			const results = toolResults(context.messages);
+			expect(results).toHaveLength(1);
+			expect(results[0]?.isError).toBe(true);
+			return;
+		}
+		case "file-boundary-honours-configured-additional-roots": {
+			// The escape hatch is opt-in, not a loosening of the default: with the
+			// directory listed, the tool resolves and returns the path. Before the
+			// drive-qualification fix this was refused, because the target kept a
+			// different base than the realpath'd root.
+			expect(context.toolResultOutputs).toHaveLength(1);
+			const results = toolResults(context.messages);
+			expect(results).toHaveLength(1);
+			expect(results[0]?.isError).not.toBe(true);
+			const echoed = (context.toolResultOutputs[0] as { echoed: string }).echoed;
+			expect(echoed).toMatch(/notes\.md$/);
+			return;
+		}
 		default:
 			throw new Error(
 				`Conformance case ${id} has no assertion. Add one, or remove it from the registry and the baseline together.`,
