@@ -559,7 +559,13 @@ async function runBlockingHookCommands(options: {
 				timeoutMs: options.timeoutMs,
 			});
 			if (result?.timedOut) {
-				logHookError(options.logger, `hook command timed out: ${commandLabel}`);
+				// The resolved argv, not just the label. A hook timeout is otherwise
+				// undecidable on Windows, where the same script may launch as bash, as
+				// WSL's bash, or not at all - and "which one" is the whole question.
+				logHookError(
+					options.logger,
+					`hook command timed out: ${commandLabel} (argv=${JSON.stringify(command)}, cwd=${options.cwd})`,
+				);
 				continue;
 			}
 			if (result?.parseError) {

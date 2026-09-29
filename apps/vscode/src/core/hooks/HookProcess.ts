@@ -77,6 +77,11 @@ export async function getHookLaunchConfig(
 	}
 }
 
+/** Render a hook lifecycle timeline for inclusion in an error or log line. */
+function describeTrace(trace: readonly string[]): string {
+	return `hook lifecycle:\n  ${trace.join("\n  ")}`
+}
+
 /**
  * HookProcess manages the execution of a hook script with streaming output capabilities.
  * Similar to VscodeTerminalProcess but specialized for hook execution.
@@ -173,8 +178,23 @@ export class HookProcess extends EventEmitter {
 				// Windows executes hooks with PowerShell directly.
 				// Unix executes hook files through the shell for shebang support.
 				void (async () => {
+					// Timeline for diagnosing a hook that hangs or dies. Written on every
+					// exit path, and written *before* the caller can be killed by an
+					// external timeout - a hang that produces no output is the failure
+					// mode that is hardest to act on, because the log ends where the
+					// evidence should begin.
+					const trace: string[] = []
+					const startedAt = Date.now()
+					const stamp = (event: string, detail?: string) => {
+						trace.push(`${String(Date.now() - startedAt).padStart(6)}ms ${event}${detail ? ` ${detail}` : ""}`)
+					}
+					stamp("begin", `script=${this.scriptPath}`)
 					try {
 						const launchConfig = await getHookLaunchConfig(this.scriptPath)
+						stamp(
+							"launch-config",
+							`command=${launchConfig.command} args=${JSON.stringify(launchConfig.args)} shell=${String(launchConfig.shell)}`,
+						)
 						this.childProcess = spawn(launchConfig.command, launchConfig.args, {
 							stdio: ["pipe", "pipe", "pipe"],
 							shell: launchConfig.shell,
@@ -186,16 +206,22 @@ export class HookProcess extends EventEmitter {
 							// strand orphaned processes.
 							...(isWindowsJobObjectSupported() ? { windowsJob: true } : {}),
 						})
+						stamp("spawn-returned", `childPid=${String(this.childProcess.pid)}`)
 
 						let didEmitEmptyLine = false
 
 						// Set up timeout
 						this.timeoutHandle = setTimeout(() => {
 							if (this.childProcess && !this.isCompleted) {
+								stamp("timeout-fired", `ms=${this.timeoutMs}`)
+								// Emitted before the kill, so a hang still leaves a record of how
+								// far it got. Without this the only evidence is the harness
+								// killing the run, which tells you nothing.
+								this.emit("diagnostic", `hook lifecycle stalled:\n${describeTrace(trace)}`)
 								this.childProcess.kill("SIGTERM")
 								reject(
 									new Error(
-										`Hook execution timed out after ${this.timeoutMs}ms. The hook script at '${this.scriptPath}' took too long to complete.`,
+										`Hook execution timed out after ${this.timeoutMs}ms. The hook script at '${this.scriptPath}' took too long to complete.\n${describeTrace(trace)}`,
 									),
 								)
 							}
@@ -227,6 +253,7 @@ export class HookProcess extends EventEmitter {
 						this.childProcess.on("close", (code, signal) => {
 							this.exitCode = code
 							this.isCompleted = true
+							stamp("close", `code=${String(code)} signal=${String(signal)}`)
 							this.emitRemainingBuffer()
 
 							// Unregister from active processes
@@ -248,12 +275,22 @@ export class HookProcess extends EventEmitter {
 							if (code === 0) {
 								resolve()
 							} else {
-								reject(new Error(`Hook exited with code ${code}${signal ? `, signal ${signal}` : ""}`))
+								// Self-describing: the CI failure that prompted this reported
+								// `Module not found '...UserPromptSubmit.js'` while the scriptPath
+								// said `.ps1`, with no indication of what was actually launched. The
+								// launch config and the timeline are what make that decidable.
+								stamp("reject", `code=${String(code)}`)
+								reject(
+									new Error(
+										`Hook exited with code ${code}${signal ? `, signal ${signal}` : ""}\n${describeTrace(trace)}`,
+									),
+								)
 							}
 						})
 
 						// Handle process errors
 						this.childProcess.on("error", (error) => {
+							stamp("error", error.message)
 							// Unregister from active processes
 							this.safeUnregister()
 
@@ -266,22 +303,24 @@ export class HookProcess extends EventEmitter {
 								this.abortSignal.removeEventListener("abort", abortHandler)
 							}
 							this.emit("error", error)
-							reject(error)
+							reject(new Error(`${error.message}\n${describeTrace(trace)}`))
 						})
 
 						// Send input to the process
 						try {
 							this.childProcess.stdin?.write(inputJson)
 							this.childProcess.stdin?.end()
+							stamp("stdin-written", `bytes=${inputJson.length}`)
 						} catch (error) {
-							reject(new Error(`Failed to write input to hook: ${error}`))
+							reject(new Error(`Failed to write input to hook: ${error}\n${describeTrace(trace)}`))
 						}
 					} catch (error) {
+						stamp("setup-threw", error instanceof Error ? error.message : String(error))
 						this.safeUnregister()
 						if (this.abortSignal) {
 							this.abortSignal.removeEventListener("abort", abortHandler)
 						}
-						reject(error)
+						reject(new Error(`${error instanceof Error ? error.message : String(error)}\n${describeTrace(trace)}`))
 					}
 				})()
 			})
