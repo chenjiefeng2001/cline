@@ -424,7 +424,18 @@ async function main() {
 		if (args[i] === "--model" && args[i + 1]) {
 			selectedModel = args[++i]
 		} else if (args[i] === "--trials" && args[i + 1]) {
-			trials = parseInt(args[++i], 10)
+			const raw = args[++i]
+			const parsed = parseInt(raw, 10)
+			// Guarded for the same reason as the cline-bench runner: the trial loop is
+			// `t < trials`, so NaN runs zero iterations and every scenario reports no
+			// trials at all. A scheduled run of cline-evals-nightly.yml passes
+			// `--trials "${{ inputs.trials }}"`, and `inputs` is only populated for
+			// workflow_dispatch, so an unset input arrives here as an empty string.
+			if (Number.isFinite(parsed) && parsed > 0) {
+				trials = parsed
+			} else {
+				console.warn(`Ignoring invalid --trials value "${raw}"; using ${trials}.`)
+			}
 		} else if (args[i] === "--scenario" && args[i + 1]) {
 			selectedScenario = args[++i]
 		} else if (args[i] === "--output" && args[i + 1]) {

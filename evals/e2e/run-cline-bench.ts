@@ -234,7 +234,18 @@ async function main() {
 		} else if (args[i] === "--tasks" && args[i + 1]) {
 			options.tasks = args[++i]
 		} else if (args[i] === "--trials" && args[i + 1]) {
-			options.trials = parseInt(args[++i], 10)
+			const raw = args[++i]
+			const parsed = parseInt(raw, 10)
+			// Guarded, because every trial loop is `trial < trials`: a NaN from
+			// `parseInt("")` runs zero iterations and produces a report with no
+			// results, which reads as a clean pass. An empty --trials is exactly what
+			// CI passes when a scheduled (rather than dispatched) run leaves an input
+			// unset, so this path is reachable in normal operation, not hypothetical.
+			if (Number.isFinite(parsed) && parsed > 0) {
+				options.trials = parsed
+			} else {
+				console.warn(`Ignoring invalid --trials value "${raw}"; using ${options.trials}.`)
+			}
 		} else if (args[i] === "--output" && args[i + 1]) {
 			options.outputFile = args[++i]
 		}

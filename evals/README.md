@@ -106,7 +106,7 @@ With 3 trials:
 
 - Current PR gate: contract tests only
 - Smoke test CI: auto-regression retired during the SDK CLI migration; an on-demand replacement exists at `.github/workflows/cline-evals-smoke.yml` (manual `workflow_dispatch`, requires the `CLINE_API_KEY` repository secret)
-- Nightly: E2E tests with cline-bench are not yet implemented, see TODO
+- Nightly: E2E with cline-bench runs on a schedule via `.github/workflows/cline-bench-nightly.yml`. Reported, not gated — see the contract in that file's header.
 
 ## Quick Start
 
@@ -145,7 +145,7 @@ Contribute to [cline/cline-bench](https://github.com/cline/cline-bench)
 
 ## TODO
 
-- [ ] **Nightly E2E CI**: Add scheduled workflow for cline-bench tests
+- [x] **Nightly E2E CI**: scheduled workflow `.github/workflows/cline-bench-nightly.yml`
   - Requires: Docker runner, Harbor setup, ~1-2 hour timeout
   - Should run on schedule (e.g., nightly) not per-PR
   - Separate secrets for E2E environment

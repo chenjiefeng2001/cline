@@ -1,0 +1,293 @@
+name: cline-bench-nightly
+
+# Real-world task eval (evals/cline-bench, via Harbor).
+#
+# This is the third and highest layer of the eval pyramid, and its contract is the
+# same one cline-evals-nightly.yml already states, for the same reasons:
+#
+#   PR gate (sdk-test.yml :: agent-conformance)
+#     deterministic | offline | no secret | behavioural invariants | must be
+#     green for every PR
+#
+#   This workflow
+#     live provider | real Docker task environments | wall-clock hours |
+#     reported, not gated
+#
+# It is deliberately NOT a required check and is intentionally not triggered by
+# pull_request. A single model call decides a task, so gating a PR on it would make
+# PR status a function of provider mood. It also enforces no pass-rate threshold:
+# what counts as a regression, and at what pass@k, is an open release-gate decision.
+# This workflow's job is to make that decision possible by producing comparable data
+# every night.
+#
+# A run that cannot complete at all fails loudly, because a silently skipped nightly
+# is indistinguishable from a healthy one. A missing credential is the one exception,
+# and only on a fork.
+#
+# Separate from cline-evals-nightly.yml rather than another job in it: the resource
+# profile is unrelated (Harbor, Python 3.13, Docker task images, hours) and a
+# cline-bench failure must not be able to fail the smoke nightly, or the two layers
+# would stop being independently diagnosable.
+
+on:
+    schedule:
+        # 04:47 UTC nightly. Off the hour to avoid the shared cron spike, and later
+        # than the smoke nightly (03:17) so the two long provider-bound layers do not
+        # compete for the same window.
+        - cron: "47 4 * * *"
+    workflow_dispatch:
+        inputs:
+            model:
+                description: "Model id passed to --model (Harbor form: <provider>:<id>)"
+                required: false
+                default: "claude-sonnet-4-20250514"
+            provider:
+                description: "Provider key passed to --provider"
+                required: false
+                default: "anthropic"
+            env:
+                description: "Execution environment"
+                required: false
+                default: "docker"
+                type: choice
+                options:
+                    - docker
+                    - daytona
+            tasks:
+                description: "Substring filter passed to --tasks (empty = all 12)"
+                required: false
+                default: ""
+            trials:
+                description: "Trials per task passed to --trials"
+                required: false
+                default: "1"
+
+# One sweep at a time. A run overlapping its own successor would make the trend
+# series incomparable, so queue rather than cancel.
+concurrency:
+    group: cline-bench-nightly
+    cancel-in-progress: false
+
+permissions:
+    contents: read
+
+defaults:
+    run:
+        working-directory: .
+
+jobs:
+    nightly:
+        runs-on: ubuntu-latest
+        name: Nightly real-task eval
+        # 12 tasks x the runner's 30 minute per-task ceiling is 6 hours, which is the
+        # hosted-runner job cap. This is deliberately set just under it rather than at
+        # a rounder number, and the consequence is stated rather than hidden: a full
+        # sweep can be cut short by the platform. Use the `tasks` input to run a
+        # subset, or split the rotation, if that becomes a problem in practice.
+        timeout-minutes: 350
+        env:
+            # Bound once at job level so the availability guard is a single decision
+            # every later step can test, instead of re-reading a secret.
+            CLINE_API_KEY: ${{ secrets.CLINE_API_KEY }}
+            DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+        steps:
+            # Loud on the canonical repo, quiet on a fork - same rule as the smoke
+            # nightly. On the canonical repo a missing credential is a
+            # misconfiguration of this layer's only prerequisite, and failing is the
+            # only way to distinguish "stopped authenticating" from "healthy".
+            - name: Guard - provider credential
+              id: guard
+              env:
+                  ENV_CHOICE: ${{ github.event.inputs.env }}
+              run: |
+                  if [ -z "$CLINE_API_KEY" ]; then
+                      if [ "${{ github.event.repository.fork }}" = "false" ]; then
+                          echo "::error title=Missing credential::Repository secret CLINE_API_KEY is not set, so the nightly real-task eval cannot authenticate. The deterministic PR gate does not need this secret."
+                          echo "available=false" >> "$GITHUB_OUTPUT"
+                          exit 1
+                      fi
+                      echo "::notice title=Skipped::CLINE_API_KEY is not reachable on a fork, so the nightly real-task eval was skipped."
+                      echo "available=false" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  # Cloud execution is opt-in and needs its own credential. Failing
+                  # here beats a sweep that reports twelve task errors caused by a
+                  # missing key rather than by model quality.
+                  if [ "$ENV_CHOICE" = "daytona" ] && [ -z "$DAYTONA_API_KEY" ]; then
+                      echo "::error title=Missing credential::--env daytona was selected but DAYTONA_API_KEY is not set. Re-run with --env docker, or set the secret."
+                      echo "available=false" >> "$GITHUB_OUTPUT"
+                      exit 1
+                  fi
+                  echo "Credentials present (env: ${ENV_CHOICE:-docker})."
+                  echo "available=true" >> "$GITHUB_OUTPUT"
+
+            # cline-bench is a git submodule (evals/cline-bench), and the runner
+            # reads its task definitions from inside it.
+            - name: Checkout code
+              if: steps.guard.outputs.available == 'true'
+              uses: actions/checkout@v4
+              with:
+                  submodules: recursive
+
+            - name: Setup Bun
+              if: steps.guard.outputs.available == 'true'
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: "1.3.13"
+
+            - name: Setup Node.js
+              if: steps.guard.outputs.available == 'true'
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "22.x"
+
+            # Harbor is a uv-managed tool, and its own README asks for Python 3.13.
+            # `uv tool install` puts the binary under ~/.local/bin, which is not on
+            # PATH by default - hence the GITHUB_PATH export.
+            - name: Setup uv + Python 3.13 + Harbor
+              if: steps.guard.outputs.available == 'true'
+              uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Install Harbor
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  uv python install 3.13
+                  uv tool install harbor
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  which harbor
+                  harbor --version
+
+            - name: Verify Docker
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  docker info
+                  docker run --rm hello-world
+
+            - name: Install dependencies
+              if: steps.guard.outputs.available == 'true'
+              run: bun install
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            # The agent Harbor invokes is `cline-cli`, so the built CLI has to be on
+            # PATH before the sweep starts.
+            - name: Build SDK + CLI
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  bun run build:sdk
+                  bun -F @cline/cli build
+
+            - name: Link cline CLI onto PATH
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  cd apps/cli
+                  bun link
+                  which cline
+
+            - name: Install evals dependencies
+              if: steps.guard.outputs.available == 'true'
+              run: |
+                  npm ci
+                  cd analysis && npm ci
+
+            - name: Typecheck evals tooling
+              if: steps.guard.outputs.available == 'true'
+              working-directory: ./evals
+              run: npx tsc --noEmit
+
+            # `continue-on-error` is deliberate and load-bearing. The runner exits
+            # non-zero when any task fails, and at this layer a task failure is DATA,
+            # not a build break. Without this the workflow would be a required check
+            # by accident, which is the exact property the header rules out.
+            - name: Run real-task eval
+              id: bench
+              if: steps.guard.outputs.available == 'true'
+              continue-on-error: true
+              working-directory: ./evals
+              env:
+                  # The runner reads API_KEY for every provider; CLINE_API_KEY is the
+                  # repo's existing secret for this purpose, so no new secret is
+                  # introduced.
+                  API_KEY: ${{ secrets.CLINE_API_KEY }}
+              run: |
+                  # `github.event.inputs.*` rather than the `inputs` context: inputs is
+                  # only populated for workflow_dispatch, so on a scheduled run it
+                  # expands to an empty string. The `|| default` keeps a nightly from
+                  # depending on how the run was triggered.
+                  MODEL="${{ github.event.inputs.model }}" ; MODEL="${MODEL:-claude-sonnet-4-20250514}"
+                  PROVIDER="${{ github.event.inputs.provider }}" ; PROVIDER="${PROVIDER:-anthropic}"
+                  ENV_CHOICE="${{ github.event.inputs.env }}" ; ENV_CHOICE="${ENV_CHOICE:-docker}"
+                  TRIALS="${{ github.event.inputs.trials }}" ; TRIALS="${TRIALS:-1}"
+                  TASKS="${{ github.event.inputs.tasks }}"
+
+                  ARGS=(--model "$MODEL" --provider "$PROVIDER" --env "$ENV_CHOICE" \
+                        --trials "$TRIALS" --output ../cline-bench-report.json)
+                  if [ -n "$TASKS" ]; then
+                      ARGS+=(--tasks "$TASKS")
+                  fi
+                  npx tsx e2e/run-cline-bench.ts "${ARGS[@]}"
+
+            # Rendered from the runner's own JSON rather than scraped from logs, and
+            # the "did not run" case is distinguished from "ran and failed" - the same
+            # distinction the smoke nightly draws, because reading a crash as a
+            # quality regression is how a real regression gets dismissed later.
+            - name: Publish benchmark report to the job summary
+              if: always() && steps.guard.outputs.available == 'true'
+              env:
+                  BENCH_OUTCOME: ${{ steps.bench.outcome }}
+              run: |
+                  python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+                  import json, os, pathlib
+                  print("### Nightly real-task eval (cline-bench)\n")
+                  print("_Real-world tasks in Docker via Harbor. Reported, not gated: what counts as a")
+                  print("regression is an open release-gate decision. The deterministic PR gate is")
+                  print("`agent-conformance` in `sdk-test.yml`._\n")
+                  path = pathlib.Path("cline-bench-report.json")
+                  if not path.exists():
+                      print("No report was produced. See the run log for the failure.")
+                      raise SystemExit(0)
+                  report = json.loads(path.read_text())
+                  s = report["summary"]
+                  print(f"- provider / model: `{report['provider']}` / `{report['model']}`")
+                  print(f"- environment: `{report['environment']}` · trials per task: {report['trialsPerTask']}")
+                  print(f"- **pass rate: {s['passed']}/{s['total']} ({s['passRate']*100:.1f}%)**\n")
+                  print("| Task | Result | Duration |")
+                  print("| --- | --- | --- |")
+                  for r in report["results"]:
+                      status = "PASS" if r["passed"] else "FAIL"
+                      if not r["passed"] and r.get("error"):
+                          # The runner takes this straight from a process stderr, so it
+                          # is routinely multi-line. Left alone it breaks out of the
+                          # table cell and can inject stray markdown into the summary.
+                          flat = " ".join(r["error"].split())[:120]
+                          status = f"FAIL - {flat}"
+                      print(f"| `{r['taskId']}` | {status} | {r['duration_sec']:.0f}s |")
+                  PY
+
+            - name: Summarize outcome
+              if: always() && steps.guard.outputs.available == 'true'
+              env:
+                  BENCH_OUTCOME: ${{ steps.bench.outcome }}
+              run: |
+                  if [ "$BENCH_OUTCOME" = "success" ]; then
+                      echo "::notice title=Real-task eval passed::Every task in this sweep passed."
+                  elif [ -z "$BENCH_OUTCOME" ]; then
+                      # The step never ran, so an earlier setup step failed. Do not let
+                      # that read as a model-quality regression.
+                      echo "::error title=Real-task eval did not run::An earlier step failed, so the sweep never executed. This is a harness, credential or build failure, not a quality regression."
+                  else
+                      echo "::warning title=Real-task eval reported failures::At least one task failed. This is provider-dependent quality, not a build break, and it does not affect PR status. See the job summary and the uploaded report."
+                  fi
+
+            - name: Upload results
+              if: always() && steps.guard.outputs.available == 'true'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: cline-bench-report-${{ github.run_id }}
+                  path: |
+                      cline-bench-report.json
+                      evals/cline-bench/jobs/
+                  if-no-files-found: ignore
+                  retention-days: 90
