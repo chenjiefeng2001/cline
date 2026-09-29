@@ -128,17 +128,51 @@ export class HookProcess extends EventEmitter {
 	 * @param inputJson The JSON string to pass to the hook via stdin
 	 */
 	async run(inputJson: string): Promise<void> {
+		// Hoisted to instance scope, and deliberately so.
+		//
+		// This trace used to be created inside the async IIFE that performs the spawn,
+		// which left every path before that point - already-aborted, and the abort
+		// handler - rejecting with "cancelled" and no evidence whatsoever. That is the
+		// failure mode that makes the whole exercise useless: a spurious abort then
+		// looks exactly like a hook that misbehaved, because neither leaves a record of
+		// whether a process was ever launched. A detection chain that cannot report its
+		// own failures cannot be used to rule its own failures out.
+		//
+		// Every terminal state now goes through settle(), which stamps the state and
+		// publishes the trace. Adding an exit path without a trace is caught by
+		// hook-diagnostics-completeness.test.ts rather than being noticed later.
+		const trace: string[] = []
+		const startedAt = Date.now()
+		const stamp = (event: string, detail?: string) => {
+			trace.push(`${String(Date.now() - startedAt).padStart(6)}ms ${event}${detail ? ` ${detail}` : ""}`)
+		}
+		let terminal: string | undefined
+		/** Record a terminal state exactly once and return the full trace. */
+		const settle = (state: string, detail?: string): string => {
+			if (terminal === undefined) {
+				terminal = state
+				stamp(`terminal:${state}`, detail)
+				// Published on every terminal state, success included. A chain that only
+				// speaks when it fails cannot distinguish "ran and succeeded" from
+				// "never ran", which is the other half of the same problem.
+				this.emit("diagnostic", `hook lifecycle:\n${describeTrace(trace)}`)
+			}
+			return describeTrace(trace)
+		}
+
 		// Wrap in try/finally to guarantee cleanup even if errors occur
 		try {
 			return await new Promise((resolve, reject) => {
 				// Register this process for tracking
+				stamp("registering")
 				HookProcessRegistry.register(this)
 				this.isRegistered = true
 
 				// Check if already aborted
+				stamp("abort-check", `aborted=${String(this.abortSignal?.aborted ?? false)}`)
 				if (this.abortSignal?.aborted) {
 					this.safeUnregister()
-					reject(new Error("Hook execution cancelled"))
+					reject(new Error(`Hook execution cancelled\n${settle("cancelled-before-start")}`))
 					return
 				}
 
@@ -167,7 +201,7 @@ export class HookProcess extends EventEmitter {
 						}
 
 						// Reject immediately - don't wait for process to die
-						reject(new Error("Hook execution cancelled by user"))
+						reject(new Error(`Hook execution cancelled by user\n${settle("aborted")}`))
 					}
 				}
 
@@ -178,16 +212,8 @@ export class HookProcess extends EventEmitter {
 				// Windows executes hooks with PowerShell directly.
 				// Unix executes hook files through the shell for shebang support.
 				void (async () => {
-					// Timeline for diagnosing a hook that hangs or dies. Written on every
-					// exit path, and written *before* the caller can be killed by an
-					// external timeout - a hang that produces no output is the failure
-					// mode that is hardest to act on, because the log ends where the
-					// evidence should begin.
-					const trace: string[] = []
-					const startedAt = Date.now()
-					const stamp = (event: string, detail?: string) => {
-						trace.push(`${String(Date.now() - startedAt).padStart(6)}ms ${event}${detail ? ` ${detail}` : ""}`)
-					}
+					// Uses the run-scoped trace, not a local one, so the pre-spawn phases
+					// are part of the same record.
 					stamp("begin", `script=${this.scriptPath}`)
 					try {
 						const launchConfig = await getHookLaunchConfig(this.scriptPath)
@@ -221,7 +247,7 @@ export class HookProcess extends EventEmitter {
 								this.childProcess.kill("SIGTERM")
 								reject(
 									new Error(
-										`Hook execution timed out after ${this.timeoutMs}ms. The hook script at '${this.scriptPath}' took too long to complete.\n${describeTrace(trace)}`,
+										`Hook execution timed out after ${this.timeoutMs}ms. The hook script at '${this.scriptPath}' took too long to complete.\n${settle("timeout", `ms=${this.timeoutMs}`)}`,
 									),
 								)
 							}
@@ -273,6 +299,11 @@ export class HookProcess extends EventEmitter {
 							this.emit("completed", code, signal)
 
 							if (code === 0) {
+								// Success is recorded too. Without it, "the hook ran and
+								// succeeded" and "the hook was never launched" are the same
+								// silence, and a chain that only reports failures cannot prove it
+								// was not itself the cause.
+								settle("success")
 								resolve()
 							} else {
 								// Self-describing: the CI failure that prompted this reported
@@ -282,7 +313,7 @@ export class HookProcess extends EventEmitter {
 								stamp("reject", `code=${String(code)}`)
 								reject(
 									new Error(
-										`Hook exited with code ${code}${signal ? `, signal ${signal}` : ""}\n${describeTrace(trace)}`,
+										`Hook exited with code ${code}${signal ? `, signal ${signal}` : ""}\n${settle("exit", `code=${String(code)}`)}`,
 									),
 								)
 							}
@@ -303,7 +334,7 @@ export class HookProcess extends EventEmitter {
 								this.abortSignal.removeEventListener("abort", abortHandler)
 							}
 							this.emit("error", error)
-							reject(new Error(`${error.message}\n${describeTrace(trace)}`))
+							reject(new Error(`${error.message}\n${settle("spawn-error", error.message)}`))
 						})
 
 						// Send input to the process
@@ -312,7 +343,11 @@ export class HookProcess extends EventEmitter {
 							this.childProcess.stdin?.end()
 							stamp("stdin-written", `bytes=${inputJson.length}`)
 						} catch (error) {
-							reject(new Error(`Failed to write input to hook: ${error}\n${describeTrace(trace)}`))
+							reject(
+								new Error(
+									`Failed to write input to hook: ${error}\n${settle("stdin-write-failed", String(error))}`,
+								),
+							)
 						}
 					} catch (error) {
 						stamp("setup-threw", error instanceof Error ? error.message : String(error))
@@ -320,7 +355,11 @@ export class HookProcess extends EventEmitter {
 						if (this.abortSignal) {
 							this.abortSignal.removeEventListener("abort", abortHandler)
 						}
-						reject(new Error(`${error instanceof Error ? error.message : String(error)}\n${describeTrace(trace)}`))
+						reject(
+							new Error(
+								`${error instanceof Error ? error.message : String(error)}\n${settle("setup-threw", String(error))}`,
+							),
+						)
 					}
 				})()
 			})
