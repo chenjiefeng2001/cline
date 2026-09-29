@@ -342,6 +342,14 @@ const USER_SETTINGS_FIELDS = {
 	memoryWriteEnabled: { default: false as boolean },
 	// Automatic extraction of memories from completed turns.
 	memoryAutoCaptureEnabled: { default: false as boolean },
+	// Live web search. Off by default: a search sends the model's query text to a
+	// third-party provider, which is a different kind of egress than reading a file.
+	// The provider's environment variable takes priority over webSearchApiKey, so an
+	// operator can override a stored key without editing settings.
+	webSearchEnabled: { default: false as boolean },
+	webSearchProvider: { default: "" as string },
+	webSearchApiKey: { default: "" as string },
+	webSearchMaxResults: { default: 5 as number },
 	worktreesEnabled: { default: false as boolean },
 	preferredLanguage: { default: "English" as string },
 	mode: { default: "act" as Mode },

@@ -885,6 +885,23 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 			}
 		: undefined
 
+	// Live web search. Host opt-in only; a search sends the model's query text to a
+	// third-party provider. The provider's environment variable wins over the stored
+	// key inside the SDK, so the stored value is a fallback rather than the source of
+	// truth.
+	const webSearchEnabled = stateManager.getGlobalSettingsKey("webSearchEnabled") ?? false
+	const webSearchProvider = stateManager.getGlobalSettingsKey("webSearchProvider") ?? ""
+	const webSearchApiKey = stateManager.getGlobalSettingsKey("webSearchApiKey") ?? ""
+	const webSearchMaxResults = stateManager.getGlobalSettingsKey("webSearchMaxResults") ?? 5
+	const webSearch = webSearchEnabled
+		? {
+				enabled: true,
+				...(webSearchProvider.trim() ? { provider: webSearchProvider.trim() } : {}),
+				...(webSearchApiKey.trim() ? { apiKey: webSearchApiKey.trim() } : {}),
+				...(webSearchMaxResults > 0 ? { maxResults: webSearchMaxResults } : {}),
+			}
+		: undefined
+
 	// Subagents and teams. These were hard-coded false, which left the whole
 	// orchestration surface unreachable from the IDE: spawn_agent, the 18 team tools,
 	// the YAML subagent config system, and a subagent approval UI plus cost rollup
@@ -984,6 +1001,7 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		// permitted roots. Undefined leaves the tools unconstrained.
 		...(fileBoundary ? { fileBoundary } : {}),
 		...(memory ? { memory } : {}),
+		...(webSearch ? { webSearch } : {}),
 		checkpoint: {
 			enabled: enableCheckpoints,
 		},

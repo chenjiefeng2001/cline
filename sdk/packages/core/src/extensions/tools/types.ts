@@ -96,6 +96,9 @@ export type WebFetchExecutor = (
 	context: AgentToolContext,
 ) => Promise<string>;
 
+/** Live third-party web search. Opt-in per host. */
+export type WebSearchExecutor = (query: string, context: AgentToolContext) => Promise<string>;
+
 /**
  * Executor for editing files
  *
@@ -204,6 +207,8 @@ export interface ToolExecutors {
 	bash?: ShellExecutor;
 	/** Web content fetching implementation */
 	webFetch?: WebFetchExecutor;
+	/** Live third-party web search. Host opt-in. */
+	webSearch?: WebSearchExecutor;
 	/** Filesystem editor implementation */
 	editor?: EditorExecutor;
 	/** Apply patch implementation */

@@ -23,6 +23,7 @@ import {
 import { join } from "node:path";
 import { resolveClineDataDir } from "@cline/shared/storage";
 import { SqliteMemoryStore } from "../../memory/stores/sqlite-memory-store";
+import { createWebSearchExecutor } from "../../extensions/tools/executors/web-search";
 import { createMemoryRecallTool } from "../../memory/recall-tool";
 import { createMemoryRememberTool } from "../../memory/remember-tool";
 import type { FileBoundary } from "../../extensions/tools/executors/file-boundary";
@@ -279,6 +280,48 @@ const SKILLS_PROBE_EXECUTOR = (async () => "") as SkillsExecutorWithMetadata;
  * Rather than show an empty tool, recall is withheld too - a capability that cannot
  * succeed is worse than an absent one, because the model will plan around it.
  */
+/**
+ * Live web search, exposed only when the host opts in.
+ *
+ * Unlike the memory layer this has no "not configured" state worth hiding: with no
+ * credential the executor reports exactly which environment variable or setting to
+ * set, which is more useful to the model than a tool that refuses to exist. So the
+ * only gate is the host's explicit opt-in, and the default is off because a search
+ * sends the model's query text to a third party - a different kind of egress than
+ * reading a file, and the user's call rather than ours.
+ */
+function buildWebSearchTools(config: CoreSessionConfig): AgentTool<unknown, unknown>[] {
+	const webSearch = config.webSearch;
+	if (!webSearch?.enabled) {
+		return [];
+	}
+	const search = createWebSearchExecutor({
+		...(webSearch.provider === undefined ? {} : { provider: webSearch.provider }),
+		...(webSearch.apiKey === undefined ? {} : { apiKey: webSearch.apiKey }),
+		...(webSearch.maxResults === undefined ? {} : { maxResults: webSearch.maxResults }),
+	});
+	return [
+		{
+			name: "web_search",
+			description:
+				"Search the public web and return ranked results with title, url and snippet. " +
+				"Use for facts that may have changed since training, or that you cannot verify locally. " +
+				"Prefer reading a specific file or running a command when the answer is in the workspace.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					query: { type: "string", description: "The search query." },
+				},
+				required: ["query"],
+			},
+			execute: async (input: unknown, context) => {
+				const { query } = (input ?? {}) as { query?: unknown }
+				return search(typeof query === "string" ? query : "", context)
+			},
+		} as AgentTool<unknown, unknown>,
+	]
+}
+
 async function buildMemoryTools(config: CoreSessionConfig): Promise<AgentTool<unknown, unknown>[]> {
 	const memory = config.memory;
 	if (!memory?.enabled) {
@@ -674,6 +717,11 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 			const memoryTools = await buildMemoryTools(config);
 			if (memoryTools.length > 0) {
 				tools.push(...memoryTools);
+			}
+
+			const searchTools = buildWebSearchTools(config);
+			if (searchTools.length > 0) {
+				tools.push(...searchTools);
 			}
 		}
 

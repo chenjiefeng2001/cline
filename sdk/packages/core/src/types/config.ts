@@ -48,6 +48,25 @@ export interface FileBoundaryConfig {
 export type { FileBoundary };
 
 /**
+ * Web search: a live third-party query on the model's behalf.
+ *
+ * Off unless a host turns it on, because a search sends the query text to a provider.
+ * That is a different kind of egress than reading a file, and it is the user's call.
+ */
+export interface WebSearchConfig {
+	/** Master switch. No tool is exposed when false. */
+	enabled?: boolean;
+	/** Provider id. Defaults to the first registered provider. */
+	provider?: string;
+	/**
+	 * Credential from host settings. Lower priority than the provider's environment
+	 * variables, so an operator can override a stored key without editing settings.
+	 */
+	apiKey?: string;
+	/** Maximum results per query. @default 5 */
+	maxResults?: number;
+}
+/**
  * Cross-session project memory: what the agent chose to carry forward.
  *
  * The store and the recall tool existed but no host instantiated them, and nothing
@@ -336,6 +355,7 @@ export interface CoreSessionConfig
 	 */
 	fileBoundary?: FileBoundaryConfig;
 	memory?: MemoryConfig;
+	webSearch?: WebSearchConfig;
 
 	systemPrompt: string;
 	teamName?: string;
