@@ -16,12 +16,26 @@ e2e("Chat - can send messages and switch between modes", async ({ helper, sideba
 	// Wait for the (mock) agent turn to finish before navigating away — the task
 	// is persisted to SDK session history when the turn completes, so clicking
 	// "New Task" mid-turn races the history write and "Recent" may not show.
-	await expect(sidebar.getByText("mock Cline API response")).toBeVisible()
+	//
+	// This is a synchronisation point, not a product assertion, so it gets its own
+	// budget rather than the config default (5s on CI/Windows). What it waits for is a
+	// three-step async chain - turn completes, task is written to SDK session history,
+	// sidebar re-renders - and 5s sits inside the noise of a loaded Windows runner,
+	// which is how this failed: the chain completed correctly, just late.
+	//
+	// Kept well under the 60s per-test timeout so a turn that genuinely never completes
+	// still fails rather than hanging. Relaxing the wait is not the same as removing
+	// the check: a broken history write still times out here.
+	const HISTORY_SYNC_TIMEOUT = 30_000
+	await expect(sidebar.getByText("mock Cline API response")).toBeVisible({
+		timeout: HISTORY_SYNC_TIMEOUT,
+	})
 
-	// Starting a new task should clear the current chat view and show the recent tasks
+	// Starting a new task should clear the current chat view and show the recent tasks.
+	// Same history-write chain as above, so same budget.
 	await sidebar.getByRole("button", { name: "New Task", exact: true }).first().click()
-	await expect(sidebar.getByText("Recent")).toBeVisible()
-	await expect(sidebar.getByText("Hello, Cline!")).toBeVisible()
+	await expect(sidebar.getByText("Recent")).toBeVisible({ timeout: HISTORY_SYNC_TIMEOUT })
+	await expect(sidebar.getByText("Hello, Cline!")).toBeVisible({ timeout: HISTORY_SYNC_TIMEOUT })
 
 	// Makes sure the act and plan switches are working correctly
 	// Aria-checked state should be true for Act and false for Plan
