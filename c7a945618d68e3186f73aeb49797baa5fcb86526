@@ -1,22 +1,34 @@
-Why this commit touches 73 files
+Correcting a note that was itself wrong
 
-The substantive change is 109 lines in two files:
+An earlier version of this note claimed the other ~66 files in this commit were Biome
+reformatting and carried no behaviour change. That was wrong, and it was asserted
+without checking: `git diff -w --ignore-blank-lines <parent> c7a945618 -- <file>` says
+otherwise.
 
-  apps/vscode/webview-ui/src/utils/reportWebviewError.ts   (new, 33 lines)
-  apps/vscode/src/core/webview/webviewLoadGuard.test.ts     (new, 76 lines)
+The real split of these 73 files:
 
-The other ~66 files are Biome reformatting and carry no behaviour change. They were not
-intended and should not be read as part of this fix.
+  4 format-only:
+    apps/vscode/src/core/storage/documents-path.ts
+    apps/vscode/src/services/diagnostics/diagnostic-export.ts
+    apps/vscode/src/shared/media.ts
+    apps/vscode/src/shared/provider-performance.ts
 
-Cause: a tooling step ran a repo-wide formatter over files it did not need to touch, and
-the changes were swept into this commit instead of being left unstaged. The underlying
-generator defect that prompted that step - the proto generator emitting a corrupt
-`reserved` block - was fixed separately in 427b09453. No later commit in this range
-carries comparable churn, so this was a one-time incident rather than a pattern.
+  69 substantive, including:
+    WebviewProvider.ts            +62
+    webviewLoadGuard.test.ts      +76   (new)
+    VscodeWebviewProvider.ts      +50
+    FileLockManager.ts            +27 / -42
+    WebviewMessage.ts             +18
+    mentions/index.ts             +13 / -8
+    settingsLock.ts                +2 / -12
 
-Not cleaned up. Removing it would mean replaying the 24 commits that follow and
-force-pushing a shared branch, which is a materially worse trade than a noisy diff in a
-commit this far back. Recorded here instead, which annotates the commit without
-rewriting history.
+So this commit is a real change spanning webview error reporting, file locking, MCP
+and mentions - not one fix plus formatting noise. A history rewrite to "clean up 66
+files of churn" would have rewritten 28 commits to remove 4 files' worth of
+reformatting, which is a bad trade against the risk of a shared-branch force push.
 
-If you are reviewing this commit, read the two files listed above and ignore the rest.
+The one lesson worth keeping from the wrong version: the per-file diff is the evidence,
+and running it takes seconds. Not running it is how a confident, wrong claim about
+someone else's commit gets written down.
+
+Not cleaned up, and now not worth cleaning up. The 4 format-only files are harmless.
