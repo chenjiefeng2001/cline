@@ -59,11 +59,142 @@ export interface WebSearchProvider {
 		query: string,
 		options: {
 			apiKey: string
+			/**
+			 * Secondary credential, for providers that need one. Google Custom Search
+			 * requires a Search Engine ID (`cx`) in addition to the API key, so this is
+			 * not a hypothetical field.
+			 */
+			engineId?: string
 			maxResults: number
 			signal: AbortSignal
 			fetchImpl: typeof fetch
 		},
 	): Promise<WebSearchResult[]>
+}
+
+/**
+ * Google Custom Search JSON API.
+ *
+ * Needs two credentials: an API key and a Search Engine ID (`cx`). The endpoint is
+ * closed to new customers and shuts down for existing ones on 2027-01-01, so the
+ * `retired` metadata below stays attached: the request is still made, because that is
+ * the configured provider, but a failure says what happened rather than reporting a
+ * bare status.
+ */
+function googleProvider(): WebSearchProvider {
+	return {
+		id: "google",
+		label: "Google Custom Search JSON API",
+		apiKeyEnvVars: ["GOOGLE_SEARCH_API_KEY", "GOOGLE_API_KEY"],
+		endpoint: "https://www.googleapis.com/customsearch/v1",
+		retired: {
+			since: "2027-01-01 (closed to new customers)",
+			reason:
+				"Google closed the Custom Search JSON API to new customers and shuts it down for existing ones on 2027-01-01. Existing keys keep working until then.",
+			useInstead: "brave",
+		},
+		async search(query, options) {
+			const url = new URL("https://www.googleapis.com/customsearch/v1")
+			url.searchParams.set("q", query)
+			url.searchParams.set("key", options.apiKey)
+			url.searchParams.set("num", String(Math.min(options.maxResults, 10)))
+			// Absent cx is a 400 from the API, so say which credential is missing rather
+			// than letting the user decode a provider error message.
+			if (options.engineId) {
+				url.searchParams.set("cx", options.engineId)
+			}
+			const response = await options.fetchImpl(url, {
+				headers: { accept: "application/json" },
+				signal: options.signal,
+			})
+			if (!response.ok) {
+				throw new Error(
+					`Google Custom Search returned HTTP ${response.status}` +
+						describeKeyFailure(response.status, !options.engineId) +
+						`. This API is closed to new customers and retires 2027-01-01.`,
+				)
+			}
+			const body = (await response.json()) as {
+				items?: Array<{ title?: string; link?: string; snippet?: string }>
+			}
+			return (body.items ?? [])
+				.filter((r) => typeof r.link === "string" && r.link.length > 0)
+				.slice(0, options.maxResults)
+				.map((r) => ({
+					title: (r.title ?? r.link ?? "").trim(),
+					url: r.link as string,
+					snippet: stripHtmlTags(r.snippet ?? ""),
+				}))
+		},
+	}
+}
+
+/**
+ * Bing Search API.
+ *
+ * Retired on 2025-08-11, so this will fail against the live endpoint. It is kept
+ * because it is a configured provider and the failure should be legible, not because it
+ * is expected to return results.
+ */
+function bingProvider(): WebSearchProvider {
+	return {
+		id: "bing",
+		label: "Bing Search API",
+		apiKeyEnvVars: ["BING_SEARCH_API_KEY"],
+		endpoint: "https://api.bing.microsoft.com/v7.0/search",
+		retired: {
+			since: "2025-08-11",
+			reason:
+				"Microsoft retired the Bing Search API on 2025-08-11. The suggested successor, Azure AI Agents grounding, is a model feature rather than a raw results API.",
+			useInstead: "brave",
+		},
+		async search(query, options) {
+			const url = new URL("https://api.bing.microsoft.com/v7.0/search")
+			url.searchParams.set("q", query)
+			url.searchParams.set("count", String(Math.min(options.maxResults, 50)))
+			const response = await options.fetchImpl(url, {
+				headers: {
+					accept: "application/json",
+					"ocp-apim-subscription-key": options.apiKey,
+				},
+				signal: options.signal,
+			})
+			if (!response.ok) {
+				throw new Error(
+					`Bing Search returned HTTP ${response.status}` +
+						describeKeyFailure(response.status, false) +
+						`. The Bing Search API was retired on 2025-08-11, so this endpoint is not expected to serve results.`,
+				)
+			}
+			const body = (await response.json()) as {
+				webPages?: { value?: Array<{ name?: string; url?: string; snippet?: string }> }
+			}
+			return (body.webPages?.value ?? [])
+				.filter((r) => typeof r.url === "string" && r.url.length > 0)
+				.slice(0, options.maxResults)
+				.map((r) => ({
+					title: (r.name ?? r.url ?? "").trim(),
+					url: r.url as string,
+					snippet: stripHtmlTags(r.snippet ?? ""),
+				}))
+		},
+	}
+}
+
+/** Guidance for an auth failure, without echoing any credential. */
+function describeKeyFailure(status: number, missingSecondary: boolean): string {
+	if (missingSecondary) {
+		return " (a Search Engine ID is also required - set the cx / search engine id)"
+	}
+	return status === 401 || status === 403 ? " (the API key was rejected)" : ""
+}
+
+/** Providers return snippets as HTML fragments; the model does not need the markup. */
+function stripHtmlTags(input: string): string {
+	return input
+		.replace(/<[^>]*>/g, "")
+		.replace(/\s+/g, " ")
+		.trim()
 }
 
 function braveProvider(): WebSearchProvider {
@@ -110,51 +241,7 @@ function braveProvider(): WebSearchProvider {
 	}
 }
 
-/**
- * The two providers this capability was originally specified against.
- *
- * They are registered as retired rather than omitted, so a host still configured for
- * one gets told what happened instead of "unknown provider", and so nobody re-adds a
- * working-looking adapter later without seeing that the endpoint is gone. They are not
- * selectable: `getWebSearchProvider` rejects them by name.
- */
-function retiredProviders(): WebSearchProvider[] {
-	const unavailable = async (): Promise<WebSearchResult[]> => {
-		// Unreachable via getWebSearchProvider, which rejects before this is called.
-		// Present so the shape stays total rather than relying on a throw.
-		throw new Error("retired provider")
-	}
-	return [
-		{
-			id: "google",
-			label: "Google Custom Search JSON API",
-			apiKeyEnvVars: ["GOOGLE_SEARCH_API_KEY", "GOOGLE_API_KEY"],
-			endpoint: "https://www.googleapis.com/customsearch/v1",
-			retired: {
-				since: "2027-01-01 (closed to new customers)",
-				reason:
-					"Google has closed the Custom Search JSON API to new customers and is shutting it down for existing ones on 2027-01-01.",
-				useInstead: "brave",
-			},
-			search: unavailable,
-		},
-		{
-			id: "bing",
-			label: "Bing Search API",
-			apiKeyEnvVars: ["BING_SEARCH_API_KEY"],
-			endpoint: "https://api.bing.microsoft.com/v7.0/search",
-			retired: {
-				since: "2025-08-11",
-				reason:
-					"Microsoft retired the Bing Search API on 2025-08-11. The suggested successor, Azure AI Agents grounding, is a model feature rather than a raw results API.",
-				useInstead: "brave",
-			},
-			search: unavailable,
-		},
-	]
-}
-
-const PROVIDERS: readonly WebSearchProvider[] = [braveProvider(), ...retiredProviders()]
+const PROVIDERS: readonly WebSearchProvider[] = [googleProvider(), bingProvider(), braveProvider()]
 
 export function listWebSearchProviders(): readonly WebSearchProvider[] {
 	return PROVIDERS
@@ -168,16 +255,12 @@ export function getWebSearchProvider(id: string | undefined): WebSearchProvider 
 			`Unknown web search provider "${wanted}". Available: ${PROVIDERS.map((p) => p.id).join(", ")}.`,
 		)
 	}
-	if (found.retired) {
-		// Said at configuration time, with the replacement named. Silently accepting a
-		// key for a dead endpoint and failing later with a bare 401 is the worst
-		// version of this: the user has done everything right and gets told nothing.
-		throw new Error(
-			`Web search provider "${found.id}" (${found.label}) is retired and cannot be used. ` +
-				`Retired ${found.retired.since}: ${found.retired.reason} ` +
-				`Use "${found.retired.useInstead}" instead.`,
-		)
-	}
+	// A retired provider is still selectable, so the request is still made. What the
+	// retirement buys is a legible failure: each adapter appends the deadline to its own
+	// error, so whoever hits it learns why the endpoint stopped answering instead of
+	// assuming their key is wrong. Refusing at configuration time would have been wrong
+	// once this became the default - it would make the tool unusable rather than making
+	// the deadline visible.
 	return found
 }
 

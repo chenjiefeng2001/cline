@@ -15,6 +15,11 @@ export interface WebSearchExecutorOptions {
 	 */
 	provider?: string
 	/**
+	 * Google Custom Search Search Engine ID, used with the key. Optional because only
+	 * Google needs it, and its absence is reported by the API.
+	 */
+	requestEngineId?: string
+	/**
 	 * Credential from host settings, used only when no environment variable is set.
 	 * See resolveWebSearchCredential for the precedence rule.
 	 */
@@ -51,6 +56,7 @@ export function createWebSearchExecutor(
 	const {
 		provider: providerId,
 		apiKey: settingApiKey,
+		requestEngineId: settingEngineId,
 		maxResults = 5,
 		timeoutMs = 15_000,
 		fetchImpl = fetch,
@@ -91,6 +97,7 @@ export function createWebSearchExecutor(
 		try {
 			const results = await active.search(trimmed, {
 				apiKey: key.value,
+				...(active.id === "google" ? { engineId: settingEngineId?.trim() || undefined } : {}),
 				maxResults,
 				signal: controller.signal,
 				fetchImpl,

@@ -349,6 +349,9 @@ const USER_SETTINGS_FIELDS = {
 	webSearchEnabled: { default: false as boolean },
 	webSearchProvider: { default: "" as string },
 	webSearchApiKey: { default: "" as string },
+	// Google Custom Search needs a Search Engine ID as well as a key. Only the
+	// Google adapter uses it; other providers ignore it.
+	webSearchEngineId: { default: "" as string },
 	webSearchMaxResults: { default: 5 as number },
 	worktreesEnabled: { default: false as boolean },
 	preferredLanguage: { default: "English" as string },

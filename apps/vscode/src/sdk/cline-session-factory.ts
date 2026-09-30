@@ -892,12 +892,16 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	const webSearchEnabled = stateManager.getGlobalSettingsKey("webSearchEnabled") ?? false
 	const webSearchProvider = stateManager.getGlobalSettingsKey("webSearchProvider") ?? ""
 	const webSearchApiKey = stateManager.getGlobalSettingsKey("webSearchApiKey") ?? ""
+	const webSearchEngineId = stateManager.getGlobalSettingsKey("webSearchEngineId") ?? ""
 	const webSearchMaxResults = stateManager.getGlobalSettingsKey("webSearchMaxResults") ?? 5
 	const webSearch = webSearchEnabled
 		? {
 				enabled: true,
 				...(webSearchProvider.trim() ? { provider: webSearchProvider.trim() } : {}),
 				...(webSearchApiKey.trim() ? { apiKey: webSearchApiKey.trim() } : {}),
+				// Google Custom Search needs a Search Engine ID as well as a key; other
+				// providers ignore it.
+				...(webSearchEngineId.trim() ? { requestEngineId: webSearchEngineId.trim() } : {}),
 				...(webSearchMaxResults > 0 ? { maxResults: webSearchMaxResults } : {}),
 			}
 		: undefined

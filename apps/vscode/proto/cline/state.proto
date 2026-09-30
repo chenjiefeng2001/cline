@@ -304,8 +304,9 @@ message Settings {
   optional bool memory_auto_capture_enabled = 197;
   optional bool web_search_enabled = 198;
   optional string web_search_provider = 199;
-  optional string web_search_api_key = 200;
   optional int32 web_search_max_results = 201;
+  optional string web_search_engine_id = 202;
+  optional string web_search_api_key = 203;
 }
 
 message State {
