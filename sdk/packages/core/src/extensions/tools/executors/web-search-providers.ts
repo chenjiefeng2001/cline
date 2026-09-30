@@ -45,6 +45,16 @@ export interface WebSearchProvider {
 	apiKeyEnvVars: string[]
 	/** Endpoint, exposed so it can be asserted in tests. */
 	endpoint: string
+	/**
+	 * Whether this provider can still be used.
+	 *
+	 * Recorded in the registry rather than only in a comment, so the two providers this
+	 * was originally specified for cannot come back by accident as if nothing had
+	 * happened to them. A retired provider is rejected by name, and the message says
+	 * why and what to use instead - which is more useful than an adapter that accepts a
+	 * key and then fails with a bare 401 months later.
+	 */
+	retired?: { since: string; reason: string; useInstead: string }
 	search(
 		query: string,
 		options: {
@@ -100,7 +110,51 @@ function braveProvider(): WebSearchProvider {
 	}
 }
 
-const PROVIDERS: readonly WebSearchProvider[] = [braveProvider()]
+/**
+ * The two providers this capability was originally specified against.
+ *
+ * They are registered as retired rather than omitted, so a host still configured for
+ * one gets told what happened instead of "unknown provider", and so nobody re-adds a
+ * working-looking adapter later without seeing that the endpoint is gone. They are not
+ * selectable: `getWebSearchProvider` rejects them by name.
+ */
+function retiredProviders(): WebSearchProvider[] {
+	const unavailable = async (): Promise<WebSearchResult[]> => {
+		// Unreachable via getWebSearchProvider, which rejects before this is called.
+		// Present so the shape stays total rather than relying on a throw.
+		throw new Error("retired provider")
+	}
+	return [
+		{
+			id: "google",
+			label: "Google Custom Search JSON API",
+			apiKeyEnvVars: ["GOOGLE_SEARCH_API_KEY", "GOOGLE_API_KEY"],
+			endpoint: "https://www.googleapis.com/customsearch/v1",
+			retired: {
+				since: "2027-01-01 (closed to new customers)",
+				reason:
+					"Google has closed the Custom Search JSON API to new customers and is shutting it down for existing ones on 2027-01-01.",
+				useInstead: "brave",
+			},
+			search: unavailable,
+		},
+		{
+			id: "bing",
+			label: "Bing Search API",
+			apiKeyEnvVars: ["BING_SEARCH_API_KEY"],
+			endpoint: "https://api.bing.microsoft.com/v7.0/search",
+			retired: {
+				since: "2025-08-11",
+				reason:
+					"Microsoft retired the Bing Search API on 2025-08-11. The suggested successor, Azure AI Agents grounding, is a model feature rather than a raw results API.",
+				useInstead: "brave",
+			},
+			search: unavailable,
+		},
+	]
+}
+
+const PROVIDERS: readonly WebSearchProvider[] = [braveProvider(), ...retiredProviders()]
 
 export function listWebSearchProviders(): readonly WebSearchProvider[] {
 	return PROVIDERS
@@ -112,6 +166,16 @@ export function getWebSearchProvider(id: string | undefined): WebSearchProvider 
 	if (!found) {
 		throw new Error(
 			`Unknown web search provider "${wanted}". Available: ${PROVIDERS.map((p) => p.id).join(", ")}.`,
+		)
+	}
+	if (found.retired) {
+		// Said at configuration time, with the replacement named. Silently accepting a
+		// key for a dead endpoint and failing later with a bare 401 is the worst
+		// version of this: the user has done everything right and gets told nothing.
+		throw new Error(
+			`Web search provider "${found.id}" (${found.label}) is retired and cannot be used. ` +
+				`Retired ${found.retired.since}: ${found.retired.reason} ` +
+				`Use "${found.retired.useInstead}" instead.`,
 		)
 	}
 	return found

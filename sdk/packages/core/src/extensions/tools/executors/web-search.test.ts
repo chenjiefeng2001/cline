@@ -27,6 +27,22 @@ describe("web search provider registry", () => {
 		// valid options are or the user cannot fix it.
 		expect(() => getWebSearchProvider("nope")).toThrow(/Available:/)
 	})
+
+	it("refuses the retired providers by name, with a replacement", () => {
+		// The capability was originally specified against these two. Accepting a key for
+		// a dead endpoint and failing later with a bare 401 is the worst version of
+		// this, so the refusal has to happen at configuration time and name what to use
+		// instead.
+		for (const id of ["google", "bing"]) {
+			expect(() => getWebSearchProvider(id), id).toThrow(/retired/i)
+			expect(() => getWebSearchProvider(id), id).toThrow(/brave/)
+		}
+	})
+
+	it("never defaults to a retired provider", () => {
+		const fallback = getWebSearchProvider(undefined)
+		expect(fallback.retired).toBeUndefined()
+	})
 })
 
 describe("credential precedence: env over setting", () => {
