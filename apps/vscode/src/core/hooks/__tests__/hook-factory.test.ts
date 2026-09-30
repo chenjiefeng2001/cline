@@ -11,8 +11,26 @@ describe("Hook System", () => {
 	let tempDir: string
 	let sandbox: sinon.SinonSandbox
 	let hookTestEnv: HookTestEnv
-	const WINDOWS_HOOK_TEST_TIMEOUT_MS = 15000
-	const WINDOWS_TEST_TIMEOUT_MS = 10000
+	/**
+	 * Budget for the two cases that assert a hook's working directory.
+	 *
+	 * These are the only cases in the file that resolve a realpath against what
+	 * the hook reported, so they are the ones that pay the full Windows cold
+	 * start: PowerShell, then Node, on a script that was written milliseconds
+	 * earlier and is therefore unscanned. Locally they cost ~1.5s, but the
+	 * 2026-09-30 `windows-latest` run put one at 15083ms and failed it - a
+	 * timeout, never an assertion - while every other hook case in the same file
+	 * passed in 0.8-1.7s and the previous four Windows runs of this file were
+	 * green.
+	 *
+	 * The previous 15000ms cap was also below the 20000ms per-test budget the
+	 * shared runner documents for these suites, so a per-test value silently
+	 * overrode the runner policy it was meant to sit inside. 30s sits above the
+	 * observed outlier and matches HookProcess's own 30000ms hook timeout, so a
+	 * hook that genuinely hangs fails with the hook-timeout error - which names
+	 * the script and the elapsed time - rather than a bare test timeout.
+	 */
+	const CWD_HOOK_TEST_TIMEOUT_MS = 30000
 
 	// Helper to write executable hook script
 	const writeHookScript = async (hookPath: string, nodeScript: string): Promise<void> => {
@@ -89,7 +107,7 @@ console.log(JSON.stringify({
 				const normalizedTempDir = await fs.realpath(tempDir)
 				normalizedCwd.should.equal(normalizedTempDir)
 			},
-			WINDOWS_HOOK_TEST_TIMEOUT_MS,
+			CWD_HOOK_TEST_TIMEOUT_MS,
 		)
 
 		it("should execute hook script and parse output", async () => {
@@ -656,7 +674,7 @@ console.log(JSON.stringify({
 				const normalizedTempDir = await fs.realpath(tempDir)
 				normalizedCwd.should.equal(normalizedTempDir)
 			},
-			WINDOWS_HOOK_TEST_TIMEOUT_MS,
+			CWD_HOOK_TEST_TIMEOUT_MS,
 		)
 
 		it("should work with global PostToolUse hooks", async () => {
