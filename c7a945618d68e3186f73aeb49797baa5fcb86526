@@ -1,0 +1,22 @@
+Why this commit touches 73 files
+
+The substantive change is 109 lines in two files:
+
+  apps/vscode/webview-ui/src/utils/reportWebviewError.ts   (new, 33 lines)
+  apps/vscode/src/core/webview/webviewLoadGuard.test.ts     (new, 76 lines)
+
+The other ~66 files are Biome reformatting and carry no behaviour change. They were not
+intended and should not be read as part of this fix.
+
+Cause: a tooling step ran a repo-wide formatter over files it did not need to touch, and
+the changes were swept into this commit instead of being left unstaged. The underlying
+generator defect that prompted that step - the proto generator emitting a corrupt
+`reserved` block - was fixed separately in 427b09453. No later commit in this range
+carries comparable churn, so this was a one-time incident rather than a pattern.
+
+Not cleaned up. Removing it would mean replaying the 24 commits that follow and
+force-pushing a shared branch, which is a materially worse trade than a noisy diff in a
+commit this far back. Recorded here instead, which annotates the commit without
+rewriting history.
+
+If you are reviewing this commit, read the two files listed above and ignore the rest.
