@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { isAbortError, isRetryableError, SdkSessionLifecycle } from "./sdk-session-lifecycle"
+import { isAbortError, isRetryableError, SdkSessionLifecycle, TURN_DRAIN_TIMEOUT_MS } from "./sdk-session-lifecycle"
 
 type StartInput = Parameters<SdkSessionLifecycle["startNewSession"]>[0]
 type SendHost = Parameters<SdkSessionLifecycle["fireAndForgetSend"]>[0]
@@ -154,7 +154,9 @@ describe("SdkSessionLifecycle", () => {
 		const onSendComplete = vi.fn()
 		const sdkHost = makeSdkHost({ send: vi.fn().mockResolvedValue(undefined) })
 		mockCreateSessionHost.mockResolvedValueOnce(sdkHost)
-		const lifecycle = makeLifecycle({ onSendComplete })
+		// No terminal event is simulated here, so this exercises the fallback; the
+		// drain itself is covered by the two cases below.
+		const lifecycle = makeLifecycle({ onSendComplete, turnDrainTimeoutMs: 10 })
 		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
 		await lifecycle.startNewSession({} as any)
 
@@ -162,6 +164,52 @@ describe("SdkSessionLifecycle", () => {
 		lifecycle.fireAndForgetSend(sdkHost as any, "session-123", "hello")
 		await vi.waitFor(() => expect(onSendComplete).toHaveBeenCalledWith("session-123"))
 
+		expect(lifecycle.getActiveSession()?.isRunning).toBe(false)
+	})
+
+	it("does not finalise a turn until the runtime's terminal event lands", async () => {
+		// The send promise resolving says the SDK call returned, not how the turn
+		// ended. Finalising on it alone overwrites the phase the event stream chose,
+		// so the lifecycle waits - and the session stays running until it hears.
+		const onSendComplete = vi.fn()
+		const send = vi.fn().mockResolvedValue(undefined)
+		const sdkHost = makeSdkHost({ send })
+		mockCreateSessionHost.mockResolvedValueOnce(sdkHost)
+		const lifecycle = makeLifecycle({ onSendComplete, turnDrainTimeoutMs: 5_000 })
+		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+		await lifecycle.startNewSession({} as any)
+
+		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+		lifecycle.fireAndForgetSend(sdkHost as any, "session-123", "hello")
+		await vi.waitFor(() => expect(send).toHaveBeenCalled())
+
+		expect(onSendComplete).not.toHaveBeenCalled()
+		expect(lifecycle.getActiveSession()?.isRunning).toBe(true)
+
+		// Exactly what SdkSessionEventCoordinator does when the `done` event arrives.
+		lifecycle.setRunning(false)
+
+		await vi.waitFor(() => expect(onSendComplete).toHaveBeenCalledWith("session-123"))
+		expect(lifecycle.getActiveSession()?.isRunning).toBe(false)
+	})
+
+	it("waits the full default drain bound when the terminal event never arrives", async () => {
+		// The bound is the guarantee that a turn cannot hang in `streaming` forever,
+		// so it is asserted rather than assumed: a zero-length wait is the bug
+		// 568617579 fixed, and an unbounded one would never finalise at all.
+		const onSendComplete = vi.fn()
+		const sdkHost = makeSdkHost()
+		mockCreateSessionHost.mockResolvedValueOnce(sdkHost)
+		const lifecycle = makeLifecycle({ onSendComplete })
+		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+		await lifecycle.startNewSession({} as any)
+
+		const startedAt = Date.now()
+		// biome-ignore lint/suspicious/noExplicitAny: focused fake for lifecycle unit test
+		lifecycle.fireAndForgetSend(sdkHost as any, "session-123", "hello")
+		await vi.waitFor(() => expect(onSendComplete).toHaveBeenCalledWith("session-123"), { timeout: 5_000 })
+
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(TURN_DRAIN_TIMEOUT_MS - 50)
 		expect(lifecycle.getActiveSession()?.isRunning).toBe(false)
 	})
 

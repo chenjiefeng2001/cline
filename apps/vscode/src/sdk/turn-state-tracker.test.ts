@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { MessageIdMinter } from "./message-id-minter"
-import { TurnStateTracker } from "./turn-state-tracker"
+import { isTerminalTurnPhase, TurnStateTracker } from "./turn-state-tracker"
 
 describe("TurnStateTracker", () => {
 	it("starts idle", () => {
@@ -55,5 +55,31 @@ describe("TurnStateTracker", () => {
 
 		tracker.set("error")
 		expect(tracker.get().connectionStatus).toBe("error")
+	})
+})
+
+describe("isTerminalTurnPhase", () => {
+	// The event stream owns the terminal phase, and a late turn-end signal - the send
+	// promise resolving - must not overwrite one. This is the predicate that decides
+	// whether there is anything left to say, so each phase is listed explicitly: the
+	// set is the whole contract, and a phase added to TURN_PHASES should have to be
+	// added here deliberately.
+	it.each([
+		["completed", true],
+		["awaiting_followup", true],
+		["resumable", true],
+		["error", true],
+		["streaming", false],
+		["awaiting_approval", false],
+		["idle", false],
+	] as const)("%s -> %s", (phase, expected) => {
+		expect(isTerminalTurnPhase(phase)).toBe(expected)
+	})
+
+	it("treats idle as non-terminal so a restored transcript is not declared finished", () => {
+		// `Controller.restoreCheckpoint()` reaches idle with a populated transcript.
+		// Reporting that as a finished turn would put a "Start New Task" footer on a
+		// conversation that is merely paused, so idle has to stay non-terminal.
+		expect(isTerminalTurnPhase("idle")).toBe(false)
 	})
 })

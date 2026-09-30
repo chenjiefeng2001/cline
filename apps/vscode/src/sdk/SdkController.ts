@@ -147,7 +147,7 @@ import {
 import { type DeltaPayload, StatePostDebouncer } from "./state-post-debouncer"
 import { createTaskProxy, type TaskProxy } from "./task-proxy"
 import { syncTelemetrySettingFromSharedGlobalSettings } from "./telemetry-settings-sync"
-import { TurnStateTracker } from "./turn-state-tracker"
+import { isTerminalTurnPhase, TurnStateTracker } from "./turn-state-tracker"
 import { VscodeSessionHost } from "./vscode-session-host"
 import type { VscodeTerminalExecutionMode } from "./vscode-terminal-execution-mode"
 import { WebviewGrpcBridge } from "./webview-grpc-bridge"
@@ -439,18 +439,30 @@ export class Controller {
 				// Normal flows close their diff sessions inline; anything left here is orphaned.
 				void this.diffEdits.discardAllPreviews("turn complete")
 
-				// A finished turn has to land on `completed`, not merely flip the
-				// connection status. The webview reads turnState.phase as the
-				// authoritative UI mode: `completed` is what makes a conversation
-				// continuable (it is one of the phases that permits a follow-up and
-				// shows the optimistic user message) and what renders the "Start New
-				// Task" footer. Previously this only called setConnectionStatus, which
-				// advances seq but leaves `phase` at whatever the turn last set, so a
-				// completed conversation could neither be continued reliably nor have
-				// a stable footer - and handleSendMessage silently skipped the send
-				// when the resulting phase was not continuable.
-				const lastMessage = this.task?.messageStateHandler.getClineMessages().at(-1)
-				this.turnStateTracker.set("completed", lastMessage?.ts)
+				// A finished turn has to land on a terminal phase, or the webview keeps
+				// rendering `streaming` with a live Cancel button forever. But the phase
+				// itself is the event stream's to decide: it knows whether the turn used
+				// the completion tool (`completed`) or simply stopped and is waiting for
+				// the user (`awaiting_followup`), and SdkSessionLifecycle has already
+				// waited for it to report. Setting `completed` unconditionally - which is
+				// what this did - discarded that distinction on every turn whose event
+				// arrived first, so `awaiting_followup` could not reach the UI.
+				//
+				// The anchor is what keeps the footer identified: the webview matches
+				// button identity against the message tail, so a terminal phase with no
+				// anchorTs is a footer that goes stale as soon as the tail moves. The
+				// event stream supplies its own anchor now, so this only has to cover the
+				// fallback - a turn the runtime ended without ever reporting.
+				const phase = this.turnStateTracker.currentPhase
+				if (isTerminalTurnPhase(phase)) {
+					Logger.log(
+						`[SdkController] Turn end: keeping the phase the event stream reported (${phase}); ` +
+							`the send promise resolved after it landed`,
+					)
+				} else {
+					const lastMessage = this.task?.messageStateHandler.getClineMessages().at(-1)
+					this.turnStateTracker.set("completed", lastMessage?.ts)
+				}
 
 				this.postStateToWebview().catch((err) => {
 					Logger.error("[SdkController] Failed to post state after turn:", err)

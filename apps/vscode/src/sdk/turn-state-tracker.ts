@@ -13,6 +13,21 @@ import type { MessageIdMinter } from "./message-id-minter"
 // newest TurnState and ignores stale/out-of-order ones (a late "streaming" can never overwrite
 // a newer "completed").
 
+/**
+ * Phases that already state how the turn ended.
+ *
+ * Used to decide whether a late turn-end signal - the send promise resolving - has
+ * anything left to say. If the event stream has already reported the end, the phase
+ * it chose is the answer: `completed` for a turn that used its completion tool,
+ * `awaiting_followup` for one that stopped and is waiting for the user, `resumable`
+ * for a cancelled turn, `error` for a failed one. Overwriting any of those with a
+ * single "completed" discards the distinction the user actually sees, which is the
+ * whole reason the event stream is the authority for the terminal phase.
+ */
+export function isTerminalTurnPhase(phase: TurnPhase): boolean {
+	return phase === "completed" || phase === "awaiting_followup" || phase === "resumable" || phase === "error"
+}
+
 export class TurnStateTracker {
 	private phase: TurnPhase = "idle"
 	private anchorTs: number | undefined

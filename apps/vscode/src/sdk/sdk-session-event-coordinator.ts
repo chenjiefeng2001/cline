@@ -128,6 +128,12 @@ export class SdkSessionEventCoordinator {
 				// simply stopped and is waiting for the user ("awaiting_followup"). Error turns
 				// are surfaced as the error phase. The webview reads this, not the array tail.
 				//
+				// The anchor is the tail as of this event - the messages above were appended
+				// first, so this is the turn's real last message. It is what the webview
+				// matches footer button identity against, so the authoritative path has to
+				// supply it: a terminal phase with no anchorTs is a footer that goes stale
+				// the moment the tail moves.
+				//
 				// EXCEPTION: if the session is already not running, this turn-complete is a
 				// straggler from a turn that was cancelled (cancelTask already set phase
 				// "resumable" and aborted). Overwriting it here would clobber "resumable" with
@@ -136,9 +142,9 @@ export class SdkSessionEventCoordinator {
 				if (!activeSession.isRunning) {
 					Logger.debug("[SdkController] turn-complete straggler after cancel; preserving resumable phase")
 				} else if (this.options.messageTranslatorState.wasAttemptCompletionSeen()) {
-					this.options.setTurnPhase?.("completed")
+					this.options.setTurnPhase?.("completed", this.turnAnchorTs())
 				} else {
-					this.options.setTurnPhase?.("awaiting_followup")
+					this.options.setTurnPhase?.("awaiting_followup", this.turnAnchorTs())
 				}
 
 				this.options.sessions.setRunning(false)
@@ -175,6 +181,15 @@ export class SdkSessionEventCoordinator {
 				Logger.error("[SdkController] Failed to post state after event:", err)
 			})
 		}
+	}
+
+	/**
+	 * Timestamp of the newest message the webview will render, used as the turn
+	 * anchor. Undefined when there is no task or the transcript is empty, which the
+	 * tracker treats as "key the footer off the message tail instead".
+	 */
+	private turnAnchorTs(): number | undefined {
+		return this.options.getTask()?.messageStateHandler.getClineMessages().at(-1)?.ts
 	}
 
 	private getAgentFailureTelemetry(event: CoreSessionEvent): AgentFailureTelemetry {

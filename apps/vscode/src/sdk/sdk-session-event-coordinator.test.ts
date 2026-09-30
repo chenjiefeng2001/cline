@@ -97,6 +97,7 @@ describe("SdkSessionEventCoordinator", () => {
 		// be posted on turn end regardless of message count, or the footer stays stuck on the
 		// previous phase (e.g. scroll-arrows / streaming).
 		const { coordinator, options, event } = makeCoordinator({
+			task: makeTask([{ ts: 7, type: "say", say: "text", text: "the turn's last message" }]),
 			translation: {
 				messages: [],
 				sessionEnded: false,
@@ -106,8 +107,52 @@ describe("SdkSessionEventCoordinator", () => {
 
 		await coordinator.handleSessionEvent(event)
 
-		expect(options.setTurnPhase).toHaveBeenCalledWith("awaiting_followup")
+		// Anchored to the transcript tail, not left undefined: the webview matches
+		// footer button identity against the tail, so an unanchored terminal phase is a
+		// footer that goes stale as soon as the tail moves.
+		expect(options.setTurnPhase).toHaveBeenCalledWith("awaiting_followup", 7)
 		expect(options.postStateToWebview).toHaveBeenCalledOnce()
+	})
+
+	it("anchors a completed turn to the transcript tail", async () => {
+		// `completed` is what the webview renders as the green box plus "Start New
+		// Task", and it is the phase the turn actually ended on when the agent used
+		// its completion tool. It carries the same anchor requirement as
+		// `awaiting_followup`, so both are set from the same place.
+		const { coordinator, options, event } = makeCoordinator({
+			task: makeTask([
+				{ ts: 3, type: "say", say: "text", text: "working" },
+				{ ts: 9, type: "say", say: "text", text: "done" },
+			]),
+			attemptCompletionSeen: true,
+			translation: {
+				messages: [],
+				sessionEnded: false,
+				turnComplete: true,
+			},
+		})
+
+		await coordinator.handleSessionEvent(event)
+
+		expect(options.setTurnPhase).toHaveBeenCalledWith("completed", 9)
+	})
+
+	it("sets a terminal phase without an anchor when there is no transcript to anchor to", async () => {
+		// A turn that ends before anything was rendered has no tail to point at. The
+		// phase still has to be set - the fallback is the webview keying identity off
+		// the tail, not the phase going missing.
+		const { coordinator, options, event } = makeCoordinator({
+			task: makeTask([]),
+			translation: {
+				messages: [],
+				sessionEnded: false,
+				turnComplete: true,
+			},
+		})
+
+		await coordinator.handleSessionEvent(event)
+
+		expect(options.setTurnPhase).toHaveBeenCalledWith("awaiting_followup", undefined)
 	})
 
 	it("marks a submitted queued prompt as a new streaming turn", async () => {
@@ -188,7 +233,7 @@ describe("SdkSessionEventCoordinator", () => {
 
 	it("updates task usage when the active session has a start result", async () => {
 		const { coordinator, options, event } = makeCoordinator({
-			task: { taskId: "task-1" },
+			task: makeTask([], "task-1"),
 			translation: {
 				messages: [],
 				sessionEnded: false,
@@ -211,7 +256,7 @@ describe("SdkSessionEventCoordinator", () => {
 	it("zeros usage and api request message cost for free Cline models", async () => {
 		const { coordinator, options, event } = makeCoordinator({
 			isClineFreeModel: vi.fn().mockResolvedValue(true),
-			task: { taskId: "task-1" },
+			task: makeTask([], "task-1"),
 			translation: {
 				messages: [
 					{
@@ -340,8 +385,12 @@ function makeCoordinator(input: Partial<MakeCoordinatorInput> = {}) {
 		},
 	} as unknown as CoreSessionEvent
 	const activeSession = input.activeSession ?? makeActiveSession()
+	const messageTranslatorState = new MessageTranslatorState()
+	if (input.attemptCompletionSeen) {
+		messageTranslatorState.setAttemptCompletionSeen()
+	}
 	const options = {
-		messageTranslatorState: new MessageTranslatorState(),
+		messageTranslatorState,
 		sessions: {
 			getActiveSession: vi.fn(() => activeSession),
 			setRunning: vi.fn(),
@@ -390,9 +439,19 @@ function makeActiveSession(input: Partial<{ isRunning: boolean }> = {}) {
 	}
 }
 
+/** Task proxy stub whose transcript the coordinator anchors the terminal phase to. */
+function makeTask(messages: ClineMessage[], taskId = "session-123") {
+	return {
+		taskId,
+		messageStateHandler: { getClineMessages: () => messages },
+	}
+}
+
 interface MakeCoordinatorInput {
 	activeSession: ReturnType<typeof makeActiveSession>
-	task: { taskId: string }
+	task: ReturnType<typeof makeTask>
+	/** Marks the turn as having used its completion tool, which selects `completed`. */
+	attemptCompletionSeen?: boolean
 	isClineFreeModel: () => Promise<boolean>
 	translation: {
 		messages: ClineMessage[]

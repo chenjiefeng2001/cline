@@ -22,6 +22,30 @@ const MAX_AUTO_RETRIES = 3
 const RETRY_BASE_DELAY_MS = 2_000
 const RETRY_MAX_DELAY_MS = 30_000
 
+// ─── Turn-end drain ──────────────────────────────────────────────────────
+/**
+ * How long a resolved send waits for the runtime's terminal event before the
+ * turn is finalised locally.
+ *
+ * `send()` resolving is not the same fact as "the turn ended": it only says the
+ * SDK call returned. How the turn ended is carried by the `done` event, and
+ * finalising from the promise therefore throws away the distinction between "the
+ * agent used its completion tool" (`completed`) and "the agent stopped and is
+ * waiting for you" (`awaiting_followup`) - and it does so by overwriting the
+ * phase the event stream already set.
+ *
+ * The wait is bounded rather than open-ended, because the alternative this
+ * replaces was itself a bound - the previous implementation finalised at zero
+ * and left a turn that never received a terminal event stuck in `streaming`
+ * forever, which is the failure 568617579 fixed. 1s is long relative to the
+ * work being waited on: the runtime dispatches `done` *before* the send promise
+ * settles, and then persists session metadata and messages, so the event is
+ * already in flight when the promise resolves. It is short enough that a lost
+ * event is not user-visible, and the expiry is logged rather than swallowed,
+ * because "the agent finished and never said so" is a runtime bug worth naming.
+ */
+export const TURN_DRAIN_TIMEOUT_MS = 1000
+
 /**
  * Determine whether an error is transient and worth retrying automatically.
  * Permanent errors (auth, billing, bad request) should NOT be retried.
@@ -82,6 +106,13 @@ export interface SdkSessionLifecycleOptions {
 	 */
 	consumeModeSwitchNotice?: (sessionId: string) => ModeSwitchNotice | null
 	onDidBecomeIdle?: () => void
+	/**
+	 * Overrides the turn-end drain bound. Production leaves it unset so the bound is
+	 * TURN_DRAIN_TIMEOUT_MS; it exists because a test that does not simulate the
+	 * runtime's terminal event would otherwise have to sit through the real bound to
+	 * observe the fallback.
+	 */
+	turnDrainTimeoutMs?: number
 }
 
 export class SdkSessionLifecycle {
@@ -98,6 +129,14 @@ export class SdkSessionLifecycle {
 	 * sequencing the CLI uses.
 	 */
 	private readonly pendingStops = new Map<string, Promise<void>>()
+	/**
+	 * Resolvers for callers blocked on the next running -> idle transition.
+	 *
+	 * Only SdkSessionEventCoordinator's turn-end branch clears `isRunning` for a
+	 * live turn, so this is the signal that the terminal event has landed and the
+	 * event stream has already decided the phase. See TURN_DRAIN_TIMEOUT_MS.
+	 */
+	private readonly idleWaiters = new Set<() => void>()
 
 	constructor(private readonly options: SdkSessionLifecycleOptions) {}
 
@@ -113,7 +152,43 @@ export class SdkSessionLifecycle {
 		activeSession.isRunning = isRunning
 		if (!isRunning) {
 			this.options.onDidBecomeIdle?.()
+			// Snapshot before clearing: a resolver may re-enter (a superseded send
+			// bails out here), and mutating the set while iterating it would skip
+			// the remaining waiters.
+			for (const notify of [...this.idleWaiters]) {
+				notify()
+			}
+			this.idleWaiters.clear()
 		}
+	}
+
+	/**
+	 * Wait for `session` to leave the running state, up to `timeoutMs`.
+	 *
+	 * Resolves true when the transition happened, false on expiry. Expiry is not
+	 * an error here: the caller decides how to finalise a turn the runtime never
+	 * reported the end of. A session that is already idle - or gone, which only a
+	 * superseded send can observe from here - has nothing left to wait for.
+	 */
+	private awaitSessionIdle(session: ActiveSession | undefined, timeoutMs: number): Promise<boolean> {
+		if (!session?.isRunning) {
+			return Promise.resolve(true)
+		}
+		return new Promise<boolean>((resolve) => {
+			let settled = false
+			const finish = (drained: boolean) => {
+				if (settled) {
+					return
+				}
+				settled = true
+				clearTimeout(timer)
+				this.idleWaiters.delete(onIdle)
+				resolve(drained)
+			}
+			const timer = setTimeout(() => finish(false), timeoutMs)
+			const onIdle = () => finish(true)
+			this.idleWaiters.add(onIdle)
+		})
 	}
 
 	private clearActiveSessionReference(): ActiveSession | undefined {
@@ -423,8 +498,28 @@ export class SdkSessionLifecycle {
 					if (isSuperseded("completion")) {
 						return
 					}
-					Logger.log(`[SdkController] Agent turn completed for session: ${sessionId}`)
-					this.setRunning(false)
+					// Drain first. The terminal event carries how the turn ended, and
+					// finalising from the promise alone overwrites it with a single
+					// "completed" - so the event stream gets a bounded window to land
+					// before anything local decides the phase.
+					const drainTimeoutMs = this.options.turnDrainTimeoutMs ?? TURN_DRAIN_TIMEOUT_MS
+					const drained = await this.awaitSessionIdle(sessionAtSend, drainTimeoutMs)
+					if (isSuperseded("completion")) {
+						return
+					}
+					if (drained) {
+						Logger.log(`[SdkController] Agent turn completed for session: ${sessionId}`)
+					} else {
+						// No terminal event within the bound. Finalise here so the turn cannot
+						// stay in `streaming` forever, and say so: the phase decided from this
+						// point on is a guess, and a guessed phase that is never reported is how a
+						// dead UI stays unexplained.
+						Logger.warn(
+							`[SdkController] Turn for ${sessionId} resolved with no terminal event after ` +
+								`${drainTimeoutMs}ms; finalising the turn locally`,
+						)
+						this.setRunning(false)
+					}
 					await this.options.onSendComplete(sessionId)
 				})
 				.catch(async (error: unknown) => {
