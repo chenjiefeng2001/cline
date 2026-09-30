@@ -71,6 +71,18 @@ type HookRuntimeOptions = {
 	rootSessionId?: string;
 	logger?: BasicLogger;
 	toolCallTimeoutMs?: number;
+	/**
+	 * Upper bound on a blocking hook command.
+	 *
+	 * The runner is not safe without one. It waits on the child's `close` and nothing
+	 * else bounds that wait, so a hook that never exits - a wedged interpreter, a
+	 * grandchild holding the stdio pipe open - stalls every tool call for as long as the
+	 * default allows, and callers with a shorter budget than that never observe the
+	 * timeout at all; they simply lose their run to it.
+	 *
+	 * @default DEFAULT_HOOK_COMMAND_TIMEOUT_MS
+	 */
+	timeoutMs?: number;
 	/** Structured git + path metadata forwarded into every hook payload. */
 	workspaceInfo?: WorkspaceInfo;
 };
@@ -814,6 +826,15 @@ export function createHookAuditHooks(options: {
 	};
 }
 
+/**
+ * Default upper bound on a single blocking hook command, in milliseconds.
+ *
+ * Deliberately generous: a hook is user-supplied code and may legitimately do real
+ * work. The important property is that it exists, and that a host can lower it via
+ * `HookRuntimeOptions.timeoutMs` when its own budget is shorter.
+ */
+export const DEFAULT_HOOK_COMMAND_TIMEOUT_MS = 120_000
+
 export function createHookConfigFileHooks(
 	options: HookRuntimeOptions,
 ): AgentHooks | undefined {
@@ -887,7 +908,7 @@ export function createHookConfigFileHooks(
 			commands: commandPaths,
 			cwd: options.cwd,
 			logger: options.logger,
-			timeoutMs: options.toolCallTimeoutMs ?? 120000,
+			timeoutMs: options.timeoutMs ?? options.toolCallTimeoutMs ?? DEFAULT_HOOK_COMMAND_TIMEOUT_MS,
 			payload: {
 				...createPayloadBase(ctx, options),
 				hookName: "tool_call",
