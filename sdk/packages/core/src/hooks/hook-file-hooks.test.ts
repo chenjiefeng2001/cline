@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -245,28 +246,53 @@ describe("createHookConfigFileHooks", () => {
 		}
 	});
 
-	it("honors shebang interpreter when present", async () => {
-		const { workspace } = await createWorkspaceWithHook(
+	// Skipped on Windows, and deliberately so. This launcher resolves the shebang to
+	// `bash <windows-path>`, and on a Windows runner `bash` is either Git's, which
+	// cannot run a shebang script given a Windows path, or WSL's, which mangles the
+	// separators and exits 127. The test passed there for entirely the wrong reason -
+	// see below - and pretending otherwise would only relocate the false pass.
+	//
+	// Shebang parsing itself is still covered everywhere, by the argv case below, which
+	// needs no process to run.
+	it.skipIf(process.platform === "win32")("honors shebang interpreter when present", async () => {
+		const { workspace, hookPath } = await createWorkspaceWithHook(
 			"PreToolUse",
 			'#!/usr/bin/env bash\necho \'HOOK_CONTROL\t{"cancel":false,"context":"shebang-ok"}\'\n',
-		);
+		)
+		// Proves the interpreter actually ran the script, instead of inferring it from
+		// the absence of a control block. `beforeTool` returns undefined both when the
+		// hook succeeded with cancel:false and when the hook never ran at all, so the
+		// original assertion could not tell those apart - and a test that cannot tell
+		// them apart still passes when the feature it names is completely broken.
+		const marker = join(workspace, "shebang-ran.marker")
+		process.env.CLINE_HOOK_TEST_MARKER = marker
 		try {
+			// Written before the control block, so its presence proves the shebang chose
+			// an interpreter that could open the file.
+			await writeFile(
+				hookPath,
+				`#!/usr/bin/env bash\ntouch "$CLINE_HOOK_TEST_MARKER"\necho 'HOOK_CONTROL\t{"cancel":false,"context":"shebang-ok"}'\n`,
+				"utf-8",
+			)
 			const hooks = createHookConfigFileHooks({
 				cwd: workspace,
 				workspacePath: workspace,
-			});
-			expect(hooks?.beforeTool).toBeTypeOf("function");
-			const control = await hooks?.beforeTool?.(beforeToolContext());
-			expect(control).toBeUndefined();
+			})
+			expect(hooks?.beforeTool).toBeTypeOf("function")
+			const control = await hooks?.beforeTool?.(beforeToolContext())
+			expect(control).toBeUndefined()
+			// The actual subject of the test.
+			expect(existsSync(marker), "shebang interpreter did not run the hook script").toBe(true)
 		} finally {
+			delete process.env.CLINE_HOOK_TEST_MARKER
 			await rm(workspace, {
 				recursive: true,
 				force: true,
 				maxRetries: 3,
 				retryDelay: 250,
-			});
+			})
 		}
-	});
+	})
 
 	it("parses review control from hook output", async () => {
 		const { workspace } = await createWorkspaceWithHook(
