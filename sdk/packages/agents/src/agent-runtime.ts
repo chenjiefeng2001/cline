@@ -302,6 +302,91 @@ class ControlledStopError extends Error {
 	}
 }
 
+/** Keep a status notice readable when the repeated result is large. */
+function truncateForNotice(text: string, limit = 200): string {
+	const flat = text.replace(/\s+/g, " ").trim()
+	return flat.length > limit ? `${flat.slice(0, limit)}...` : flat
+}
+
+/**
+ * How many consecutive identical results from one tool count as no progress.
+ *
+ * Three, deliberately. Two would misjudge a tool that legitimately reports the same
+ * thing twice while something else is progressing - a status poll, a wait - and would
+ * cut a healthy run short. Three is enough to establish that another identical turn
+ * cannot change the outcome, while still tolerating a single "let me try that again".
+ */
+const NO_PROGRESS_THRESHOLD = 3;
+
+interface StalledTool {
+	toolName: string;
+	result: string;
+	repeats: number;
+}
+
+/**
+ * Detect a tool returning byte-identical output on consecutive turns.
+ *
+ * Keyed by tool name *and* the result, so two different tools agreeing, or one tool
+ * returning two alternating answers, are both treated as progress. Only a tool that
+ * cannot be influenced by another turn counts - which is the case that matters, because
+ * a deterministic failure retried is guaranteed to fail the same way.
+ *
+ * `streaks` is mutated so the count survives across turns of one run.
+ */
+function detectNoProgress(
+	toolCalls: readonly { toolCallId: string; toolName: string }[],
+	toolMessages: readonly AgentMessage[],
+	streaks: Map<string, number>,
+): StalledTool | undefined {
+	// Results keyed by the call they answer, so a name cannot be paired with the wrong
+	// output when a turn makes several calls.
+	const resultByCallId = new Map<string, string>();
+	for (const message of toolMessages) {
+		for (const part of message.content) {
+			if (part.type === "tool-result") {
+				const callId = (part as { toolCallId?: string }).toolCallId ?? "";
+				resultByCallId.set(callId, stableStringify(part));
+			}
+		}
+	}
+
+	let stalled: StalledTool | undefined;
+	for (const call of toolCalls) {
+		const result = resultByCallId.get(call.toolCallId);
+		if (result === undefined) {
+			continue;
+		}
+		const key = `${call.toolName}${result}`;
+		const repeats = (streaks.get(key) ?? 0) + 1;
+		streaks.set(key, repeats);
+		// Every other key reset: progress on anything clears the evidence of stalling.
+		for (const other of [...streaks.keys()]) {
+			if (other !== key) {
+				streaks.delete(other);
+			}
+		}
+		if (repeats >= NO_PROGRESS_THRESHOLD && !stalled) {
+			stalled = { toolName: call.toolName, result, repeats };
+		}
+	}
+	return stalled;
+}
+
+/** Stable stringify, so key order cannot disguise an identical result as a new one. */
+function stableStringify(value: unknown): string {
+	if (value === null || typeof value !== "object") {
+		return JSON.stringify(value) ?? String(value);
+	}
+	if (Array.isArray(value)) {
+		return `[${value.map(stableStringify).join(",")}]`;
+	}
+	const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	);
+	return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+}
+
 const MAX_TOOL_RETRIES = 10;
 const MAX_TOOL_RETRY_DELAY_MS = 2_000;
 
@@ -1084,11 +1169,16 @@ export class AgentRuntime {
 				}
 			}
 
-			while (
-				this.config.maxIterations === undefined ||
-				this.state.iteration < this.config.maxIterations
-			) {
-				this.throwIfAborted();
+		// Lives outside the loop: a streak is only meaningful across turns, and
+		// re-creating it per iteration pins every count at 1 so it can never trip.
+		const noProgressStreaks = new Map<string, number>()
+
+		while (
+			this.config.maxIterations === undefined ||
+			this.state.iteration < this.config.maxIterations
+		) {
+			this.throwIfAborted();
+
 
 				// Budget is a pre-request gate: the in-flight turn always finishes so
 				// every tool call keeps a tool result, and the run stops here instead
@@ -1172,16 +1262,31 @@ export class AgentRuntime {
 					return result;
 				}
 
-				const toolMessages = await this.executeToolCalls(toolCalls);
-				this.state.pendingToolCalls = [];
-				for (const toolMessage of toolMessages) {
-					this.state.messages.push(toolMessage);
-					await this.emit({
-						type: "message-added",
-						snapshot: this.snapshot(),
-						message: toolMessage,
-					});
-				}
+			const toolMessages = await this.executeToolCalls(toolCalls);
+			this.state.pendingToolCalls = [];
+			for (const toolMessage of toolMessages) {
+				this.state.messages.push(toolMessage);
+				await this.emit({
+					type: "message-added",
+					snapshot: this.snapshot(),
+					message: toolMessage,
+				});
+			}
+
+			// No-progress gate.
+			//
+			// A tool that returns byte-identical output cannot be helped by another turn,
+			// and some tools fail deterministically - a missing credential, a
+			// misconfiguration - so retrying is guaranteed to reproduce the same answer.
+			// Without this, the only thing that stopped such a loop was the iteration
+			// cap, which reports as `failed`, so a single misconfigured tool looked
+			// identical to a task that genuinely needed more room.
+			const stalled = detectNoProgress(toolCalls, toolMessages, noProgressStreaks);
+			if (stalled) {
+				noProgressStreaks.clear();
+				return await this.finishNoProgress(stalled, finalAssistantMessage);
+			}
+
 				await this.emit({
 					type: "turn-finished",
 					snapshot: this.snapshot(),
@@ -1208,8 +1313,15 @@ export class AgentRuntime {
 				}
 			}
 
-			throw new Error(
-				`Agent runtime exceeded maxIterations (${this.config.maxIterations})`,
+			// Reaching the cap is a normal boundary, not a crash. The budget path above
+			// already finishes gracefully, and leaving this one to throw made the two
+			// limits report differently for the same kind of event: a run that did real
+			// work and simply ran out of room came back as `failed`, so hosts showed a
+			// crash for a completed-as-far-as-it-could-go transcript.
+			return await this.finishRunGracefully(
+				"max_iterations",
+				finalAssistantMessage,
+				`Stopped after ${this.config.maxIterations} iterations without reaching a final answer. The transcript above is complete up to that point.`,
 			);
 		} catch (error) {
 			const normalized =
@@ -1695,6 +1807,53 @@ export class AgentRuntime {
 	 * run ends with a controlled `budget_exhausted` status rather than a thrown
 	 * error — an exhausted budget is a policy outcome, not a failure.
 	 */
+	/**
+	 * Stop a run because a tool could not make progress, and say so plainly.
+	 *
+	 * The notice is emitted before the run finishes because the model never gets
+	 * another turn to read it - this is the end of the run, not a message into it. The
+	 * point is the host and the user: a tool that failed deterministically should be
+	 * reported as a stalled tool, not as a model that could not finish.
+	 */
+	private async finishNoProgress(
+		stalled: StalledTool,
+		assistantMessage?: AgentMessage,
+	): Promise<AgentRunResult> {
+		await this.emit({
+			type: "status-notice",
+			snapshot: this.snapshot(),
+			message:
+				`Stopped: tool "${stalled.toolName}" returned an identical result ${stalled.repeats} times in a row, ` +
+				`so another turn could not change the outcome. Last result: ${truncateForNotice(stalled.result)}`,
+			metadata: {
+				kind: "no_progress",
+				toolName: stalled.toolName,
+				repeats: stalled.repeats,
+			},
+		});
+		return await this.finishRunGracefully(
+			"no_progress",
+			assistantMessage,
+			`Stopped: tool "${stalled.toolName}" returned the same result ${stalled.repeats} times in a row.`,
+		);
+	}
+
+	/** Emit a notice, finish the run with a first-class status, and announce it. */
+	private async finishRunGracefully(
+		status: AgentRunResult["status"],
+		assistantMessage: AgentMessage | undefined,
+		reason: string,
+	): Promise<AgentRunResult> {
+		const result = this.finishRun(status, assistantMessage, reason);
+		await this.callAfterRunHooks(result);
+		await this.emit({
+			type: "run-finished",
+			snapshot: this.snapshot(),
+			result,
+		});
+		return result;
+	}
+
 	private async finishBudgetExhausted(
 		status: AgentRunBudgetStatus,
 		assistantMessage?: AgentMessage,

@@ -124,6 +124,20 @@ export type AgentRunStatus =
 	| "running"
 	| "completed"
 	| "budget_exhausted"
+	/**
+	 * Hit the iteration cap. A first-class outcome, not a failure: the run did real work
+	 * and the transcript is intact, it simply ran out of room. Kept distinct from
+	 * `failed` because a host showing "failed" for a completed-as-far-as-it-could-go
+	 * run teaches users that normal boundaries are errors.
+	 */
+	| "max_iterations"
+	/**
+	 * Stopped because the same tool returned an identical result repeatedly, so another
+	 * turn could not change the outcome. Distinct from the two above because it is not
+	 * a limit at all - it is the absence of progress, and continuing would spend money
+	 * to arrive at the same place.
+	 */
+	| "no_progress"
 	| "aborted"
 	| "failed";
 

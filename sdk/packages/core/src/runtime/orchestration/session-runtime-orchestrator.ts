@@ -1437,6 +1437,11 @@ function deriveFinishReason(
 			return "completed";
 		case "budget_exhausted":
 			return "budget_exhausted";
+		// Limits the run reached, not failures. Same treatment as budget_exhausted, so a
+		// run that did real work and stopped reads as stopped rather than as a crash.
+		case "max_iterations":
+		case "no_progress":
+			return "budget_exhausted";
 		case "aborted":
 			return "aborted";
 		case "failed":

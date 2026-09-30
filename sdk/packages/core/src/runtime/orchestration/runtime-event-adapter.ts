@@ -122,12 +122,19 @@ function textFromMessage(message: AgentMessage | undefined): string {
 }
 
 function statusToLegacyFinishReason(
-	status: "completed" | "budget_exhausted" | "aborted" | "failed",
+	status: "completed" | "budget_exhausted" | "max_iterations" | "no_progress" | "aborted" | "failed",
 ): AgentFinishReason {
 	switch (status) {
 		case "completed":
 			return "completed";
 		case "budget_exhausted":
+			return "budget_exhausted";
+		// Both are limits the run reached rather than failures, so they map the same
+		// way budget_exhausted does: the host shows a run that stopped, not an error.
+		// Collapsing them onto "error" is what made hitting the iteration cap look
+		// like a crash.
+		case "max_iterations":
+		case "no_progress":
 			return "budget_exhausted";
 		case "aborted":
 			return "aborted";
@@ -372,7 +379,7 @@ export class RuntimeEventAdapter {
 	}
 
 	private translateRunFinished(result: {
-		status: "completed" | "budget_exhausted" | "aborted" | "failed";
+		status: "completed" | "budget_exhausted" | "max_iterations" | "no_progress" | "aborted" | "failed";
 		outputText: string;
 		iterations: number;
 		usage: AgentUsage;
