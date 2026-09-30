@@ -59,19 +59,21 @@ const INTENTS: Record<TurnPhaseName, PhaseIntent> = {
 		why: "the turn failed; the composer is visibly off and Retry / New Task are offered",
 	},
 	resumable: {
-		// KNOWN GAP - see below. Resume is advertised, but the composer is enabled,
-		// so a user who has already typed has no way to submit.
-		send: "dropped",
+		// A cancelled turn continues the same task. The docs are explicit that an
+		// interrupted turn ends with the same stop reason as one that finished on its
+		// own, so there is no separate end state here to respect.
+		send: "continue-turn",
 		composerEnabled: true,
 		needsFooterEscape: true,
 		why: "the task was cancelled; the composer still accepts input that is then discarded",
 	},
 	idle: {
-		// KNOWN GAP - see below.
-		send: "dropped",
+		// With a transcript, a follow-up continues the same task. An empty transcript
+		// still starts a new one, which the !hasMessages branch handles.
+		send: "continue-turn",
 		composerEnabled: true,
 		needsFooterEscape: true,
-		why: "no turn in progress, so the composer accepts input that is then discarded",
+		why: "no turn in progress, so a follow-up continues the task it was left on",
 	},
 }
 
@@ -107,9 +109,10 @@ describe("turn/UI contract", () => {
 		// failure. A phase may drop a submission if it disables the composer (the
 		// user can see it is off) or advertises a footer action to click instead.
 		//
-		// `idle` is excluded here and asserted as a known gap below; it is the one
-		// phase that currently satisfies neither.
-		const SATISFIED = TURN_PHASES.filter((p) => p !== "idle")
+		// Every phase, now. `idle` and `resumable` used to be excluded because they
+		// dropped a submission while looking usable - the invariant below is what caught
+		// that, and both now route to continue-turn instead of dropping.
+		const SATISFIED = TURN_PHASES
 
 		it.each(SATISFIED)("%s", (phase) => {
 			const intent = INTENTS[phase]
@@ -136,41 +139,43 @@ describe("turn/UI contract", () => {
 		})
 	})
 
-	describe("KNOWN GAP: idle discards what the user typed", () => {
-		// idle drops a submission while the composer is enabled AND the footer
-		// advertises no action, so the input looks like it works and the text
-		// vanishes. Controller.restoreCheckpoint() reaches it: it sets `idle`,
-		// bumps the fence, then replaces the transcript with the restored
-		// messages, leaving the webview with messages AND phase `idle`.
-		//
-		// Not repaired here. The two candidate behaviours - start a task behind the
-		// user's back, or raise an error - both change product semantics, and
-		// `idle` with a populated transcript is genuinely ambiguous. Asserted as a
-		// failure: when the product decides, remove `.fails` and this becomes the
-		// contract.
-		it.fails("must either accept the submission or visibly refuse it", () => {
-			expect(sendOutcomeFor({ phase: "idle", hasMessages: true, hasOpenAsk: false })).not.toBe("dropped")
+	// Previously two KNOWN GAP blocks pinned `dropped` for idle and resumable via
+	// it.fails, pending a product decision. Both are closed: a follow-up continues the
+	// same task, which is how the agent SDK documents it, and there is no distinct
+	// "resumable" end state to respect. The old behaviour is still pinned, inverted,
+	// so a regression back to silent-dropping is a failure rather than a surprise.
+	describe("idle with a transcript continues the task", () => {
+		// Controller.restoreCheckpoint() reaches this: it sets `idle`, bumps the fence,
+		// then replaces the transcript with the restored messages, leaving the webview
+		// with messages AND phase `idle`. The user could type, the composer was
+		// enabled, and the submission vanished with no request, no state change and no
+		// error anywhere.
+		it("routes to continue-turn rather than dropping", () => {
+			expect(sendOutcomeFor({ phase: "idle", hasMessages: true, hasOpenAsk: false })).toBe("continue-turn")
 		})
 
-		it("records the current behaviour that makes the gap reachable", () => {
-			expect(sendOutcomeFor({ phase: "idle", hasMessages: true, hasOpenAsk: false })).toBe("dropped")
+		it("still starts a new task on an empty transcript", () => {
+			// The distinction that keeps this from being "always continue". With nothing
+			// to continue, the user is starting something.
+			expect(sendOutcomeFor({ phase: "idle", hasMessages: false, hasOpenAsk: false })).toBe("new-task")
+		})
+
+		it("leaves the composer usable, which is what made the old drop a trap", () => {
 			expect(composerStateForPhase("idle").composerEnabled).toBe(true)
-			expect(footerEscapeAction("idle")).toBeUndefined()
 		})
 	})
 
-	describe("KNOWN GAP: resumable also discards typed input", () => {
-		// Surfaced by this table rather than assumed: cancelTask() sets `resumable`
-		// and leaves the transcript in place, and resume_task.sendingDisabled is
-		// false, so the composer is enabled. Resume is advertised in the footer,
-		// which does not help a user who has already typed a follow-up. Needs the
-		// same product decision as idle.
-		it.fails("must either accept the submission or visibly refuse it", () => {
-			expect(sendOutcomeFor({ phase: "resumable", hasMessages: true, hasOpenAsk: false })).not.toBe("dropped")
+	describe("resumable continues the same task", () => {
+		// cancelTask() sets `resumable` and leaves the transcript in place, with
+		// resume_task.sendingDisabled false, so the composer was enabled while the
+		// submission was dropped. The docs are explicit that an interrupted turn ends
+		// with the same stop reason as one that finished on its own, so there is no
+		// separate end state here to respect.
+		it("routes to continue-turn rather than dropping", () => {
+			expect(sendOutcomeFor({ phase: "resumable", hasMessages: true, hasOpenAsk: false })).toBe("continue-turn")
 		})
 
-		it("records the current behaviour that makes the gap reachable", () => {
-			expect(sendOutcomeFor({ phase: "resumable", hasMessages: true, hasOpenAsk: false })).toBe("dropped")
+		it("leaves the composer usable", () => {
 			expect(composerStateForPhase("resumable").composerEnabled).toBe(true)
 		})
 	})

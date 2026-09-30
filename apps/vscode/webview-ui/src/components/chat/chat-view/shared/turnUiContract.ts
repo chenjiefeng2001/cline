@@ -31,15 +31,35 @@ export const TURN_PHASES = [
 export type TurnPhaseName = (typeof TURN_PHASES)[number]
 
 /**
- * Phases in which a turn is live or awaiting the user, so a composer submission
- * is a follow-up (or an interrupt) rather than a new task.
+ * Phases in which a turn is live or awaiting the user, so a composer submission is a
+ * follow-up (or an interrupt) rather than a new task.
  *
- * `idle` is deliberately NOT here. `idle` means "no turn in progress", and with a
- * populated transcript it is ambiguous: the user may want to keep talking, or may
- * be looking at a task they have not submitted yet. Nothing may be invented for
- * that case without a product decision - see the KNOWN GAP test.
+ * `idle` and `resumable` are here now, which they were not until this was decided
+ * against how mainstream agents behave rather than by guessing:
+ *
+ *   - a follow-up message *continues* the same task. The agent SDK documents it as
+ *     "follow up on a completed task - the agent already analyzed something, now you
+ *     want it to act on that analysis", which resumes the same session rather than
+ *     opening a new one. An empty transcript still starts a new task, via the
+ *     `!hasMessages` branch above.
+ *   - there is no separate "resumable" end state to respect. The docs are explicit
+ *     that an interrupted turn ends with the *same* stop reason as one that finished
+ *     on its own - "there is no stop reason specific to interruption" - so a
+ *     resumable turn is a continuation, not a dead end.
+ *
+ * Before this, `idle` with a populated transcript made the composer a dead end: the
+ * user could type, the composer was enabled, and the submission was dropped with no
+ * request, no state change and no error anywhere. `Controller.restoreCheckpoint()`
+ * reaches that state - it sets `idle` and repopulates the transcript - so it was
+ * reachable, not hypothetical.
  */
-const FOLLOWUP_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>(["completed", "awaiting_followup", "streaming"])
+const FOLLOWUP_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>([
+	"completed",
+	"awaiting_followup",
+	"streaming",
+	"idle",
+	"resumable",
+])
 
 /** Phases where the composer accepts a submission while the turn is live. */
 const QUEUEABLE_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>(["streaming", "awaiting_approval"])
