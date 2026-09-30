@@ -493,9 +493,33 @@ function normalizeHookInterpreter(tokens: string[]): string[] | undefined {
 	return tokens;
 }
 
-function inferHookCommand(path: string): string[] {
+/** Shells that cannot execute a hook script given a Windows path. */
+function isUnixShell(interpreter: string | undefined): boolean {
+	if (!interpreter) {
+		return false;
+	}
+	const name = interpreter.replace(/\\/g, "/").toLowerCase().split("/").at(-1)
+	return name === "bash" || name === "sh" || name === "zsh" || name === "env"
+}
+
+function inferHookCommand(path: string, platform = process.platform): string[] {
 	const shebang = parseShebangCommand(path);
 	if (shebang && shebang.length > 0) {
+		// Refused outright on Windows rather than attempted.
+		//
+		// `bash <windows-path>` cannot work here: Git's bash cannot open a Windows path
+		// handed to it as an argument, and WSL's bash strips the separators and exits
+		// 127. Attempting it gave a fast, silent failure - the hook simply never ran,
+		// with nothing in the log but the mangled path. Measured at 12/12 runs, so it
+		// was not even intermittent. Saying so up front is the useful behaviour: the
+		// user learns their hook is not running, and is told what to write instead.
+		if (platform === "win32" && isUnixShell(normalizeHookInterpreter(shebang)?.[0] ?? shebang[0])) {
+			throw new UnsupportedHookInterpreterError(
+				path,
+				shebang.join(" "),
+				"The only bash on a Windows machine is either Git's, which cannot execute a script given a Windows path, or WSL's, which mangles the path and exits 127.",
+			)
+		}
 		return [...(normalizeHookInterpreter(shebang) ?? shebang), path];
 	}
 	const lowered = path.toLowerCase();
@@ -538,7 +562,34 @@ function inferHookCommand(path: string): string[] {
 	return ["bash", path];
 }
 
-function createHookCommandMap(workspacePath: string): HookCommandMap {
+/**
+ * Raised when a hook cannot be launched on this platform at all.
+ *
+ * Distinct from a hook that launches and fails. A hook that runs and exits non-zero is
+ * the hook's own problem and the user should see its stderr; this one is ours, and the
+ * only useful thing to do is tell the user how to write the hook for their platform.
+ */
+export class UnsupportedHookInterpreterError extends Error {
+	constructor(
+		readonly scriptPath: string,
+		readonly interpreter: string,
+		readonly reason: string,
+	) {
+		super(
+			`Hook ${scriptPath} declares "#!${interpreter}", which cannot run on Windows. ` +
+				`${reason} ` +
+				`Write the hook as PowerShell instead: rename it to ` +
+				`${scriptPath.replace(/\.[^.]*$/, "")}.ps1 and it will be launched with ` +
+				`powershell -File automatically. Nothing was executed.`,
+		)
+		this.name = "UnsupportedHookInterpreterError"
+	}
+}
+
+function createHookCommandMap(
+	workspacePath: string,
+	onUnsupported?: (error: UnsupportedHookInterpreterError) => void,
+): HookCommandMap {
 	const map: HookCommandMap = {};
 	for (const file of listHookConfigFiles(workspacePath)) {
 		if (!file.hookEventName) {
@@ -546,7 +597,18 @@ function createHookCommandMap(workspacePath: string): HookCommandMap {
 		}
 		const hookEventName = file.hookEventName;
 		const existing = map[hookEventName] ?? [];
-		existing.push(inferHookCommand(file.path));
+		try {
+			existing.push(inferHookCommand(file.path));
+		} catch (error) {
+			// One unusable hook must not take the rest down with it: reported and skipped,
+			// so the user sees which file is the problem and the hooks that do work still
+			// do.
+			if (error instanceof UnsupportedHookInterpreterError) {
+				onUnsupported?.(error);
+				continue;
+			}
+			throw error;
+		}
 		map[hookEventName] = existing;
 	}
 	return map;
@@ -838,7 +900,16 @@ export const DEFAULT_HOOK_COMMAND_TIMEOUT_MS = 120_000
 export function createHookConfigFileHooks(
 	options: HookRuntimeOptions,
 ): AgentHooks | undefined {
-	const commandMap = createHookCommandMap(options.workspacePath);
+	const commandMap = createHookCommandMap(options.workspacePath, (error) => {
+		// Surfaced through the hook logger rather than thrown, so one unusable hook does
+		// not stop the usable ones from loading - and the user is told which file is the
+		// problem and what to write instead. Silently skipping it would be the very
+		// failure this replaces.
+		logHookError(
+			options.logger,
+			`${error.message} This hook was skipped; the other hooks in this workspace are unaffected.`,
+		)
+	})
 	const hasAnyHooks = Object.values(commandMap).some(
 		(commands) => commands.length > 0,
 	);
