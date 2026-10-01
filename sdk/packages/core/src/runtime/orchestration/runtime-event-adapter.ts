@@ -129,13 +129,15 @@ function statusToLegacyFinishReason(
 			return "completed";
 		case "budget_exhausted":
 			return "budget_exhausted";
-		// Both are limits the run reached rather than failures, so they map the same
-		// way budget_exhausted does: the host shows a run that stopped, not an error.
-		// Collapsing them onto "error" is what made hitting the iteration cap look
-		// like a crash.
+		// Each limit keeps its own reason. They used to collapse onto
+		// "budget_exhausted" so that a run which did real work and stopped would not be
+		// reported as an error - which was right about "not an error" and wrong about
+		// everything else, because the host then had no way to say which limit it was.
+		// "Not an error" is a property of all three; "which one" is what the user needs.
 		case "max_iterations":
+			return "max_iterations";
 		case "no_progress":
-			return "budget_exhausted";
+			return "no_progress";
 		case "aborted":
 			return "aborted";
 		case "failed":

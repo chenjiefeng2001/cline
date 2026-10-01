@@ -393,6 +393,7 @@ function isAgentFinishReason(value: unknown): value is AgentFinishReason {
 		value === "completed" ||
 		value === "max_iterations" ||
 		value === "budget_exhausted" ||
+		value === "no_progress" ||
 		value === "aborted" ||
 		value === "mistake_limit" ||
 		value === "error"

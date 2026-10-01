@@ -3638,6 +3638,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 			case "aborted":
 			case "max_iterations":
 			case "budget_exhausted":
+			case "no_progress":
 			case "mistake_limit":
 				return "cancelled";
 		}

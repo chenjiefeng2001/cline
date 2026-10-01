@@ -515,11 +515,28 @@ export type AgentHooks = Partial<AgentRuntimeHooks>;
 
 /**
  * Reasons why the agent stopped executing
+ *
+ * The limit reasons are deliberately separate rather than one "stopped" value. A host
+ * that cannot tell them apart can only say "the run stopped", and the three actions
+ * differ: raise the iteration cap, raise the budget, or change the approach because
+ * the tool is not converging. Collapsing them at the boundary is what made hitting
+ * the iteration cap indistinguishable from running out of money.
  */
 export type AgentFinishReason =
 	| "completed" // Normal completion (no more tool calls)
-	| "max_iterations" // Hit the maximum iteration limit
-	| "budget_exhausted" // Stopped before another model request: run budget reached
+	/**
+	 * Hit the iteration cap. A first-class outcome, not a failure: the run did real work
+	 * and the transcript is intact, it simply ran out of room.
+	 */
+	| "max_iterations"
+	/** Stopped before another model request: run budget reached. */
+	| "budget_exhausted"
+	/**
+	 * Stopped because the same tool returned an identical result repeatedly, so another
+	 * turn could not change the outcome. Not a limit at all - it is the absence of
+	 * progress, and continuing would spend money to arrive at the same place.
+	 */
+	| "no_progress"
 	| "aborted" // User or system aborted
 	| "mistake_limit" // Stopped after repeated recoverable mistakes
 	| "error"; // Unrecoverable error occurred
@@ -528,6 +545,7 @@ export const AgentFinishReasonSchema = z.enum([
 	"completed",
 	"max_iterations",
 	"budget_exhausted",
+	"no_progress",
 	"aborted",
 	"mistake_limit",
 	"error",

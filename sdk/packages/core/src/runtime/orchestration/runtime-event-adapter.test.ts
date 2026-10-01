@@ -741,6 +741,38 @@ describe("RuntimeEventAdapter — run lifecycle", () => {
 		expect(out[0]).toMatchObject({ type: "done", reason: "aborted" });
 	});
 
+	it.each([
+		["max_iterations" as const, "max_iterations" as const],
+		["no_progress" as const, "no_progress" as const],
+		["budget_exhausted" as const, "budget_exhausted" as const],
+	])(
+		"keeps run-finished { status:%s } distinguishable as done { reason:%s }",
+		(status, reason) => {
+			// These three used to collapse onto "budget_exhausted" on the way out. The
+			// intent was "a limit is not an error", which every one of them satisfies -
+			// but a host given one reason for three outcomes can only say "the run
+			// stopped", and the three call for different things from the user: raise the
+			// iteration cap, raise the budget, or change approach because the tool is not
+			// converging. Mainstream agents keep these apart for the same reason
+			// (error_max_turns vs error_max_budget_usd are separate subtypes).
+			const out = adapter.translate({
+				type: "run-finished",
+				snapshot: makeSnapshot(),
+				result: makeResult({ status, outputText: "stopped" }),
+			});
+			expect(out[0]).toMatchObject({ type: "done", reason });
+		},
+	);
+
+	it("still reports a failed run as an error rather than a limit", () => {
+		const out = adapter.translate({
+			type: "run-finished",
+			snapshot: makeSnapshot(),
+			result: makeResult({ status: "failed", outputText: "" }),
+		});
+		expect(out[0]).toMatchObject({ type: "done", reason: "error" });
+	});
+
 	it("maps run-finished { status:failed } → done { reason:error }", () => {
 		const out = adapter.translate({
 			type: "run-finished",
