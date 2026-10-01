@@ -21,6 +21,7 @@ import { ensureHookLogDir } from "@cline/shared/storage";
 import { createAgentHooksExtension } from "./hook-extension";
 import { listHookConfigFiles } from "./hook-file-config";
 import type { HookEventName, HookEventPayload } from "./subprocess";
+import { resolveWindowsGitBash } from "./windows-git-bash";
 
 type HookContextBase = {
 	agentId: string;
@@ -502,25 +503,60 @@ function isUnixShell(interpreter: string | undefined): boolean {
 	return name === "bash" || name === "sh" || name === "zsh" || name === "env"
 }
 
+/**
+ * Why a Windows machine may have no usable `bash`, stated for someone who has to act
+ * on it.
+ *
+ * Corrected against measurement rather than assumption. The wording this replaces
+ * claimed Git's bash "cannot execute a script given a Windows path". It can, and does -
+ * the failure belongs to the WSL shim, which is what sits on PATH by default. Naming
+ * the wrong component would have sent users to uninstall the one bash that works.
+ */
+const NO_USABLE_BASH_ON_WINDOWS =
+	"No usable bash was found on this machine. The `bash` on PATH is usually the WSL shim " +
+	"(C:\\Windows\\System32\\bash.exe), which strips the separators out of a Windows path and " +
+	"exits 127 without ever running the hook - a failure that is easy to miss, because the hook " +
+	"simply produces nothing. Install Git for Windows, which ships a bash.exe under Git\\bin."
+
+/**
+ * The command for a hook that needs a Unix shell, or a refusal.
+ *
+ * Every path that ends up wanting a shell funnels through here - a `#!/usr/bin/env
+ * bash` shebang, a `.sh`/`.bash`/`.zsh` extension, and the extensionless legacy file -
+ * because all three produce the identical command line (`bash <windows-path>`) and
+ * therefore the identical failure. Inferring the interpreter in three places and
+ * checking only one of them is how the other two ended up attempting a launch that
+ * could not work.
+ *
+ * On Windows the command is retargeted at a real bash when one is installed, because
+ * that case works: Git bash opens a Windows path (measured exit 0). Only when no such
+ * bash exists is the hook refused - and then by name, with the reason and the
+ * PowerShell alternative, rather than attempted against the shim.
+ */
+function unixShellHookCommand(
+	path: string,
+	platform: string,
+	interpreter: string,
+	origin: "shebang" | "filename",
+): string[] {
+	if (platform !== "win32") {
+		return ["bash", path]
+	}
+	const gitBash = resolveWindowsGitBash()
+	if (gitBash) {
+		return [gitBash, path]
+	}
+	throw new UnsupportedHookInterpreterError(path, interpreter, NO_USABLE_BASH_ON_WINDOWS, origin)
+}
+
 function inferHookCommand(path: string, platform = process.platform): string[] {
 	const shebang = parseShebangCommand(path);
 	if (shebang && shebang.length > 0) {
-		// Refused outright on Windows rather than attempted.
-		//
-		// `bash <windows-path>` cannot work here: Git's bash cannot open a Windows path
-		// handed to it as an argument, and WSL's bash strips the separators and exits
-		// 127. Attempting it gave a fast, silent failure - the hook simply never ran,
-		// with nothing in the log but the mangled path. Measured at 12/12 runs, so it
-		// was not even intermittent. Saying so up front is the useful behaviour: the
-		// user learns their hook is not running, and is told what to write instead.
-		if (platform === "win32" && isUnixShell(normalizeHookInterpreter(shebang)?.[0] ?? shebang[0])) {
-			throw new UnsupportedHookInterpreterError(
-				path,
-				shebang.join(" "),
-				"The only bash on a Windows machine is either Git's, which cannot execute a script given a Windows path, or WSL's, which mangles the path and exits 127.",
-			)
+		const normalized = normalizeHookInterpreter(shebang) ?? shebang;
+		if (isUnixShell(normalized[0])) {
+			return unixShellHookCommand(path, platform, shebang.join(" "), "shebang")
 		}
-		return [...(normalizeHookInterpreter(shebang) ?? shebang), path];
+		return [...normalized, path];
 	}
 	const lowered = path.toLowerCase();
 	if (
@@ -528,7 +564,7 @@ function inferHookCommand(path: string, platform = process.platform): string[] {
 		lowered.endsWith(".bash") ||
 		lowered.endsWith(".zsh")
 	) {
-		return ["bash", path];
+		return unixShellHookCommand(path, platform, "bash", "filename")
 	}
 	if (
 		lowered.endsWith(".js") ||
@@ -558,8 +594,9 @@ function inferHookCommand(path: string, platform = process.platform): string[] {
 			path,
 		];
 	}
-	// Default to bash for legacy hook files with no extension/shebang.
-	return ["bash", path];
+	// Legacy hook files with no extension and no shebang are still shell scripts, so
+	// they are still subject to the Windows resolution above.
+	return unixShellHookCommand(path, platform, "bash", "filename")
 }
 
 /**
@@ -574,13 +611,27 @@ export class UnsupportedHookInterpreterError extends Error {
 		readonly scriptPath: string,
 		readonly interpreter: string,
 		readonly reason: string,
+		/**
+		 * How the interpreter was determined. Affects only the opening clause: a hook
+		 * that declared `#!/usr/bin/env bash` and a `.sh` file that declared nothing are
+		 * the same failure, but describing the second as "declares" a shebang it does
+		 * not have makes the message wrong in the one detail the user has to act on.
+		 */
+		readonly origin: "shebang" | "filename" = "shebang",
 	) {
 		super(
-			`Hook ${scriptPath} declares "#!${interpreter}", which cannot run on Windows. ` +
-				`${reason} ` +
-				`Write the hook as PowerShell instead: rename it to ` +
-				`${scriptPath.replace(/\.[^.]*$/, "")}.ps1 and it will be launched with ` +
-				`powershell -File automatically. Nothing was executed.`,
+			origin === "shebang"
+				? `Hook ${scriptPath} declares "#!${interpreter}", which needs a Unix shell. ` +
+					`${reason} ` +
+					`Write the hook as PowerShell instead: rename it to ` +
+					`${scriptPath.replace(/\.[^.]*$/, "")}.ps1 and it will be launched with ` +
+					`powershell -File automatically. Nothing was executed.`
+				: `Hook ${scriptPath} is a Unix shell script, and would be run as ` +
+					`"${interpreter} ${scriptPath}". ` +
+					`${reason} ` +
+					`Write the hook as PowerShell instead: rename it to ` +
+					`${scriptPath.replace(/\.[^.]*$/, "")}.ps1 and it will be launched with ` +
+					`powershell -File automatically. Nothing was executed.`,
 		)
 		this.name = "UnsupportedHookInterpreterError"
 	}
