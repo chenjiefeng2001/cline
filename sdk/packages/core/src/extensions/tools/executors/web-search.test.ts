@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import {
+	DEFAULT_WEB_SEARCH_PROVIDER_ID,
 	getWebSearchProvider,
 	listWebSearchProviders,
 	resolveWebSearchCredential,
@@ -20,6 +21,19 @@ describe("web search provider registry", () => {
 	it("defaults to Google Custom Search, as configured", () => {
 		expect(getWebSearchProvider(undefined).id).toBe("google")
 		expect(getWebSearchProvider(undefined).retired?.since).toMatch(/2027-01-01/)
+	})
+
+	it("names the default provider instead of inheriting it from the array order", () => {
+		// The default used to be PROVIDERS[0].id, so inserting a provider at the top
+		// changed it for every user who never chose one, invisibly - and the header
+		// comment, which described a different default than the code, was the only
+		// thing a reader had to go on. What is pinned here is the indirection: the
+		// resolver consults the constant, and the constant names a provider that exists.
+		expect(getWebSearchProvider(undefined).id).toBe(DEFAULT_WEB_SEARCH_PROVIDER_ID)
+		expect(listWebSearchProviders().map((p) => p.id)).toContain(DEFAULT_WEB_SEARCH_PROVIDER_ID)
+		// An empty or whitespace-only setting means "not configured", so it lands on the
+		// same default rather than on a lookup failure.
+		expect(getWebSearchProvider("   ").id).toBe(DEFAULT_WEB_SEARCH_PROVIDER_ID)
 	})
 
 	it("keeps every provider selectable despite a retirement date", () => {

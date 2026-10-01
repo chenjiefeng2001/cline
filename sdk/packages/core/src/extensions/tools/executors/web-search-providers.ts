@@ -9,11 +9,15 @@
  *   - Google Custom Search JSON API is closed to new customers and shuts down for
  *     existing ones on 2027-01-01
  *
- * So a provider is added by appending to this list and nothing else changes -
- * the tool, the credential resolution and the host settings are all provider
- * agnostic. The default is Brave, which is the closest surviving analogue to
- * Custom Search: one key, query in and results out as JSON, no Cloud project and no
- * search index to stand up.
+ * So a provider is added by appending to this list and nothing else changes - the
+ * tool, the credential resolution and the host settings are all provider agnostic.
+ *
+ * The default is Google, and it is named in DEFAULT_WEB_SEARCH_PROVIDER_ID rather
+ * than inherited from the array order. It is not the closest surviving analogue to
+ * Custom Search - Brave is, and that is what this comment used to claim, which is
+ * precisely why the default had to become a value you can see: a default that lives
+ * in an array index cannot be argued about, and reordering the array would change it
+ * for every user who never chose a provider.
  */
 
 /** One normalized search result, whatever the provider returned. */
@@ -243,12 +247,25 @@ function braveProvider(): WebSearchProvider {
 
 const PROVIDERS: readonly WebSearchProvider[] = [googleProvider(), bingProvider(), braveProvider()]
 
+/**
+ * Provider used when the host has no `webSearchProvider` setting.
+ *
+ * Named rather than read off `PROVIDERS[0]`, because the array order is not a
+ * decision anyone reading this file can see: inserting a provider at the top would
+ * change the default for every user who never chose one, with nothing in the diff
+ * saying so. This default is also contested - Google is closed to new customers and
+ * retires 2027-01-01, and Brave is the nearest surviving analogue - so it is the kind
+ * of value that gets argued about, and an argument needs a target. Changing it is an
+ * edit here plus a grep for this constant, not a silent reordering.
+ */
+export const DEFAULT_WEB_SEARCH_PROVIDER_ID = "google"
+
 export function listWebSearchProviders(): readonly WebSearchProvider[] {
 	return PROVIDERS
 }
 
 export function getWebSearchProvider(id: string | undefined): WebSearchProvider {
-	const wanted = id?.trim() || PROVIDERS[0].id
+	const wanted = id?.trim() || DEFAULT_WEB_SEARCH_PROVIDER_ID
 	const found = PROVIDERS.find((p) => p.id === wanted)
 	if (!found) {
 		throw new Error(
@@ -259,8 +276,8 @@ export function getWebSearchProvider(id: string | undefined): WebSearchProvider 
 	// retirement buys is a legible failure: each adapter appends the deadline to its own
 	// error, so whoever hits it learns why the endpoint stopped answering instead of
 	// assuming their key is wrong. Refusing at configuration time would have been wrong
-	// once this became the default - it would make the tool unusable rather than making
-	// the deadline visible.
+	// while this is the default - it would make the tool unusable rather than making the
+	// deadline visible. DEFAULT_WEB_SEARCH_PROVIDER_ID is where that default is changed.
 	return found
 }
 
