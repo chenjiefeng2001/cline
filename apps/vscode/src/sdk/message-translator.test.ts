@@ -966,6 +966,112 @@ describe("translateSessionEvent — agent_event done", () => {
 		const result = translateSessionEvent(event, state)
 		expect(result.messages).toHaveLength(0)
 		expect(result.turnComplete).toBe(true)
+		expect(result.turnFinishReason).toBe("completed")
+	})
+
+	it("surfaces a run that stopped at a limit, and says which limit", () => {
+		// `done` is not a content event, so nothing else put its text in the transcript.
+		// For a limit stop that text is the explanation - "stopped after 50 iterations",
+		// "returned the same result three times in a row" - and a turn that ends without
+		// it is indistinguishable from a turn that ended because the agent gave up. The
+		// reason travels alongside so the phase can be chosen from it.
+		const state = new MessageTranslatorState()
+		const event: CoreSessionEvent = {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-1",
+				event: {
+					type: "done",
+					reason: "max_iterations",
+					text: "Stopped after 50 iterations without reaching a final answer.",
+					iterations: 50,
+				} as AgentEvent,
+			},
+		}
+
+		const result = translateSessionEvent(event, state)
+
+		expect(result.turnComplete).toBe(true)
+		expect(result.turnFinishReason).toBe("max_iterations")
+		expect(state.getTurnFinishReason()).toBe("max_iterations")
+		expect(result.messages).toHaveLength(1)
+		expect(result.messages[0]).toMatchObject({
+			type: "say",
+			say: "text",
+			text: "Stopped after 50 iterations without reaching a final answer.",
+			partial: false,
+		})
+	})
+
+	it.each(["budget_exhausted", "no_progress"] as const)("explains a %s stop the same way as max_iterations", (reason) => {
+		// All three are limits and all three carry an explanation. Treating one of them
+		// as undeserving of a message would make the UI's treatment depend on which
+		// limit was hit, which is the thing the phase exists to stop mattering.
+		const state = new MessageTranslatorState()
+		const result = translateSessionEvent(
+			{
+				type: "agent_event",
+				payload: {
+					sessionId: "session-1",
+					event: {
+						type: "done",
+						reason,
+						text: `Stopped: ${reason}.`,
+						iterations: 3,
+					} as AgentEvent,
+				},
+			},
+			state,
+		)
+		expect(result.turnFinishReason).toBe(reason)
+		expect(result.messages).toHaveLength(1)
+	})
+
+	it("does not render text for an aborted or errored turn", () => {
+		// A cancellation has nothing to explain and an error is reported through the
+		// error path, so neither gets a transcript line from `done.text`.
+		for (const reason of ["aborted", "error"] as const) {
+			const state = new MessageTranslatorState()
+			const result = translateSessionEvent(
+				{
+					type: "agent_event",
+					payload: {
+						sessionId: "session-1",
+						event: {
+							type: "done",
+							reason,
+							text: "should not be rendered",
+							iterations: 1,
+						} as AgentEvent,
+					},
+				},
+				state,
+			)
+			expect(result.messages, reason).toHaveLength(0)
+			expect(result.turnFinishReason).toBe(reason)
+		}
+	})
+
+	it("forgets the previous turn's finish reason when a new turn starts", () => {
+		// Otherwise a turn that ends without a `done` event - which is exactly the case the
+		// turn-end drain exists to catch - would be reported as the previous turn's limit.
+		const state = new MessageTranslatorState()
+		translateSessionEvent(
+			{
+				type: "agent_event",
+				payload: {
+					sessionId: "session-1",
+					event: { type: "done", reason: "max_iterations", text: "stopped", iterations: 50 } as AgentEvent,
+				},
+			},
+			state,
+		)
+		expect(state.getTurnFinishReason()).toBe("max_iterations")
+
+		state.clearTurnOutcome()
+
+		expect(state.getTurnFinishReason()).toBeUndefined()
+		expect(state.wasAttemptCompletionSeen()).toBe(false)
 	})
 
 	it("done emits no synthetic ask even when attempt_completion was seen (green box from content_end)", () => {

@@ -164,6 +164,14 @@ export type TurnPhase =
 	| "completed" // attempt_completion done; Start New Task
 	| "error" // api_req_failed / fatal; Retry / recovery
 	| "resumable" // task cancelled / interrupted; Resume Task
+	/**
+	 * The run stopped at a boundary rather than finishing or failing: the iteration cap,
+	 * the run budget, or a tool that stopped converging. Distinct from `error` because
+	 * nothing went wrong - the transcript is complete up to that point - and distinct
+	 * from `completed` because the agent did not say it was done. The runtime's
+	 * explanation is in the transcript; the footer offers the matching next step.
+	 */
+	| "limit_reached"
 
 /**
  * Connection status visible in the webview footer/header so the user can

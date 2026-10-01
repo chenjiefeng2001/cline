@@ -26,6 +26,7 @@ export const TURN_PHASES = [
 	"error",
 	"awaiting_followup",
 	"awaiting_approval",
+	"limit_reached",
 ] as const
 
 export type TurnPhaseName = (typeof TURN_PHASES)[number]
@@ -59,6 +60,11 @@ const FOLLOWUP_PHASES: ReadonlySet<TurnPhaseName> = new Set<TurnPhaseName>([
 	"streaming",
 	"idle",
 	"resumable",
+	// A limit stop is continuable for the same reason every other finished turn is:
+	// there is a transcript to carry on from and the run is over, not broken. Sending
+	// here continues the session - the run's own cap will stop it again at the same
+	// point, which is information rather than a bug.
+	"limit_reached",
 ])
 
 /** Phases where the composer accepts a submission while the turn is live. */

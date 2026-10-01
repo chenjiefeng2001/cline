@@ -27,7 +27,7 @@
 
 import type { CoreSessionEvent } from "@cline/core"
 import type { Message as SdkMessage } from "@cline/llms"
-import { type AgentEvent, formatDisplayUserInput } from "@cline/shared"
+import { type AgentEvent, type AgentFinishReason, formatDisplayUserInput } from "@cline/shared"
 import { COMMAND_OUTPUT_STRING } from "@shared/combineCommandSequences"
 import type {
 	ClineApiReqInfo,
@@ -59,6 +59,15 @@ export interface TranslationResult {
 	sessionEnded: boolean
 	/** Whether the agent turn is complete */
 	turnComplete: boolean
+	/**
+	 * Why the turn stopped, from the runtime's `done` event. Undefined for every event
+	 * that is not a turn end.
+	 *
+	 * Carried on the result as well as in MessageTranslatorState because the terminal
+	 * phase is chosen here and applied by the event coordinator, and the two are one
+	 * decision split across two objects.
+	 */
+	turnFinishReason?: AgentFinishReason
 	/** Whether a tool call ended with an error (content_end with event.error) */
 	toolError?: boolean
 	/** Whether a tool call ended successfully (content_end without error) */
@@ -74,6 +83,34 @@ export interface TranslationResult {
 }
 
 type NormalizedUsage = NonNullable<TranslationResult["usage"]>
+
+/**
+ * Finish reasons that mean the run stopped at a boundary rather than finishing or
+ * failing.
+ *
+ * All three are "the run did real work and then ran out of something", and each one
+ * has an explanation attached in the runtime's `done.text`. That text is worth showing
+ * precisely because the run did not fail: a turn that ends silently after fifty
+ * iterations is indistinguishable from a turn that ended because the agent gave up,
+ * and the user's next move differs.
+ */
+const LIMIT_FINISH_REASONS: ReadonlySet<AgentFinishReason> = new Set<AgentFinishReason>([
+	"max_iterations",
+	"budget_exhausted",
+	"no_progress",
+])
+
+/**
+ * Whether a run stopped at a boundary rather than finishing or failing.
+ *
+ * Exported because two decisions hang off it and must not drift apart: whether the
+ * runtime's explanation is rendered into the transcript (here), and which terminal
+ * phase the turn gets (SdkSessionEventCoordinator). A limit that is explained but not
+ * phased reads as a completion; one that is phased but not explained reads as a bug.
+ */
+export function isLimitFinishReason(reason: AgentFinishReason | undefined): boolean {
+	return reason !== undefined && LIMIT_FINISH_REASONS.has(reason)
+}
 
 function normalizeUsageEvent(usageEvent: {
 	inputTokens?: number
@@ -277,6 +314,14 @@ export class MessageTranslatorState {
 
 	/** Whether attempt_completion tool was called in this turn */
 	private attemptCompletionSeen = false
+	/**
+	 * Why the last finished turn stopped, from the runtime's `done` event.
+	 *
+	 * The reason is the only thing that distinguishes "hit the iteration cap" from
+	 * "ran out of budget" from "the tool stopped converging", and those three ask
+	 * different things of the user. `undefined` while a turn is in flight.
+	 */
+	private turnFinishReason: AgentFinishReason | undefined
 
 	/** Mark that attempt_completion was called */
 	setAttemptCompletionSeen(): void {
@@ -286,6 +331,15 @@ export class MessageTranslatorState {
 	/** Check if attempt_completion was called in this turn */
 	wasAttemptCompletionSeen(): boolean {
 		return this.attemptCompletionSeen
+	}
+
+	/** Record why the turn stopped, for the terminal phase and its explanation. */
+	setTurnFinishReason(reason: AgentFinishReason): void {
+		this.turnFinishReason = reason
+	}
+
+	getTurnFinishReason(): AgentFinishReason | undefined {
+		return this.turnFinishReason
 	}
 
 	// -----------------------------------------------------------------------
@@ -415,6 +469,7 @@ export class MessageTranslatorState {
 	 */
 	clearTurnOutcome(): void {
 		this.attemptCompletionSeen = false
+		this.turnFinishReason = undefined
 	}
 }
 
@@ -1585,6 +1640,23 @@ export function translateSessionEvent(event: CoreSessionEvent, state: MessageTra
 			// Check for done/error events
 			if (agentEvent.type === "done") {
 				result.turnComplete = true
+				result.turnFinishReason = agentEvent.reason
+				state.setTurnFinishReason(agentEvent.reason)
+				// A run that stopped at a limit carries its explanation in `text`, and it
+				// used to be dropped here: `done` is not a content event, so nothing else
+				// put it in the transcript. The user saw a turn end and no statement of
+				// why - which is the one thing they need in order to decide what to do
+				// next. Rendered as ordinary assistant text so it lands where the rest of
+				// the turn's output is.
+				if (isLimitFinishReason(agentEvent.reason) && agentEvent.text.trim()) {
+					result.messages.push({
+						ts: state.nextTs(),
+						type: "say",
+						say: "text" as ClineSay,
+						text: agentEvent.text.trim(),
+						partial: false,
+					})
+				}
 			}
 			if (agentEvent.type === "error" && !state.isSuppressedToolApprovalDenial(agentEvent.error)) {
 				result.turnComplete = true

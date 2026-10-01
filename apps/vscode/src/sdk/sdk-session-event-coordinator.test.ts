@@ -75,6 +75,51 @@ describe("SdkSessionEventCoordinator", () => {
 		expect(options.postStateToWebview).not.toHaveBeenCalled()
 	})
 
+	it.each([
+		"max_iterations",
+		"budget_exhausted",
+		"no_progress",
+	] as const)("phases a turn that stopped at %s as limit_reached, not completed", async (reason) => {
+		// A limit stop is neither a completion nor a failure: the transcript is intact
+		// and the agent did not say it was done. Reporting it as `completed` is what
+		// made "hit the iteration cap" read as "the agent finished", and reporting it
+		// as `error` is what made a run that did real work look like a crash. Either
+		// one leaves the user with no idea which number to raise.
+		const { coordinator, options, event } = makeCoordinator({
+			task: makeTask([{ ts: 4, type: "say", say: "text", text: "work so far" }]),
+			translation: {
+				messages: [],
+				sessionEnded: false,
+				turnComplete: true,
+				turnFinishReason: reason,
+			},
+		})
+
+		await coordinator.handleSessionEvent(event)
+
+		expect(options.setTurnPhase).toHaveBeenCalledWith("limit_reached", 4)
+		expect(options.setTurnPhase).not.toHaveBeenCalledWith("completed", expect.anything())
+	})
+
+	it("still prefers completed when a limit reason is absent", async () => {
+		// The completion tool decides a finished turn, not the reason field. A `done` with
+		// no reason at all is still a normal finish, and must not be mistaken for a limit
+		// just because the new field exists.
+		const { coordinator, options, event } = makeCoordinator({
+			task: makeTask([{ ts: 5, type: "say", say: "text", text: "done" }]),
+			attemptCompletionSeen: true,
+			translation: {
+				messages: [],
+				sessionEnded: false,
+				turnComplete: true,
+			},
+		})
+
+		await coordinator.handleSessionEvent(event)
+
+		expect(options.setTurnPhase).toHaveBeenCalledWith("completed", 5)
+	})
+
 	it("marks turns complete through the session lifecycle", async () => {
 		const activeSession = makeActiveSession()
 		const { coordinator, options, event } = makeCoordinator({
@@ -457,6 +502,14 @@ interface MakeCoordinatorInput {
 		messages: ClineMessage[]
 		sessionEnded: boolean
 		turnComplete: boolean
+		turnFinishReason?:
+			| "completed"
+			| "max_iterations"
+			| "budget_exhausted"
+			| "no_progress"
+			| "aborted"
+			| "mistake_limit"
+			| "error"
 		toolError?: boolean
 		usage?: {
 			tokensIn: number

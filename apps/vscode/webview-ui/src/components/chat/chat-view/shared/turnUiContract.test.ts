@@ -75,6 +75,17 @@ const INTENTS: Record<TurnPhaseName, PhaseIntent> = {
 		needsFooterEscape: true,
 		why: "no turn in progress, so a follow-up continues the task it was left on",
 	},
+	limit_reached: {
+		// A run that hit its cap, its budget, or a non-converging tool is over, not
+		// broken: the transcript is intact and there is work to carry on from, which is
+		// the same situation as `completed` with a different reason. Submitting continues
+		// the session; the cap will stop the next run at the same place, and that is the
+		// user learning the number is too low rather than the product misbehaving.
+		send: "continue-turn",
+		composerEnabled: true,
+		needsFooterEscape: true,
+		why: "the run stopped at a boundary; the transcript is intact so a follow-up continues it",
+	},
 }
 
 describe("turn/UI contract", () => {

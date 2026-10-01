@@ -6,7 +6,7 @@ import type { ClineApiReqInfo, TurnPhase } from "@/shared/ExtensionMessage"
 import { Logger } from "@/shared/services/Logger"
 import { isClineManagedProvider } from "@/shared/utils/cline"
 import type { MessageTranslatorState, TranslationResult } from "./message-translator"
-import { translateSessionEvent } from "./message-translator"
+import { isLimitFinishReason, translateSessionEvent } from "./message-translator"
 import { PROVIDER_FAILURE_ERROR_TYPE, PROVIDER_FAILURE_PHASE, type ProviderFailureTelemetry } from "./provider-failure-telemetry"
 import type { SdkMessageCoordinator } from "./sdk-message-coordinator"
 import type { SdkSessionLifecycle } from "./sdk-session-lifecycle"
@@ -141,10 +141,20 @@ export class SdkSessionEventCoordinator {
 				// (showing the scroll-arrow default instead), so the cancel-set phase is preserved.
 				if (!activeSession.isRunning) {
 					Logger.debug("[SdkController] turn-complete straggler after cancel; preserving resumable phase")
-				} else if (this.options.messageTranslatorState.wasAttemptCompletionSeen()) {
-					this.options.setTurnPhase?.("completed", this.turnAnchorTs())
 				} else {
-					this.options.setTurnPhase?.("awaiting_followup", this.turnAnchorTs())
+					// A limit stop is its own phase, not `completed` and not `error`: the run
+					// did real work, the transcript is intact, and the agent did not say it
+					// was done. Collapsing it into either of the other two is what made
+					// "hit the iteration cap" look like "the agent gave up".
+					const reason = result.turnFinishReason
+					if (isLimitFinishReason(reason)) {
+						Logger.log(`[SdkController] Turn stopped at a limit (${reason}); phase limit_reached`)
+						this.options.setTurnPhase?.("limit_reached", this.turnAnchorTs())
+					} else if (this.options.messageTranslatorState.wasAttemptCompletionSeen()) {
+						this.options.setTurnPhase?.("completed", this.turnAnchorTs())
+					} else {
+						this.options.setTurnPhase?.("awaiting_followup", this.turnAnchorTs())
+					}
 				}
 
 				this.options.sessions.setRunning(false)

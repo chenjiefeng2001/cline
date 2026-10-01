@@ -202,6 +202,7 @@ describe("buttonsForPhase (TurnState-driven)", () => {
 		expect(buttonsForPhase(ts("streaming"), undefined)).toEqual(BUTTON_CONFIGS.partial)
 		expect(buttonsForPhase(ts("completed"), undefined)).toEqual(BUTTON_CONFIGS.completion_result)
 		expect(buttonsForPhase(ts("resumable"), undefined)).toEqual(BUTTON_CONFIGS.resume_task)
+		expect(buttonsForPhase(ts("limit_reached"), undefined)).toEqual(BUTTON_CONFIGS.limit_reached)
 		expect(buttonsForPhase(ts("error"), undefined)).toEqual(BUTTON_CONFIGS.api_req_failed)
 		expect(buttonsForPhase(ts("awaiting_followup"), undefined)).toEqual(BUTTON_CONFIGS.followup)
 		expect(buttonsForPhase(ts("awaiting_approval"), undefined)).toEqual(BUTTON_CONFIGS.tool_approve)

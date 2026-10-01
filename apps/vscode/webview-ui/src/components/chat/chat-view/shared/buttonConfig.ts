@@ -144,6 +144,25 @@ export const BUTTON_CONFIGS: Record<string, ButtonConfig> = {
 		primaryAction: "proceed",
 		secondaryAction: undefined,
 	},
+	/**
+	 * The run stopped at a boundary: the iteration cap, the budget, or a tool that
+	 * stopped converging.
+	 *
+	 * "Continue" rather than "Retry" because nothing failed and the transcript is intact
+	 * - there is work to carry on from, which is the same affordance `resume_task`
+	 * offers and for the same reason. The difference is what the runtime says in the
+	 * transcript: "stopped after 50 iterations" names the cap, "the same result three
+	 * times in a row" names non-convergence, and the two call for different next moves.
+	 * So the primary action continues and the escape hatch is a new task.
+	 */
+	limit_reached: {
+		sendingDisabled: false,
+		enableButtons: true,
+		primaryText: "Continue",
+		secondaryText: "Start New Task",
+		primaryAction: "proceed",
+		secondaryAction: "new_task",
+	},
 	resume_completed_task: {
 		sendingDisabled: false,
 		enableButtons: true,
@@ -389,6 +408,12 @@ export function buttonsForPhase(
 			return BUTTON_CONFIGS.completion_result
 		case "resumable":
 			return BUTTON_CONFIGS.resume_task
+		case "limit_reached":
+			// Not an error and not a completion: the run reached a boundary. The anchored
+			// message is the runtime's explanation, and it is what tells the user whether
+			// continuing is worth it, so this config is chosen unconditionally rather than
+			// deferring to the anchor the way `error` and `awaiting_followup` do.
+			return BUTTON_CONFIGS.limit_reached
 		case "error":
 			// The anchored message distinguishes mistake_limit (Proceed/New Task) from a failed
 			// API request (Retry/New Task). Default to the retry config.
