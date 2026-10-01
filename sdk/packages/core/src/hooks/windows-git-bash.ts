@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs"
-import { delimiter, join } from "node:path"
+import { win32 } from "node:path"
 
 /**
  * Locating a `bash` that can actually open a Windows path.
@@ -23,7 +23,16 @@ import { delimiter, join } from "node:path"
  * PowerShell resolver in the extension host does, would mean launching a process per
  * hook load to answer a question `existsSync` answers, and the answer would then be
  * unobservable in a unit test.
+ *
+ * Paths are built with `win32`, not the host's `path`. Every value here is a Windows
+ * path, and `path.join` on Linux inserts `/` and `path.delimiter` is `:` - so the host
+ * flavour produces `\Windows\System32;C/bash.exe` for a perfectly ordinary Windows
+ * PATH. That is not a test-only problem: it is the same wrong answer this module
+ * exists to prevent, one layer up.
  */
+
+/** Separator between entries in a Windows PATH. */
+const WINDOWS_PATH_DELIMITER = ";"
 
 /** Locations whose `bash.exe` is the WSL shim rather than a shell. */
 const WINDOWS_BASH_SHIM_MARKERS = ["\\windows\\system32\\", "\\windowsapps\\", "\\sysnative\\"]
@@ -51,7 +60,7 @@ function candidateRoots(env: NodeJS.ProcessEnv): string[] {
 	push(env.ProgramFiles)
 	push(env["ProgramFiles(x86)"])
 	if (env.LOCALAPPDATA?.trim()) {
-		roots.push(join(env.LOCALAPPDATA.trim(), "Programs"))
+		roots.push(win32.join(env.LOCALAPPDATA.trim(), "Programs"))
 	}
 	return roots
 }
@@ -73,22 +82,22 @@ export function getWindowsGitBashCandidates(env: NodeJS.ProcessEnv = process.env
 	const absolute: string[] = []
 	const installRoot = env.GIT_INSTALL_ROOT?.trim()
 	if (installRoot) {
-		absolute.push(join(installRoot, "bin", "bash.exe"))
-		absolute.push(join(installRoot, "usr", "bin", "bash.exe"))
-		absolute.push(join(installRoot, "Git", "bin", "bash.exe"))
+		absolute.push(win32.join(installRoot, "bin", "bash.exe"))
+		absolute.push(win32.join(installRoot, "usr", "bin", "bash.exe"))
+		absolute.push(win32.join(installRoot, "Git", "bin", "bash.exe"))
 	}
 	for (const root of candidateRoots(env)) {
-		absolute.push(join(root, "Git", "bin", "bash.exe"))
-		absolute.push(join(root, "Git", "usr", "bin", "bash.exe"))
+		absolute.push(win32.join(root, "Git", "bin", "bash.exe"))
+		absolute.push(win32.join(root, "Git", "usr", "bin", "bash.exe"))
 	}
 
 	// PATH last, and only as a fallback: it is the only source that can hand back the
 	// WSL shim, which is filtered rather than trusted.
 	const fromPath = (env.PATH ?? env.Path ?? "")
-		.split(delimiter)
+		.split(WINDOWS_PATH_DELIMITER)
 		.map((entry) => entry.trim().replace(/^"|"$/g, ""))
 		.filter(Boolean)
-		.flatMap((dir) => [join(dir, "bash.exe"), join(dir, "bash")])
+		.flatMap((dir) => [win32.join(dir, "bash.exe"), win32.join(dir, "bash")])
 
 	return [...new Set([...absolute, ...fromPath])]
 }
