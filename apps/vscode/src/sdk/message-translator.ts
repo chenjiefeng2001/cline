@@ -1777,10 +1777,12 @@ export function translateSessionEvent(event: CoreSessionEvent, state: MessageTra
 			// place to wire it.
 			//
 			// The first snapshot of a session warns; the rest are counted and reported
-			// on a log line, because emitStatus fires it continuously and warning every
-			// time buried the rest of the log - one session produced 348 warns, 7% of a
-			// real Cline.log, which made this the noisiest line in the file while adding
-			// nothing after the first. The condition is per session, not global, so a
+			// on a log line. The runtime coalesces these now, so the count is small -
+			// but the rate limit stays, because the warning is what tells someone reading
+			// a log that a channel exists which this host does not read, and that fact
+			// should not depend on how busy the session was. When it did depend on that,
+			// one conversation produced 348 of these lines and made this the noisiest
+			// thing in a real Cline.log. The condition is per session, not global, so a
 			// new conversation is announced again.
 			const sessionId = event.payload.sessionId
 			const seen = sessionSnapshotLogState.get(sessionId)

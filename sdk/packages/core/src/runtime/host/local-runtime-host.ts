@@ -1032,6 +1032,15 @@ export class LocalRuntimeHost implements RuntimeHost {
 	// Serializes manifest read-modify-writes per session; see mutateSessionManifest.
 	private readonly manifestMutationQueues = new Map<string, Promise<void>>();
 	private readonly usageBySession = new Map<string, SessionAccumulatedUsage>();
+	/**
+	 * Per-session coalescing state for session_snapshot emission. See
+	 * emitSessionSnapshot: the entry exists only while a build is running or one more
+	 * is owed, so this map holds nothing for an idle session.
+	 */
+	private readonly snapshotEmissionState = new Map<
+		string,
+		{ inFlight: boolean; queued: boolean }
+	>();
 	private readonly aggregateUsageBySession = new Map<
 		string,
 		SessionAccumulatedUsage
@@ -4354,28 +4363,73 @@ export class LocalRuntimeHost implements RuntimeHost {
 	}
 
 	private emitStatus(sessionId: string, status: string): void {
-		void this.emitSessionSnapshot(sessionId);
+		this.emitSessionSnapshot(sessionId);
 		this.emit({
 			type: "status",
 			payload: { sessionId, status },
 		});
 	}
 
-	private async emitSessionSnapshot(sessionId: string): Promise<void> {
-		const session = await this.getSession(sessionId);
-		if (!session) return;
-		this.emit({
-			type: "session_snapshot",
-			payload: {
-				sessionId,
-				snapshot: createCoreSessionSnapshot({
-					session,
-					messages: await this.readSessionMessages(sessionId),
-					usage: this.usageBySession.get(sessionId),
-					aggregateUsage: this.aggregateUsageBySession.get(sessionId),
-				}),
-			},
-		});
+	/**
+	 * Publish the session's current state, coalescing overlapping requests.
+	 *
+	 * A snapshot carries every persisted message plus usage, so building one reads the
+	 * whole transcript off disk and serialises it - O(conversation), not O(turn).
+	 * `emitStatus` fires on every status change, and a session produces enough of them
+	 * that the extension's log recorded 348 of these for a single conversation, none of
+	 * which it consumed.
+	 *
+	 * Coalescing is safe rather than a compromise, and the reason is what a snapshot is:
+	 * a complete replacement of state. A consumer that applies one ends up in the same
+	 * place whether or not it saw the intermediate ones, so dropping a superseded
+	 * snapshot cannot leave anyone wrong - it can only save the work. At most one build
+	 * runs at a time per session, and a request that arrives while one is in flight is
+	 * remembered and served once, with the state as of then.
+	 */
+	private emitSessionSnapshot(sessionId: string): void {
+		const state = this.snapshotEmissionState.get(sessionId) ?? {
+			inFlight: false,
+			queued: false,
+		};
+		this.snapshotEmissionState.set(sessionId, state);
+		if (state.inFlight) {
+			state.queued = true;
+			return;
+		}
+		state.inFlight = true;
+		void this.publishSessionSnapshot(sessionId, state);
+	}
+
+	private async publishSessionSnapshot(
+		sessionId: string,
+		state: { inFlight: boolean; queued: boolean },
+	): Promise<void> {
+		try {
+			do {
+				state.queued = false;
+				const session = await this.getSession(sessionId);
+				if (!session) return;
+				this.emit({
+					type: "session_snapshot",
+					payload: {
+						sessionId,
+						snapshot: createCoreSessionSnapshot({
+							session,
+							messages: await this.readSessionMessages(sessionId),
+							usage: this.usageBySession.get(sessionId),
+							aggregateUsage: this.aggregateUsageBySession.get(sessionId),
+						}),
+					},
+				});
+			} while (state.queued);
+		} finally {
+			state.inFlight = false;
+			// Only forgotten when nothing is owed, so a session that keeps changing keeps
+			// its entry and stops re-entering the map on every status flip.
+			if (!state.queued) {
+				this.snapshotEmissionState.delete(sessionId);
+			}
+		}
 	}
 
 	private emit(event: CoreSessionEvent): void {

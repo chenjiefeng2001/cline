@@ -6629,3 +6629,139 @@ describe("LocalRuntimeHost", () => {
 		});
 	});
 });
+
+	it("coalesces session_snapshot emissions instead of building one per status change", async () => {
+		// A snapshot reads and serialises the whole transcript, so building one per status
+		// flip is O(conversation) per flip. Coalescing is safe rather than lossy because a
+		// snapshot is a complete replacement of state: a consumer applying the last one
+		// ends up where it would have if it had seen them all.
+		//
+		// Driven through the real emitter rather than a copy of the coalescing logic, so
+		// this fails if the implementation is removed - a test that re-implements the thing
+		// it is testing passes forever.
+		const sessionId = "sess-snapshot-coalesce";
+		const manifest = createManifest(sessionId);
+		const sessionService = {
+			ensureSessionsDir: vi.fn().mockReturnValue("/tmp/sessions"),
+			createRootSessionWithArtifacts: vi.fn().mockResolvedValue({
+				manifestPath: "/tmp/manifest-coalesce.json",
+				messagesPath: "/tmp/messages-coalesce.json",
+				manifest,
+			}),
+			persistSessionMessages: vi.fn(),
+			updateSessionStatus: vi.fn().mockResolvedValue({
+				updated: true,
+				endedAt: "2026-01-01T00:00:01.000Z",
+			}),
+			writeSessionManifest: vi.fn(),
+			listSessions: vi.fn().mockResolvedValue([]),
+			deleteSession: vi.fn().mockResolvedValue({ deleted: true }),
+			readSessionManifest: vi.fn().mockResolvedValue(manifest),
+		};
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: sessionService as never,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({ tools: [], shutdown: vi.fn() }),
+			} as never,
+			createAgent: () =>
+				({
+					run: vi.fn().mockResolvedValue(createResult({ messages: [] })),
+					continue: vi.fn(),
+					canStartRun: vi.fn(() => true),
+					abort: vi.fn(),
+					subscribeEvents: vi.fn().mockReturnValue(() => {}),
+					getAgentId: vi.fn().mockReturnValue("agent-root-1"),
+					getConversationId: vi.fn().mockReturnValue("conv-root-1"),
+					shutdown: vi.fn().mockResolvedValue(undefined),
+					getMessages: vi.fn().mockReturnValue([]),
+					messages: [],
+				}) as never,
+		});
+		const events: Array<Record<string, unknown>> = [];
+		manager.subscribe((event) => events.push(event as Record<string, unknown>));
+		await manager.startSession(
+			normalizeStartInput({
+				config: createConfig({ sessionId }),
+				prompt: "hello",
+			}),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const afterStart = events.filter((e) => e.type === "session_snapshot").length;
+		expect(afterStart).toBeGreaterThan(0);
+
+		// Twelve more status changes with nothing awaited in between, so they all land while
+		// the first build is still in flight.
+		const emitStatus = (
+			manager as unknown as { emitStatus: (id: string, status: string) => void }
+		).emitStatus.bind(manager);
+		for (let i = 0; i < 12; i++) {
+			emitStatus(sessionId, `status-${i}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		const total = events.filter((e) => e.type === "session_snapshot").length;
+		// At most one in flight plus one for everything that arrived during it. Uncoalesced
+		// this would be twelve more.
+		expect(total - afterStart).toBeLessThanOrEqual(2);
+		// And the newest state is still published - coalescing must not lose the last one,
+		// which is the only one a consumer can use.
+		expect(total).toBeGreaterThan(afterStart);
+	});
+
+	it("stops tracking a session's coalescing state once nothing is owed", async () => {
+		// The map is keyed by session id, so an entry that outlives the session would grow
+		// for the lifetime of the process.
+		const sessionId = "sess-snapshot-cleanup";
+		const manifest = createManifest(sessionId);
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: {
+				ensureSessionsDir: vi.fn().mockReturnValue("/tmp/sessions"),
+				createRootSessionWithArtifacts: vi.fn().mockResolvedValue({
+					manifestPath: "/tmp/m.json",
+					messagesPath: "/tmp/msgs.json",
+					manifest,
+				}),
+				persistSessionMessages: vi.fn(),
+				updateSessionStatus: vi.fn().mockResolvedValue({
+					updated: true,
+					endedAt: "2026-01-01T00:00:01.000Z",
+				}),
+				writeSessionManifest: vi.fn(),
+				listSessions: vi.fn().mockResolvedValue([]),
+				deleteSession: vi.fn().mockResolvedValue({ deleted: true }),
+				readSessionManifest: vi.fn().mockResolvedValue(manifest),
+			} as never,
+			runtimeBuilder: {
+				build: vi.fn().mockReturnValue({ tools: [], shutdown: vi.fn() }),
+			} as never,
+			createAgent: () =>
+				({
+					run: vi.fn().mockResolvedValue(createResult({ messages: [] })),
+					continue: vi.fn(),
+					canStartRun: vi.fn(() => true),
+					abort: vi.fn(),
+					subscribeEvents: vi.fn().mockReturnValue(() => {}),
+					getAgentId: vi.fn().mockReturnValue("agent-root-1"),
+					getConversationId: vi.fn().mockReturnValue("conv-root-1"),
+					shutdown: vi.fn().mockResolvedValue(undefined),
+					getMessages: vi.fn().mockReturnValue([]),
+					messages: [],
+				}) as never,
+		});
+		manager.subscribe(() => {});
+		await manager.startSession(
+			normalizeStartInput({
+				config: createConfig({ sessionId }),
+				prompt: "hello",
+			}),
+		);
+
+		const state = (
+			manager as unknown as {
+				snapshotEmissionState: Map<string, { inFlight: boolean; queued: boolean }>;
+			}
+		).snapshotEmissionState;
+		await vi.waitFor(() => expect(state.has(sessionId)).toBe(false));
+	});
