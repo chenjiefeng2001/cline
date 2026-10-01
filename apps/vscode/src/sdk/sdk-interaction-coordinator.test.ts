@@ -446,6 +446,30 @@ describe("SdkInteractionCoordinator", () => {
 		expect(coordinator.resolvePendingMistakeLimit(undefined, "yesButtonClicked")).toBe(false)
 	})
 
+	it("settles a pending ask_question instead of dropping the resolver", async () => {
+		// The bug this pins: `clearPending` used to set `pendingAskResolve = undefined`
+		// without resolving it. That is not "no pending ask", it is a promise the agent is
+		// still awaiting, forever, after the UI has moved on. Whether the SDK wedges on
+		// that is not something this test can see - but the extension dropping a promise
+		// it owns is the defect either way, and an unsettled one is unrecoverable.
+		const task = createTaskProxy("session-123", vi.fn(), vi.fn())
+		const coordinator = new SdkInteractionCoordinator({
+			messages: new SdkMessageCoordinator({ getTask: () => task }),
+			getSessionId: () => "session-123",
+			postStateToWebview: vi.fn().mockResolvedValue(undefined),
+		})
+
+		const askPromise = coordinator.handleAskQuestion("Which file?", ["a.ts", "b.ts"], {})
+		await vi.waitFor(() => expect(task.messageStateHandler.getClineMessages()).toHaveLength(1))
+
+		coordinator.clearPending("The turn ended before this was answered.")
+
+		// Settles, and with nothing in it: the honest content of "no answer was given" is
+		// no answer, and inventing a sentence would put words in the user's mouth.
+		await expect(askPromise).resolves.toBe("")
+		expect(coordinator.resolvePendingAskQuestion("a.ts")).toBe(false)
+	})
+
 	it("clears pending tool approvals as rejected", async () => {
 		const task = createTaskProxy("session-123", vi.fn(), vi.fn())
 		const recordDeniedToolApproval = vi.fn()

@@ -439,6 +439,18 @@ export class Controller {
 				// Normal flows close their diff sessions inline; anything left here is orphaned.
 				void this.diffEdits.discardAllPreviews("turn complete")
 
+				// A turn cannot end with an approval still pending: the agent is blocked on an
+				// answer that can no longer arrive, and the footer would keep offering
+				// Approve / Reject buttons wired to a turn that is over. Settled here, before
+				// the phase decision, so the buttons and the phase are cleared together and
+				// the tool is recorded as denied rather than silently never having run.
+				//
+				// The drain already waited for the runtime to declare the turn over, so
+				// reaching this with something pending means the runtime ended the run
+				// without ever reporting the end - the same condition the fallback below
+				// guesses at, and the reason the reason string names it.
+				this.interactions.clearPending("The turn ended before this was answered.")
+
 				// A finished turn has to land on a terminal phase, or the webview keeps
 				// rendering `streaming` with a live Cancel button forever. But the phase
 				// itself is the event stream's to decide: it knows whether the turn used

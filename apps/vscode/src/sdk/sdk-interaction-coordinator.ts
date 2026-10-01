@@ -270,7 +270,20 @@ export class SdkInteractionCoordinator {
 	}
 
 	clearPending(reason: string): void {
-		this.pendingAskResolve = undefined
+		// Settle every pending interaction, do not merely forget it. A dropped resolver is
+		// a promise that never settles: the agent is still awaiting an answer to a question
+		// the user can no longer see the answer to, and the interaction is over for reasons
+		// the ask message does not mention.
+		//
+		// Empty string rather than a sentence: the honest content of "no answer was given"
+		// is nothing, and inventing a sentence injects text into the conversation that the
+		// user never typed. The reason string is still recorded on the tool denial, where it
+		// reaches the transcript through the tool row.
+		if (this.pendingAskResolve) {
+			const resolveAsk = this.pendingAskResolve
+			this.pendingAskResolve = undefined
+			resolveAsk("")
+		}
 		if (this.pendingMistakeLimitResolve) {
 			this.pendingMistakeLimitResolve({ action: "stop", reason })
 			this.pendingMistakeLimitResolve = undefined
