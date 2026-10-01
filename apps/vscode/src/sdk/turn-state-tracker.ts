@@ -25,7 +25,38 @@ import type { MessageIdMinter } from "./message-id-minter"
  * whole reason the event stream is the authority for the terminal phase.
  */
 export function isTerminalTurnPhase(phase: TurnPhase): boolean {
-	return phase === "completed" || phase === "awaiting_followup" || phase === "resumable" || phase === "error"
+	return (
+		phase === "completed" ||
+		phase === "awaiting_followup" ||
+		phase === "resumable" ||
+		phase === "error" ||
+		// A limit stop is the terminal phase for a run that reached its cap, so the
+		// turn-end fallback must leave it alone for the same reason it leaves the other
+		// four: it is the answer, and overwriting it with `completed` is the exact bug
+		// this predicate exists to prevent. It was missing from this list when the phase
+		// was introduced, and the unit tests could not see it - they tested the
+		// coordinator and this predicate separately, and the overwrite only happens when
+		// both run. turn-end.integration.test.ts is what made it visible.
+		phase === "limit_reached"
+	)
+}
+
+/**
+ * What a turn end should do to the phase, given the phase that is already set.
+ *
+ * Split out of SdkController's turn-end hook because that decision is the whole point of
+ * the bounded drain and it was only reachable by constructing the Controller - which
+ * needs the VS Code host, so nothing could test it. Here it is a pure function over one
+ * input, and the integration test drives it with a real drain and a real event.
+ *
+ * `kept` means the event stream already said how the turn ended and there is nothing
+ * left to decide. `fallback` means it never said, and the phase is a guess - which is
+ * why the caller logs it as one.
+ */
+export type TurnEndDecision = { action: "keep" } | { action: "fallback"; phase: "completed" }
+
+export function decideTurnEndPhase(currentPhase: TurnPhase): TurnEndDecision {
+	return isTerminalTurnPhase(currentPhase) ? { action: "keep" } : { action: "fallback", phase: "completed" }
 }
 
 export class TurnStateTracker {

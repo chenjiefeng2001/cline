@@ -147,7 +147,7 @@ import {
 import { type DeltaPayload, StatePostDebouncer } from "./state-post-debouncer"
 import { createTaskProxy, type TaskProxy } from "./task-proxy"
 import { syncTelemetrySettingFromSharedGlobalSettings } from "./telemetry-settings-sync"
-import { isTerminalTurnPhase, TurnStateTracker } from "./turn-state-tracker"
+import { decideTurnEndPhase, TurnStateTracker } from "./turn-state-tracker"
 import { VscodeSessionHost } from "./vscode-session-host"
 import type { VscodeTerminalExecutionMode } from "./vscode-terminal-execution-mode"
 import { WebviewGrpcBridge } from "./webview-grpc-bridge"
@@ -465,15 +465,15 @@ export class Controller {
 				// anchorTs is a footer that goes stale as soon as the tail moves. The
 				// event stream supplies its own anchor now, so this only has to cover the
 				// fallback - a turn the runtime ended without ever reporting.
-				const phase = this.turnStateTracker.currentPhase
-				if (isTerminalTurnPhase(phase)) {
+				const decision = decideTurnEndPhase(this.turnStateTracker.currentPhase)
+				if (decision.action === "keep") {
 					Logger.log(
-						`[SdkController] Turn end: keeping the phase the event stream reported (${phase}); ` +
-							`the send promise resolved after it landed`,
+						`[SdkController] Turn end: keeping the phase the event stream reported ` +
+							`(${this.turnStateTracker.currentPhase}); the send promise resolved after it landed`,
 					)
 				} else {
 					const lastMessage = this.task?.messageStateHandler.getClineMessages().at(-1)
-					this.turnStateTracker.set("completed", lastMessage?.ts)
+					this.turnStateTracker.set(decision.phase, lastMessage?.ts)
 				}
 
 				this.postStateToWebview().catch((err) => {

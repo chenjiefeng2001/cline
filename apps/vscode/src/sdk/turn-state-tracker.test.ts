@@ -1,6 +1,7 @@
+import type { TurnPhase } from "@shared/ExtensionMessage"
 import { describe, expect, it } from "vitest"
 import { MessageIdMinter } from "./message-id-minter"
-import { isTerminalTurnPhase, TurnStateTracker } from "./turn-state-tracker"
+import { decideTurnEndPhase, isTerminalTurnPhase, TurnStateTracker } from "./turn-state-tracker"
 
 describe("TurnStateTracker", () => {
 	it("starts idle", () => {
@@ -69,11 +70,37 @@ describe("isTerminalTurnPhase", () => {
 		["awaiting_followup", true],
 		["resumable", true],
 		["error", true],
+		["limit_reached", true],
 		["streaming", false],
 		["awaiting_approval", false],
 		["idle", false],
 	] as const)("%s -> %s", (phase, expected) => {
 		expect(isTerminalTurnPhase(phase)).toBe(expected)
+	})
+
+	it("treats every phase it can be handed as a decision, so a new one cannot be half-added", () => {
+		// This predicate and TURN_PHASES in the webview have to agree, and they are in
+		// different projects with no shared type between them. The exhaustive check that
+		// would have caught the missing `limit_reached` lives in the integration test,
+		// which is the only place both halves run; this asserts the shape of the decision
+		// itself so a future phase cannot be added to one side alone and pass here.
+		const phases: TurnPhase[] = [
+			"idle",
+			"streaming",
+			"completed",
+			"resumable",
+			"error",
+			"awaiting_followup",
+			"awaiting_approval",
+			"limit_reached",
+		]
+		for (const phase of phases) {
+			expect(typeof decideTurnEndPhase(phase).action, phase).toBe("string")
+		}
+		// `idle` is deliberately non-terminal so a restored transcript is not declared
+		// finished; `streaming` and `awaiting_approval` are live turns.
+		expect(decideTurnEndPhase("streaming")).toEqual({ action: "fallback", phase: "completed" })
+		expect(decideTurnEndPhase("limit_reached")).toEqual({ action: "keep" })
 	})
 
 	it("treats idle as non-terminal so a restored transcript is not declared finished", () => {
