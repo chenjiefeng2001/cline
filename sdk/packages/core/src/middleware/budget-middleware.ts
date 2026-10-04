@@ -1,6 +1,21 @@
 /**
  * Budget middleware [roadmap P1-4].
  *
+ * **Not wired, and NOT a parity gap.** This is the one of the three unwired
+ * middlewares whose capability does not exist elsewhere: there is no per-run
+ * tool-call ceiling anywhere in the runtime — only `maxIterations`, which bounds
+ * model round-trips (`agent-runtime.ts:1177`). So this file is not superseded.
+ *
+ * It is absent from the chain because the limit it enforces is a *product
+ * decision*, not an oversight. Turning it on requires a `maxToolCalls` setting
+ * with a default the user has agreed to; adding an arbitrary ceiling would
+ * silently truncate runs. Note the tension with the iteration cap, which this
+ * session made unlimited by default (`maxIterationsSetting: 0`): capping tool
+ * calls while leaving iterations uncapped would cap the wrong axis.
+ *
+ * `createBudgetMiddleware` is exported and unit-tested, so enabling it later is a
+ * one-line chain change once the setting exists.
+ *
  * Per-chain tool-call budget accounting: when the chain exhausts its call
  * budget the middleware returns a structured denial result instead of
  * executing further calls. Budget state lives in the middleware instance;

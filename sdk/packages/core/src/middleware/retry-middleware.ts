@@ -1,6 +1,25 @@
 /**
  * Retry middleware [roadmap P1-4].
  *
+ * **Superseded — do not add this to the tool chain.**
+ *
+ * The runtime already retries failed tool calls, per tool, with the retryable
+ * flag honoured and the backoff capped:
+ * `agent-runtime.ts:2562` (`resolveToolMaxRetries`, reading
+ * `AgentTool.maxRetries`, bounded by `MAX_TOOL_RETRIES = 10`) and
+ * `agent-runtime.ts:2576` (`toolRetryDelayMs`, capped at
+ * `MAX_TOOL_RETRY_DELAY_MS`).
+ *
+ * Stacking this on top would multiply the two: a single call could run up to
+ * `(1 + tool.maxRetries) * (1 + middleware.maxRetries)` times — 33 attempts at
+ * the defaults. Beyond the cost, the middleware's default `retryOn` retries
+ * *every* failure, including permanent ones (bad input, missing file, a
+ * deliberate throw from the tool), which the runtime's `retryable` check
+ * correctly refuses. That turns a fast, honest failure into a slow, masked one.
+ *
+ * Kept for the same reason as `approval-middleware.ts`: it is exported,
+ * documented and tested, and the chain framework is in active use.
+ *
  * Retries failed tool calls with exponential backoff. The retry decision is
  * pluggable (`retryOn`); the default retries every failure. The sleep is
  * injectable so tests run without real backoff waits.

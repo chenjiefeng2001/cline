@@ -163,6 +163,25 @@ export interface AgentToolDefinition {
 	name: string;
 	description: string;
 	inputSchema: Record<string, unknown>;
+	/**
+	 * Whether this tool may run at the same time as its siblings in one assistant
+	 * turn.
+	 *
+	 * - `"safe"` — no shared mutable state and no external side effects, so it can
+	 *   join a parallel batch with other safe tools (`read_files`, `search_codebase`).
+	 * - `"exclusive"` — the DEFAULT. Runs alone, after every earlier tool in the
+	 *   turn has settled. Use for anything that writes, spawns, or mutates
+	 *   process-level state.
+	 *
+	 * Defaulting to `"exclusive"` is deliberate. A tool that has not been audited for
+	 * concurrency must not silently start running beside another one: two `editor`
+	 * calls on the same file interleave, and two `run_commands` calls race on the
+	 * terminal's working directory. Opt in per tool rather than inverting the
+	 * default.
+	 *
+	 * Only consulted when the run resolves to `toolExecution: "parallel"`.
+	 */
+	concurrency?: "safe" | "exclusive";
 	lifecycle?: {
 		/**
 		 * Whether a successful call completes the run after the current tool batch settles.
@@ -198,6 +217,15 @@ export interface AgentToolContext {
 	toolCallId?: string;
 	toolCallIndex?: number;
 	signal?: AbortSignal;
+	/**
+	 * Workspace-relative subdirectory that scopes name-pattern lookups.
+	 *
+	 * Set by the glob tool for the duration of one call rather than passed
+	 * through the executor signature, so one executor serves every pattern in a
+	 * batched call. Anything outside the workspace root is rejected by the
+	 * executor rather than clamped here.
+	 */
+	globPath?: string;
 	metadata?: Record<string, unknown>;
 	snapshot?: AgentRuntimeStateSnapshot;
 	emitUpdate?: (update: unknown) => void;

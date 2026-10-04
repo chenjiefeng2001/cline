@@ -83,6 +83,7 @@ export function createTool<TInput, TOutput>(config: {
 	description: string;
 	inputSchema: Record<string, unknown>;
 	execute: (input: TInput, context: AgentToolContext) => Promise<TOutput>;
+	concurrency?: AgentTool<TInput, TOutput>["concurrency"];
 	lifecycle?: AgentTool<TInput, TOutput>["lifecycle"];
 	timeoutMs?: number;
 	retryable?: boolean;
@@ -97,6 +98,7 @@ export function createTool<TSchema extends z.ZodTypeAny, TOutput>(config: {
 		input: z.infer<TSchema>,
 		context: AgentToolContext,
 	) => Promise<TOutput>;
+	concurrency?: AgentTool<z.infer<TSchema>, TOutput>["concurrency"];
 	lifecycle?: AgentTool<z.infer<TSchema>, TOutput>["lifecycle"];
 	timeoutMs?: number;
 	retryable?: boolean;
@@ -108,6 +110,7 @@ export function createTool<TInput, TOutput>(config: {
 	description: string;
 	inputSchema: Record<string, unknown> | z.ZodTypeAny;
 	execute: (input: TInput, context: AgentToolContext) => Promise<TOutput>;
+	concurrency?: AgentTool<TInput, TOutput>["concurrency"];
 	lifecycle?: AgentTool<TInput, TOutput>["lifecycle"];
 	timeoutMs?: number;
 	retryable?: boolean;
@@ -129,6 +132,9 @@ export function createTool<TInput, TOutput>(config: {
 		name: config.name,
 		description: config.description,
 		inputSchema,
+		// Defaulted rather than left undefined so the value is visible at every call
+		// site; `exclusive` is the conservative choice (see AgentToolDefinition).
+		concurrency: config.concurrency ?? "exclusive",
 		lifecycle: config.lifecycle,
 		timeoutMs: config.timeoutMs ?? 30_000,
 		retryable: config.retryable ?? false,

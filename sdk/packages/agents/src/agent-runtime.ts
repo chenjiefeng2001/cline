@@ -29,6 +29,7 @@ import {
 	captureAgentUnexpectedReasoningTokens,
 	captureSdkError,
 	estimateTokens,
+	isLikelyAuthError,
 	mergeModelOptions,
 	normalizeAgentRunBudget,
 	normalizeJsonLikeStringsForSchema,
@@ -1202,6 +1203,27 @@ export class AgentRuntime {
 				if (finishReason === "aborted") {
 					throw this.normalizeAbortError();
 				}
+				// An auth failure must ALWAYS surface, and it must do so before the
+				// partial message is persisted.
+				//
+				// `reason: "error"` is not uniformly fatal: a tool-input parse error
+				// deliberately stays recoverable so the model can try again, which is
+				// handled further down. But an expired or rejected credential cannot
+				// be fixed by re-running the turn, and it used to be swallowed. Text
+				// emitted before the 401 made `message.content` non-empty, so the
+				// `toolCalls.length === 0` guard never fired; the provider's
+				// "re-authenticate your Cline account" string was pushed as a normal
+				// assistant message and returned as if the model had produced it.
+				//
+				// Nothing threw, so `runWithAuthRetry` never ran and no token refresh
+				// was attempted — the run silently "succeeded" with an auth error as
+				// its answer. Checking before the push keeps that text out of the
+				// transcript entirely and lets the host refresh once and retry.
+				if (finishReason === "error" && isLikelyAuthError(this.state.lastError)) {
+					throw new Error(
+						this.state.lastError ?? "Authentication failed",
+					);
+				}
 				if (message.content.length === 0) {
 					throw new Error(
 						finishReason === "error"
@@ -1929,33 +1951,118 @@ export class AgentRuntime {
 		}
 
 		if (this.config.toolExecution === "parallel") {
-			const settled = await this.executePreparedToolsInParallel(prepared);
 			this.throwIfAborted();
-			return settled.map((outcome, index) =>
-				outcome.status === "fulfilled"
-					? outcome.value
-					: this.createToolFailureMessage(
-							prepared[index] as PreparedToolExecution,
-							outcome.reason,
-						),
-			);
+			return this.executePreparedInConcurrencyBatches(prepared);
 		}
 
 		const results: AgentMessage[] = [];
 		for (const execution of prepared) {
-			try {
-				results.push(await this.executePreparedTool(execution));
-			} catch (error) {
-				if (
-					this.abortController?.signal.aborted ||
-					error instanceof AgentRuntimeAbortError
-				) {
-					throw error;
-				}
-				results.push(this.createToolFailureMessage(execution, error));
-			}
+			results.push(await this.runSinglePreparedTool(execution));
 		}
 		return results;
+	}
+
+	/**
+	 * Execute one prepared tool, converting a failure into a tool-error message.
+	 *
+	 * Aborts are re-thrown rather than swallowed: a cancelled run must not look like
+	 * a tool that merely failed.
+	 */
+	private async runSinglePreparedTool(execution: PreparedToolExecution): Promise<AgentMessage> {
+		try {
+			return await this.executePreparedTool(execution);
+		} catch (error) {
+			if (this.abortController?.signal.aborted || error instanceof AgentRuntimeAbortError) {
+				throw error;
+			}
+			return this.createToolFailureMessage(execution, error);
+		}
+	}
+
+	/**
+	 * Run `prepared` in order, grouping consecutive concurrency-safe tools into
+	 * parallel batches and running everything else alone.
+	 *
+	 * The batch boundaries are what make parallel execution safe with the tool set we
+	 * actually have. `toolExecution: "parallel"` used to hand the whole turn's tool
+	 * calls to the worker pool at once, which is only correct if every tool in the
+	 * batch is safe to run beside the others — and nothing in the tool contract said
+	 * which those were. Two `editor` calls on one file, or two `run_commands` calls
+	 * sharing the terminal's working directory, would interleave.
+	 *
+	 * So each tool now declares `concurrency: "safe" | "exclusive"`, exclusive being
+	 * the default. Consecutive safe tools batch together; an exclusive tool closes the
+	 * current batch and runs on its own, which also preserves the ordering guarantee
+	 * the sequential path gives: a tool always sees the effects of the tools the
+	 * model emitted before it.
+	 *
+	 * Result order always matches `prepared`, so the transcript is byte-identical
+	 * whichever mode executed it.
+	 */
+	private async executePreparedInConcurrencyBatches(prepared: PreparedToolExecution[]): Promise<AgentMessage[]> {
+		const results = new Array<AgentMessage>(prepared.length);
+
+		for (const batch of this.partitionByConcurrency(prepared)) {
+			this.throwIfAborted();
+
+			if (batch.length === 1) {
+				results[batch[0] as number] = await this.runSinglePreparedTool(
+					prepared[batch[0] as number] as PreparedToolExecution,
+				);
+				continue;
+			}
+
+			const settled = await this.executePreparedToolsInParallel(
+				batch.map((index) => prepared[index] as PreparedToolExecution),
+			);
+			this.throwIfAborted();
+			settled.forEach((outcome, offset) => {
+				const index = batch[offset] as number;
+				const execution = prepared[index] as PreparedToolExecution;
+				results[index] =
+					outcome.status === "fulfilled" ? outcome.value : this.createToolFailureMessage(execution, outcome.reason);
+			});
+		}
+
+		return results;
+	}
+
+	/**
+	 * Split prepared executions into ordered batches of indices: runs of
+	 * concurrency-safe tools, each unsafe tool alone.
+	 */
+	private partitionByConcurrency(prepared: PreparedToolExecution[]): number[][] {
+		const batches: number[][] = [];
+		let safeRun: number[] = [];
+		const closeSafeRun = () => {
+			if (safeRun.length > 0) {
+				batches.push(safeRun);
+				safeRun = [];
+			}
+		};
+
+		prepared.forEach((execution, index) => {
+			if (this.isConcurrencySafe(execution)) {
+				safeRun.push(index);
+				return;
+			}
+			closeSafeRun();
+			batches.push([index]);
+		});
+		closeSafeRun();
+
+		return batches;
+	}
+
+	/**
+	 * A tool is safe to batch only if its definition opted in. A skipped call never
+	 * executes, so it cannot touch shared state and is safe wherever it lands.
+	 */
+	private isConcurrencySafe(execution: PreparedToolExecution): boolean {
+		if (execution.skipReason !== undefined) {
+			return true;
+		}
+		return execution.tool?.concurrency === "safe";
 	}
 
 	private async executePreparedToolsInParallel(

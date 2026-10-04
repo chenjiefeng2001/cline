@@ -198,6 +198,62 @@ describe("AgentRuntime", () => {
 		expect(result.messages[0]?.role).toBe("user");
 	});
 
+	it("surfaces a mid-stream auth failure even after text was emitted", async () => {
+		// Regression: a 401 that arrives AFTER the stream produced text used to be
+		// swallowed. `message.content` was non-empty, so the `toolCalls.length === 0`
+		// guard never fired, the provider's "re-authenticate your Cline account"
+		// string was returned as if the model had said it, and because nothing threw
+		// the host never refreshed the token. The run silently "succeeded".
+		const model = new ScriptedModel([
+			() => [
+				{ type: "text-delta", text: "Unauthorized: Please sign in" },
+				{
+					type: "finish",
+					reason: "error",
+					error:
+						"Unauthorized: Please make sure you're using the latest version of Cline and re-authenticate your Cline account.",
+				},
+			],
+		]);
+		const runtime = new AgentRuntime({ model });
+
+		const result = await runtime.run("Hi");
+
+		expect(result.status).toBe("failed");
+		expect(result.error?.message).toContain("re-authenticate your Cline account");
+		// The decisive assertion: the run FAILED. Before this fix the same script
+		// returned status "completed" with the auth string as its answer, so the
+		// host's auth-retry wrapper never ran and no token refresh happened.
+		expect(result.outputText).not.toContain("re-authenticate your Cline account");
+	});
+
+	it("keeps a non-auth stream error recoverable when a tool call was emitted", async () => {
+		// The counterpart to the case above, and the reason the auth case cannot be
+		// fixed by making every `reason: "error"` fatal: a tool-input parse error is
+		// deliberately recoverable so the model can try again.
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_1",
+					toolName: "echo",
+					inputText: '{"text":"hi"}',
+				},
+				{ type: "finish", reason: "error", error: "upstream hiccup" },
+			],
+			() => [
+				{ type: "text-delta", text: "recovered" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({ model, tools: [createEchoTool()] });
+
+		const result = await runtime.run("Hi");
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("recovered");
+	});
+
 	it("calls afterRun before run-failed for a failed run", async () => {
 		const lifecycle: string[] = [];
 		const model = new ScriptedModel([
@@ -599,6 +655,9 @@ describe("AgentRuntime", () => {
 					name: "limited",
 					description: "Concurrency-limited tool",
 					inputSchema: { type: "object" },
+					// Opt in, or the exclusive default runs it alone and the cap is
+					// never exercised.
+					concurrency: "safe",
 					execute: async () => {
 						active += 1;
 						maxActive = Math.max(maxActive, active);
@@ -2266,10 +2325,14 @@ describe("AgentRuntime", () => {
 	it("executes tools in parallel but preserves assistant order in appended messages", async () => {
 		const executionOrder: string[] = [];
 		const finishOrder: string[] = [];
+		// `concurrency: "safe"` is what puts a tool in a parallel batch. The contract
+		// default is "exclusive", so a test that means to demonstrate parallelism has
+		// to opt in.
 		const slow: AgentTool = {
 			name: "slow",
 			description: "slow tool",
 			inputSchema: { type: "object" },
+			concurrency: "safe",
 			async execute() {
 				executionOrder.push("slow-start");
 				await new Promise((resolve) => setTimeout(resolve, 25));
@@ -2281,6 +2344,7 @@ describe("AgentRuntime", () => {
 			name: "fast",
 			description: "fast tool",
 			inputSchema: { type: "object" },
+			concurrency: "safe",
 			async execute() {
 				executionOrder.push("fast-start");
 				finishOrder.push("fast-finish");
@@ -2324,6 +2388,123 @@ describe("AgentRuntime", () => {
 		);
 		expect(toolMessages[0]?.content[0]).toMatchObject({ toolName: "slow" });
 		expect(toolMessages[1]?.content[0]).toMatchObject({ toolName: "fast" });
+	});
+
+	/**
+	 * `toolExecution: "parallel"` used to hand the whole turn's tool calls to the
+	 * worker pool at once, which is only correct if every tool in the batch is safe to
+	 * run beside the others — and nothing in the tool contract said which those were.
+	 * Two `editor` calls on one file, or two `run_commands` calls sharing the terminal's
+	 * working directory, would interleave. Each tool now declares its own
+	 * `concurrency`, and this covers how the runtime honours it.
+	 */
+	describe("concurrency partitioning", () => {
+		const toolCall = (toolName: string, id: string) => ({
+			type: "tool-call-delta" as const,
+			toolCallId: id,
+			toolName,
+			inputText: "{}",
+		});
+
+		/** Model that emits the given tool names in one turn, then finishes. */
+		const modelEmitting = (names: string[]) =>
+			new ScriptedModel([
+				() => [
+					...names.map((name, i) => toolCall(name, `${name}_${i}`)),
+					{ type: "finish", reason: "tool-calls" },
+				],
+				() => [
+					{ type: "text-delta", text: "done" },
+					{ type: "finish", reason: "stop" },
+				],
+			]);
+
+		const tracker = (log: string[], name: string, delayMs = 20) => ({
+			name,
+			description: `${name} tool`,
+			inputSchema: { type: "object" },
+			execute: async () => {
+				log.push(`${name}:start`);
+				await new Promise((resolve) => setTimeout(resolve, delayMs));
+				log.push(`${name}:end`);
+				return { name };
+			},
+		});
+
+		it("batches consecutive safe tools and runs unsafe tools alone, in order", async () => {
+			const log: string[] = [];
+			const runtime = new AgentRuntime({
+				model: modelEmitting(["read_a", "write", "read_b", "read_c"]),
+				toolExecution: "parallel",
+				tools: [
+					{ ...tracker(log, "read_a"), concurrency: "safe" as const },
+					// `write` deliberately has no `concurrency`, i.e. the exclusive default.
+					tracker(log, "write"),
+					{ ...tracker(log, "read_b", 30), concurrency: "safe" as const },
+					// Distinct durations so the interleaving of the concurrent pair is
+					// deterministic; two equal-length tasks can finish either way.
+					{ ...tracker(log, "read_c", 5), concurrency: "safe" as const },
+				],
+			});
+
+			await runtime.run("go");
+
+			// read_a starts; `write` cannot begin until read_a has finished; then
+			// read_b and read_c overlap. A whole-batch pool would have started all four.
+			expect(log).toEqual([
+				"read_a:start",
+				"read_a:end",
+				"write:start",
+				"write:end",
+				"read_b:start",
+				"read_c:start",
+				"read_c:end",
+				"read_b:end",
+			]);
+		});
+
+		it("runs every tool serially when none opted in", async () => {
+			const log: string[] = [];
+			const runtime = new AgentRuntime({
+				model: modelEmitting(["a", "b", "c"]),
+				toolExecution: "parallel",
+				tools: [tracker(log, "a"), tracker(log, "b"), tracker(log, "c")],
+			});
+
+			await runtime.run("go");
+
+			// Default "exclusive" means "parallel" degrades to sequential rather than
+			// racing. This is the property that makes the new default safe.
+			expect(log).toEqual([
+				"a:start",
+				"a:end",
+				"b:start",
+				"b:end",
+				"c:start",
+				"c:end",
+			]);
+		});
+
+		it("emits tool results in emission order regardless of completion order", async () => {
+			const log: string[] = [];
+			const runtime = new AgentRuntime({
+				model: modelEmitting(["slow", "quick"]),
+				toolExecution: "parallel",
+				tools: [
+					{ ...tracker(log, "slow", 40), concurrency: "safe" as const },
+					{ ...tracker(log, "quick", 1), concurrency: "safe" as const },
+				],
+			});
+
+			const result = await runtime.run("go");
+
+			// quick finishes first...
+			expect(log.indexOf("quick:end")).toBeLessThan(log.indexOf("slow:end"));
+			// ...but the transcript still records them in the order the model asked.
+			const toolMessages = result.messages.filter((m) => m.role === "tool");
+			expect(toolMessages[0]?.content[0]).toMatchObject({ toolName: "slow" });
+			expect(toolMessages[1]?.content[0]).toMatchObject({ toolName: "quick" });
+		});
 	});
 
 	it("captures events, logger calls, telemetry, and failed tool runs", async () => {
