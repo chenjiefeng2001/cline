@@ -25,7 +25,7 @@ Core/host-facing agent events are emitted through `AgentConfig.onEvent` and core
 | Event | Description |
 |-------|-------------|
 | `content_start` | Text/reasoning/tool content begins |
-| `content_update` | Tool progress update |
+| `content_update` | Tool progress update: per-file progress from `read_files`, throttled output lines from `run_commands` (rendered by the VS Code extension; the CLI does not consume them yet) |
 | `content_end` | Text/reasoning/tool content completes |
 | `iteration_start` | Loop iteration begins |
 | `iteration_end` | Loop iteration completes |
@@ -39,7 +39,7 @@ Core/host-facing agent events are emitted through `AgentConfig.onEvent` and core
 ```typescript
 interface AgentDoneEvent {
   type: "done"
-  reason: "completed" | "max_iterations" | "aborted" | "mistake_limit" | "error"
+  reason: "completed" | "max_iterations" | "budget_exhausted" | "mistake_limit" | "aborted" | "error"
   text: string
   iterations: number
   usage?: LegacyAgentUsage

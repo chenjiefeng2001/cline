@@ -20,9 +20,9 @@ Skills use progressive loading to maximize efficiency:
 |-------|-------------|------------|---------|
 | Metadata | Always (at startup) | ~100 tokens per skill | `name` and `description` from YAML frontmatter |
 | Instructions | When skill is triggered | Under 5k tokens | SKILL.md body with instructions and guidance |
-| Resources | As needed | Effectively unlimited | Bundled files accessed via `read_file` or executed scripts |
+| Resources | As needed | Effectively unlimited | Bundled files accessed via `read_files` or executed scripts |
 
-When you send a message, Cline sees a list of available skills with their descriptions. If your request matches a skill's description, Cline activates it using the `use_skill` tool, which loads the full instructions from SKILL.md.
+When you send a message, Cline sees a list of available skills with their descriptions. If your request matches a skill's description, Cline activates it using the `skills` tool, which loads the full instructions from SKILL.md.
 
 ## Triggering Skills with Slash Commands
 
@@ -220,7 +220,7 @@ Run the validation script to check your configuration:
 python scripts/validate.py
 ```
 
-Cline reads documentation files using `read_file` when the instructions reference them. Scripts can be executed directly, and only the script's output enters the context window.
+Cline reads documentation files using `read_files` when the instructions reference them. Scripts can be executed directly, and only the script's output enters the context window.
 
 | Use Scripts For | Use Instructions For |
 |-----------------|---------------------|

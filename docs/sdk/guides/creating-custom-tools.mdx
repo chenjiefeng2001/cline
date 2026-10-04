@@ -38,7 +38,7 @@ For working examples of tools in real agents, see the [cli-agent](https://github
 
 ## Anatomy of a Tool
 
-Every tool has four parts:
+Every tool has four required parts:
 
 | Field | Purpose |
 |-------|---------|
@@ -46,6 +46,21 @@ Every tool has four parts:
 | `description` | LLM reads this to decide when to use the tool |
 | `inputSchema` | Zod schema or JSON Schema defining accepted arguments |
 | `execute` | Function that does the work |
+
+And a set of optional parts that decide how the runtime treats it:
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `concurrency` | `"exclusive"` | `"safe"` lets the runtime batch it with other safe tools in one turn |
+| `timeoutMs` | `30000` | Per-attempt bound; a timeout becomes a recoverable tool error |
+| `retryable` | `false` | Opt in to bounded retries; only for idempotent work |
+| `maxRetries` | `0` | Attempts after the first |
+| `validateInput` | – | Validate or transform input, or throw a model-visible error |
+
+Leave `concurrency` alone unless the tool is genuinely read-only with no shared
+state. The default is exclusive so that a new tool is safe by omission; the
+built-in `read_files`, `search_codebase` and `glob` are the only tools that opt
+into `"safe"` today.
 
 ### The Name
 
@@ -242,4 +257,4 @@ Good tools are specific and predictable.
 - Put constraints in the description: rate limits, read-only behavior, required permissions.
 - Add descriptions for every input property.
 - Return structured JSON instead of prose when possible.
-- Respect `context.abortSignal` in long-running tools.
+- Respect `context.signal` in long-running tools.

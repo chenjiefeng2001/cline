@@ -49,22 +49,35 @@ If auto-approve is off, Cline will ask for your approval before launching subage
 
 ## What Subagents Can Do
 
-Subagents are read-only research agents. Here is what they have access to:
+A subagent runs the same built-in tools the parent has, **filtered by the
+`tools:` list in its agent definition**. There is no separate read-only tool set:
+whether a subagent can edit files or run commands is decided by that list, so
+what a subagent can do is something you configure and can read off the
+definition.
 
-| Tool | Purpose |
-|------|---------|
-| `read_file` | Read file contents |
-| `list_files` | List directory contents |
-| `search_files` | Regex search across files |
-| `list_code_definition_names` | List top-level classes, functions, and methods |
-| `execute_command` | Run read-only commands (`ls`, `grep`, `git log`, `git diff`, etc.) |
-| `use_skill` | Load and activate skills |
+The names it filters down from are the standard ones — `read_files`,
+`search_codebase`, `glob`, `run_commands`, `fetch_web_content`, `editor`,
+`apply_patch`, `skills`, `ask_question`, `submit_and_exit` — so a definition
+naming anything else (`read_file`, `search_files`, `list_files`,
+`list_code_definition_names`, `execute_command`, `use_skill`) matches nothing and
+silently produces a subagent with no tools at all.
 
-Subagents cannot write files, apply patches, use the browser, access MCP servers, or perform web searches. They also cannot spawn their own subagents.
+To keep a subagent read-only, list only the reading tools in its definition:
+
+```yaml
+tools:
+  - read_files
+  - search_codebase
+  - glob
+```
+
+Subagents do not spawn further subagents.
 
 <Note>
-  Commands run by subagents execute in the background and are restricted to read-only operations. Subagents will not run commands that modify files or system state.
-  Subagents also benefit from command pipelines and filters to narrow output quickly before reading files, for example `rg ... | sort | uniq`.
+  Whether a command a subagent runs is read-only is decided by command
+  permissions, not by the subagent: the same approval and permission settings
+  apply. Subagents also benefit from narrowing output with pipelines and filters
+  before reading files, for example `rg ... | sort | uniq`.
 </Note>
 
 ## When to Use Subagents

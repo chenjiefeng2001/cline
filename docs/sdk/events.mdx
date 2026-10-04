@@ -40,6 +40,31 @@ Common host-facing event categories:
 | Notices | `notice` | Recovery and status updates |
 | Completion | `done`, `error` | Final state and failure handling |
 
+### Live tool output
+
+`content_update` is how a long tool reports progress while it runs. `read_files`
+emits one update per file, and `run_commands` emits throttled output lines with a
+final flush, so a build that takes a minute does not look identical to a hang.
+
+Updates are progress only and are never the tool's result. Whether they reach the
+user depends on the host: the VS Code extension maps them onto the existing
+partial tool message and renders them, while the CLI currently does not consume
+them and returns the tool output in one piece at the end.
+
+`done.reason` reports how a run ended, including the guardrails:
+
+| Reason | Meaning |
+|--------|---------|
+| `completed` | The model finished |
+| `max_iterations` | The iteration ceiling was reached |
+| `budget_exhausted` | The spend ceiling was reached |
+| `mistake_limit` | Too many consecutive mistakes |
+| `aborted` | The run was cancelled |
+| `error` | The run failed |
+
+`max_iterations` and `budget_exhausted` are outcomes, not crashes: the in-flight
+turn completes and every tool call still receives a result.
+
 ## ClineCore Session Events
 
 Use `cline.subscribe()` for session-level events:
