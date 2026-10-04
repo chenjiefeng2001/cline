@@ -1,4 +1,7 @@
-import { resolveProviderRequestHeaders } from "@cline/llms";
+import {
+	resolveClientIdentityOverridesFromEnv,
+	resolveProviderRequestHeaders,
+} from "@cline/llms";
 import type {
 	AgentConfig,
 	AgentEvent,
@@ -182,6 +185,9 @@ function buildProviderConfig(
 			config: config.headers,
 			session: sessionProviderConfig?.headers,
 		},
+		// Deployment-level identity overrides. Read here rather than inside the
+		// header builder so the builder stays a pure function of its input.
+		identityOverrides: resolveClientIdentityOverridesFromEnv(),
 	});
 	const settings: ProviderSettings = {
 		...(stored ?? {}),

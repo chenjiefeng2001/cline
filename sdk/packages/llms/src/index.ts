@@ -98,10 +98,12 @@ export type * from "./providers/gateway";
 export { createGateway, DefaultGateway } from "./providers/gateway";
 export { resolveProviderModelCatalogKeys } from "./providers/provider-keys";
 export {
+	CLIENT_IDENTITY_ENV_KEYS,
 	type OpenAICodexRequestHeaderContext,
 	type ProviderRequestHeaderClientContext,
 	type ProviderRequestHeaderLayers,
 	type ResolveProviderRequestHeadersInput,
+	resolveClientIdentityOverridesFromEnv,
 	resolveProviderRequestHeaders,
 } from "./providers/request-headers";
 export { disposeLangfuseTelemetry } from "./services/langfuse-telemetry";

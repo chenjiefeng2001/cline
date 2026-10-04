@@ -1,4 +1,7 @@
-import { resolveProviderRequestHeaders } from "@cline/llms";
+import {
+	resolveClientIdentityOverridesFromEnv,
+	resolveProviderRequestHeaders,
+} from "@cline/llms";
 import type {
 	AgentEvent,
 	AgentFinishReason,
@@ -154,6 +157,8 @@ function buildCommandSessionConfig(
 		headers: {
 			config: input.config.headers,
 		},
+		// Deployment-level identity overrides; see resolveClientIdentityOverridesFromEnv.
+		identityOverrides: resolveClientIdentityOverridesFromEnv(),
 	});
 	if (headers) {
 		sessionConfig.headers = headers;
