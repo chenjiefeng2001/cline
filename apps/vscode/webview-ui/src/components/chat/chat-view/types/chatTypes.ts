@@ -94,6 +94,29 @@ export interface ScrollBehavior {
 	setPendingScrollToMessage: React.Dispatch<React.SetStateAction<number | null>>
 	scrolledPastUserMessage: ClineMessage | null
 	handleRangeChanged: (range: ListRange) => void
+	/**
+	 * Rows currently rendered, or null until Virtuoso reports its first range.
+	 *
+	 * The only exact measure of viewport position in a virtualized list: the pixel
+	 * height of rows that are not mounted is unknowable, but the index range is not.
+	 */
+	visibleRange: ListRange | null
+	/**
+	 * Scroll to a row index in `groupedMessages`.
+	 *
+	 * Detaches bottom pinning by default, so a jump made while the agent is
+	 * streaming is not undone by the next chunk; pinning re-engages on reaching
+	 * the bottom.
+	 */
+	scrollToGroupIndex: (
+		groupIndex: number,
+		options?: {
+			align?: "start" | "center" | "end"
+			behavior?: "smooth" | "auto"
+			/** Set false to move without releasing bottom pinning. */
+			disableAutoScroll?: boolean
+		},
+	) => void
 }
 
 /**

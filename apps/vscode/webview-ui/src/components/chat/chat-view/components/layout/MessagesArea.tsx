@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils"
 import { MessageRowContext } from "../../context/MessageRowContext"
 import type { ChatState, MessageHandlers, ScrollBehavior } from "../../types/chatTypes"
 import { MessageRenderer } from "../messages/MessageRenderer"
+import { HistoryOverviewRail } from "./HistoryOverviewRail"
 
 interface MessagesAreaProps {
 	task: ClineMessage
@@ -54,7 +55,46 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 		scrollToMessage,
 		scrollToBottomSmooth,
 		handleLastRowContentChange,
+		visibleRange,
+		scrollToGroupIndex,
 	} = scrollBehavior
+
+	/**
+	 * Row indices where a user message starts a new turn, for the overview rail's
+	 * markers. A row can be a group (a collapsed browser session), so a turn counts
+	 * as started when any message in the row is user feedback.
+	 *
+	 * Derived from `groupedMessages` rather than `visibleMessages` because the rail
+	 * positions itself in row-index space, and those two index spaces differ.
+	 */
+	const turnIndices = useMemo(() => {
+		const indices: number[] = []
+		groupedMessages.forEach((row, index) => {
+			const messages = Array.isArray(row) ? row : [row]
+			if (messages.some((msg) => msg.say === "user_feedback")) {
+				indices.push(index)
+			}
+		})
+		return indices
+	}, [groupedMessages])
+
+	/**
+	 * Viewport as row indices for the rail.
+	 *
+	 * Before Virtuoso reports its first range, assume the viewport is at the bottom:
+	 * that is where the list is initialised, and defaulting to the top would flash a
+	 * thumb at the wrong end of a long history on mount.
+	 */
+	const overviewRange = useMemo(() => {
+		const lastIndex = Math.max(0, groupedMessages.length - 1)
+		if (!visibleRange) {
+			return { startIndex: lastIndex, endIndex: lastIndex }
+		}
+		return {
+			startIndex: Math.min(Math.max(0, visibleRange.startIndex), lastIndex),
+			endIndex: Math.min(Math.max(0, visibleRange.endIndex), lastIndex),
+		}
+	}, [visibleRange, groupedMessages.length])
 
 	// Find the index of the scrolled past user message for scrolling
 	const scrolledPastUserMessageIndex = useMemo(() => {
@@ -266,6 +306,19 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 			</div>
 
 			<div className="grow flex" ref={scrollContainerRef}>
+				{/*
+				 * The Virtuoso scroller hides its own scrollbar, which leaves a long
+				 * session with no way to see where you are or move through history.
+				 * This rail fills that gap and adds a marker per user turn.
+				 */}
+				<HistoryOverviewRail
+					hasOlderHistory={!!messageTruncated && hasMoreMessages}
+					onJumpToIndex={scrollToGroupIndex}
+					totalCount={groupedMessages.length}
+					turnIndices={turnIndices}
+					visibleEndIndex={overviewRange.endIndex}
+					visibleStartIndex={overviewRange.startIndex}
+				/>
 				<MessageRowContext.Provider value={messageRowContextValue}>
 					<Virtuoso
 						atBottomStateChange={(isAtBottom) => {

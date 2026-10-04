@@ -107,4 +107,88 @@ describe("useScrollBehavior", () => {
 
 		expect(result.current.disableAutoScrollRef.current).toBe(false)
 	})
+
+	/**
+	 * The overview rail is driven entirely by these two, so they are pinned here
+	 * rather than only through the rail's own tests.
+	 */
+	describe("visible range and index jumps", () => {
+		it("starts with no range, before Virtuoso reports one", () => {
+			const { result } = renderHook(() => useScrollBehavior([], [], [], {}, vi.fn()))
+			expect(result.current.visibleRange).toBeNull()
+		})
+
+		it("records the range Virtuoso reports", () => {
+			const { result } = renderHook(() => useScrollBehavior([], [], [], {}, vi.fn()))
+
+			act(() => {
+				result.current.handleRangeChanged({ startIndex: 12, endIndex: 30 })
+			})
+
+			expect(result.current.visibleRange).toEqual({ startIndex: 12, endIndex: 30 })
+		})
+
+		it("keeps the same object when the range is unchanged", () => {
+			// Virtuoso re-fires rangeChanged while streaming; a new object identity
+			// would re-render the rail on every chunk.
+			const { result } = renderHook(() => useScrollBehavior([], [], [], {}, vi.fn()))
+
+			act(() => {
+				result.current.handleRangeChanged({ startIndex: 3, endIndex: 9 })
+			})
+			const first = result.current.visibleRange
+			act(() => {
+				result.current.handleRangeChanged({ startIndex: 3, endIndex: 9 })
+			})
+
+			expect(result.current.visibleRange).toBe(first)
+		})
+
+		it("jumps to a row and detaches bottom pinning", () => {
+			const { result } = renderHook(() => useScrollBehavior([], [], [], {}, vi.fn()))
+			const scrollToIndex = vi.fn()
+			;(result.current.virtuosoRef as MutableRefObject<{ scrollToIndex: typeof scrollToIndex } | null>).current = {
+				scrollToIndex,
+			}
+
+			act(() => {
+				result.current.scrollToGroupIndex(42)
+			})
+
+			expect(scrollToIndex).toHaveBeenCalledWith({ index: 42, align: "start", behavior: "smooth" })
+			// Without this, the next streamed chunk would yank the user back down.
+			expect(result.current.disableAutoScrollRef.current).toBe(true)
+		})
+
+		it("can jump without releasing bottom pinning", () => {
+			// Programmatic jumps (for example following a quote) must not silently
+			// stop the view tracking new output.
+			const { result } = renderHook(() => useScrollBehavior([], [], [], {}, vi.fn()))
+			const scrollToIndex = vi.fn()
+			;(result.current.virtuosoRef as MutableRefObject<{ scrollToIndex: typeof scrollToIndex } | null>).current = {
+				scrollToIndex,
+			}
+
+			act(() => {
+				result.current.scrollToGroupIndex(7, { disableAutoScroll: false, align: "center" })
+			})
+
+			expect(scrollToIndex).toHaveBeenCalledWith({ index: 7, align: "center", behavior: "smooth" })
+			expect(result.current.disableAutoScrollRef.current).toBe(false)
+		})
+
+		it("ignores a negative index", () => {
+			const { result } = renderHook(() => useScrollBehavior([], [], [], {}, vi.fn()))
+			const scrollToIndex = vi.fn()
+			;(result.current.virtuosoRef as MutableRefObject<{ scrollToIndex: typeof scrollToIndex } | null>).current = {
+				scrollToIndex,
+			}
+
+			act(() => {
+				result.current.scrollToGroupIndex(-1)
+			})
+
+			expect(scrollToIndex).not.toHaveBeenCalled()
+		})
+	})
 })

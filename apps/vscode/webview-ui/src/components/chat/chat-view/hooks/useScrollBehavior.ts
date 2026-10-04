@@ -126,11 +126,57 @@ export function useScrollBehavior(
 		}
 	}, [checkScrolledPastUserMessage])
 
-	// Handler for when visible range changes in Virtuoso (kept for compatibility but not used for sticky)
-	const handleRangeChanged = useCallback((_range: ListRange) => {
-		// Range changed callback - we now use scroll position instead
-		// but keep this for potential future use
+	/**
+	 * Record which rows are currently rendered.
+	 *
+	 * This callback was previously a no-op kept "for potential future use". The
+	 * history overview rail needs it: it is the only signal that says where the
+	 * viewport sits inside a virtualized list, where the scroll height of unloaded
+	 * rows is unknowable but the index range is exact.
+	 *
+	 * `rangeChanged` only fires when the rendered window actually changes, so this
+	 * is cheap to keep in state even at streaming rates.
+	 */
+	const [visibleRange, setVisibleRange] = useState<ListRange | null>(null)
+
+	const handleRangeChanged = useCallback((range: ListRange) => {
+		setVisibleRange((previous) =>
+			// Virtuoso re-fires the same range while streaming; skipping the identity
+			// update avoids a re-render of the rail on every chunk.
+			previous && previous.startIndex === range.startIndex && previous.endIndex === range.endIndex ? previous : range,
+		)
 	}, [])
+
+	/**
+	 * Scroll to a row by its index in `groupedMessages`.
+	 *
+	 * The primitive both the sticky user-message header and the overview rail jump
+	 * through, so "go to this turn" behaves identically from either surface — in
+	 * particular it detaches bottom pinning, so a jump made while the agent is
+	 * streaming is not undone by the next chunk. Pinning re-engages when the user
+	 * returns to the bottom via `atBottomStateChange`.
+	 */
+	const scrollToGroupIndex = useCallback(
+		(
+			groupIndex: number,
+			options: { align?: "start" | "center" | "end"; behavior?: "smooth" | "auto"; disableAutoScroll?: boolean } = {},
+		) => {
+			if (groupIndex < 0) {
+				return
+			}
+			if (options.disableAutoScroll !== false) {
+				disableAutoScrollRef.current = true
+			}
+			const behavior = options.behavior ?? "smooth"
+			virtuosoRef.current?.scrollToIndex({
+				index: groupIndex,
+				align: options.align ?? "start",
+				behavior,
+			})
+		},
+		[],
+	)
+
 	const scrollToBottomSmooth = useMemo(
 		() =>
 			debounce(
@@ -190,8 +236,6 @@ export function useScrollBehavior(
 
 			if (groupIndex !== -1) {
 				setPendingScrollToMessage(null)
-				disableAutoScrollRef.current = true
-
 				// Check if this is the first user feedback message (no sticky header would show when scrolling to it)
 				const isFirstUserMessage =
 					groupIndex === 0 || !visibleMessages.slice(0, visibleIndex).some((msg) => msg.say === "user_feedback")
@@ -373,5 +417,7 @@ export function useScrollBehavior(
 		setPendingScrollToMessage,
 		scrolledPastUserMessage,
 		handleRangeChanged,
+		visibleRange,
+		scrollToGroupIndex,
 	}
 }
