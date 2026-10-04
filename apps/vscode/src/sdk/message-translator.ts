@@ -303,12 +303,59 @@ export class MessageTranslatorState {
 		return this.streamingToolName
 	}
 
+	/**
+	 * Live tool output, keyed by toolCallId.
+	 *
+	 * `content_update` carries progress that is NOT the tool result — streamed
+	 * command output, per-file read progress. That has to be rendered somewhere, or a
+	 * command running for minutes shows nothing and looks hung. Each entry owns a
+	 * stable `ts` so consecutive updates upsert onto the same row in the webview
+	 * (`messageReducer.ts`: same epoch → upsert by ts) instead of stacking rows.
+	 */
+	private toolOutputProgress = new Map<string, { ts: number; lines: string[] }>()
+
+	/** Append a streamed line, returning the row ts and the accumulated text. */
+	appendToolOutput(toolCallId: string, line: string): { ts: number; text: string } {
+		let entry = this.toolOutputProgress.get(toolCallId)
+		if (!entry) {
+			entry = { ts: this.nextTs(), lines: [] }
+			this.toolOutputProgress.set(toolCallId, entry)
+		}
+		// Bounded: a command can emit indefinitely and this map lives for the turn.
+		if (entry.lines.length < 2000) {
+			entry.lines.push(line)
+		}
+		return { ts: entry.ts, text: entry.lines.join("\n") }
+	}
+
+	/** Replace the whole body for progress that is a summary rather than a stream. */
+	setToolOutputText(toolCallId: string, text: string): { ts: number; text: string } {
+		let entry = this.toolOutputProgress.get(toolCallId)
+		if (!entry) {
+			entry = { ts: this.nextTs(), lines: [] }
+			this.toolOutputProgress.set(toolCallId, entry)
+		}
+		entry.lines = [text]
+		return { ts: entry.ts, text }
+	}
+
+	/** Drop accumulated progress for a finished tool call. */
+	clearToolOutput(toolCallId: string): void {
+		this.toolOutputProgress.delete(toolCallId)
+	}
+
+	/** Whether any live progress is being tracked (guards the emit path). */
+	hasToolOutput(toolCallId: string): boolean {
+		return this.toolOutputProgress.has(toolCallId)
+	}
+
 	/** Clear streaming tool */
 	clearStreamingTool(): number {
 		const ts = this.streamingToolTs ?? this.nextTs()
 		this.streamingToolTs = undefined
 		this.streamingToolInput = undefined
 		this.streamingToolName = undefined
+		this.toolOutputProgress.clear()
 		return ts
 	}
 
@@ -620,6 +667,44 @@ function sdkToolToClineSayTool(toolName: string, input?: unknown): ClineSayTool 
 				regex,
 				path,
 				filePattern,
+			}
+		}
+
+		case "glob": {
+			// GlobUnionInputSchema accepts { patterns: string[], path? },
+			// { patterns: string, path? }, a bare string[], or a bare string.
+			// All four must resolve to a visible pattern list, otherwise the user
+			// approves a call whose subject they cannot see.
+			let patterns = ""
+			if (parsedInput) {
+				const values = getArrayField(parsedInput, "patterns")
+				patterns = values?.join(", ") ?? getStringField(parsedInput, "patterns") ?? ""
+			} else if (Array.isArray(input)) {
+				patterns = input.map(String).join(", ")
+			} else if (typeof input === "string") {
+				patterns = input
+			}
+			return {
+				tool: "glob",
+				regex: patterns,
+				path: getStringField(parsedInput, "path") ?? "",
+			}
+		}
+
+		case "list_mcp_resources":
+		case "list_mcp_prompts":
+		case "read_mcp_resource": {
+			const server = getStringField(parsedInput, "server") ?? getStringField(parsedInput, "serverName") ?? ""
+			const subject = toolName === "read_mcp_resource" ? (getStringField(parsedInput, "uri") ?? "") : server
+			return {
+				tool:
+					toolName === "list_mcp_resources"
+						? "listMcpResources"
+						: toolName === "list_mcp_prompts"
+							? "listMcpPrompts"
+							: "readMcpResource",
+				path: subject,
+				serverName: server,
 			}
 		}
 
@@ -1174,8 +1259,66 @@ function translateAgentEvent(event: AgentEvent, state: MessageTranslatorState): 
 				break
 			}
 
-			// For all other tools, content_update is ignored — the
-			// content_start message with partial=true is sufficient until
+			// For all other tools, content_update carries LIVE OUTPUT rather than the
+			// result — the reasoning below ("content_start is sufficient until
+			// content_end") applies to the result, not to this.
+			//
+			// `read_files` emits one update per file and `run_commands` emits output
+			// lines while the command is still running. Without rendering them a
+			// multi-minute command shows nothing until it finishes, which is
+			// indistinguishable from a hang.
+			//
+			// Both reuse channels the webview already renders: streamed command output
+			// goes to `say: "command"` (the same shape content_start uses, with the
+			// output marker), and per-file progress goes to `say: "tool"` with the
+			// summary in `content`, which ToolUseRow already displays for readFile.
+			// Each accumulates under a per-call ts so updates upsert onto one row.
+			const progressUpdate = event.update as Record<string, unknown> | undefined
+			const progressCallId = event.toolCallId ?? ""
+			if (progressUpdate && progressCallId && updateToolName) {
+				if (updateToolName === "run_commands" || updateToolName === "execute_command") {
+					const line = typeof progressUpdate.line === "string" ? progressUpdate.line : undefined
+					if (line !== undefined) {
+						const dropped = typeof progressUpdate.dropped === "number" ? progressUpdate.dropped : 0
+						const { ts, text } = state.appendToolOutput(
+							progressCallId,
+							dropped > 0 ? `${line}\n... (${dropped} earlier lines dropped) ...` : line,
+						)
+						const commandText = typeof progressUpdate.command === "string" ? progressUpdate.command : ""
+						messages.push({
+							ts,
+							type: "say",
+							say: "command" as ClineSay,
+							text: commandText
+								? `${commandText}\n${COMMAND_OUTPUT_STRING}\n${text}`
+								: `${COMMAND_OUTPUT_STRING}\n${text}`,
+							partial: true,
+						})
+						break
+					}
+				} else if (progressUpdate.type === "read_files.progress") {
+					const completed = typeof progressUpdate.completed === "number" ? progressUpdate.completed : 0
+					const total = typeof progressUpdate.total === "number" ? progressUpdate.total : 0
+					const query = typeof progressUpdate.query === "string" ? progressUpdate.query : ""
+					const ok = progressUpdate.success !== false
+					const summary = `${query} ${ok ? "read" : "failed"} (${completed}/${total})`
+					const { ts } = state.setToolOutputText(progressCallId, summary)
+					const input: unknown = state.getStreamingToolInput() ?? {}
+					messages.push({
+						ts,
+						type: "say",
+						say: "tool" as ClineSay,
+						text: JSON.stringify({
+							...(sdkToolToClineSayTool(updateToolName, input) as ClineSayTool),
+							content: summary,
+						}),
+						partial: true,
+					})
+					break
+				}
+			}
+
+			// Anything else: the partial `say` from content_start still stands until
 			// content_end finalizes it.
 			break
 		}

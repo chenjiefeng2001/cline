@@ -166,6 +166,7 @@ export async function executeForeground(
 	abortSignal?: AbortSignal,
 	foregroundCommands?: SdkForegroundCommandCoordinator,
 	terminalProfileId?: string,
+	emitUpdate?: (update: unknown) => void,
 ): Promise<string> {
 	const terminalCommand = formatCommandForTerminal(command)
 	const terminalInfo = await terminalManager.getOrCreateTerminal(cwd, terminalProfileId)
@@ -177,8 +178,15 @@ export async function executeForeground(
 	const outputLines: string[] = []
 	let droppedLines = 0
 
-	// Accumulate output lines to return the full output once the command completes.
-	// The chat shows command output at completion, not incrementally.
+	// Accumulate output lines to return the full output once the command completes,
+	// and stream the same lines to the chat as they arrive.
+	//
+	// The buffer still exists because `execute` must return the complete output as
+	// its result — the model reads it from the tool result, and a truncated return
+	// would change tool semantics. But the user should not have to wait for the
+	// command to finish to see that it is producing anything at all: a build or test
+	// run can go minutes, and with output shown only at the end there is no way to
+	// tell a slow command from a hung one.
 	//
 	// This is a second buffer on top of the process's own `fullOutput` (capped at
 	// MAX_FULL_OUTPUT_SIZE — see VscodeTerminalProcess), so it needs its own cap:
@@ -186,7 +194,56 @@ export async function executeForeground(
 	// without bound. Once the cap is hit, keep only the head and tail — matching
 	// truncateCommandOutput's own head/tail strategy below — since build/test
 	// failures usually appear at the end of output.
+	//
+	// REACHABILITY: `emitUpdate` is wired by the runtime
+	// (`agent-runtime.ts:2525` → `tool-updated`), but the VS Code host drops
+	// `content_update` for every tool except `spawn_agent`
+	// (`message-translator.ts:1177`), so these lines do not reach the chat UI yet.
+	// The buffer below is unaffected — `execute` still returns the full output —
+	// so this is additive and safe to land ahead of the host-side rendering.
+	// See doc/agent-capability-gap-review-2026-10-03.md §5.3.
 	const maxBufferedLines = MAX_UNRETRIEVED_LINES
+	// Streamed lines are throttled: a command emitting thousands of lines would
+	// otherwise flood the host with one event per line. Leading lines are always
+	// delivered (the error usually appears early in a build), then the cadence
+	// relaxes, and the final line is always delivered so the last error is never
+	// the one that gets dropped.
+	const STREAM_LEAD_LINES = 20
+	const STREAM_INTERVAL_MS = 250
+	let lastStreamedAt = 0
+	let streamedLines = 0
+	let pendingTail: string | undefined
+
+	const emitStreamUpdate = (line: string): void => {
+		if (!emitUpdate) {
+			return
+		}
+		streamedLines += 1
+		if (streamedLines <= STREAM_LEAD_LINES) {
+			lastStreamedAt = Date.now()
+			emitUpdate({ type: "command_output", line, dropped: droppedLines })
+			return
+		}
+		pendingTail = line
+		if (Date.now() - lastStreamedAt >= STREAM_INTERVAL_MS) {
+			lastStreamedAt = Date.now()
+			emitUpdate({ type: "command_output", line, dropped: droppedLines })
+			pendingTail = undefined
+		}
+	}
+	/** Flushes the throttled tail. Called once when the command settles. */
+	const flushStreamUpdate = (): void => {
+		if (pendingTail !== undefined) {
+			const line = pendingTail
+			pendingTail = undefined
+			emitUpdate?.({
+				type: "command_output",
+				line,
+				dropped: droppedLines,
+				final: true,
+			})
+		}
+	}
 	const bufferLine = (line: string): void => {
 		if (outputLines.length < maxBufferedLines) {
 			outputLines.push(line)
@@ -195,6 +252,7 @@ export async function executeForeground(
 			outputLines.push(line)
 			droppedLines++
 		}
+		emitStreamUpdate(line)
 	}
 	process.on("line", bufferLine)
 
@@ -244,6 +302,10 @@ export async function executeForeground(
 		await process
 	} finally {
 		unregister?.()
+		// Flush the throttled tail on every settle path — completion, abort and
+		// throw alike. A build's error is usually in its last lines, so dropping
+		// the pending tail here is exactly the case the tail exists to cover.
+		flushStreamUpdate()
 	}
 
 	const bufferedOutput =
@@ -437,6 +499,7 @@ function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state:
 			context.signal,
 			options.foregroundCommands,
 			profileId,
+			context.emitUpdate,
 		)
 	}
 }

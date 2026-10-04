@@ -421,10 +421,19 @@ export function buttonsForPhase(
 				return BUTTON_CONFIGS.mistake_limit_reached
 			}
 			return BUTTON_CONFIGS.api_req_failed
-		case "awaiting_followup":
-			// followup / plan_mode_respond — input enabled, no approve/reject buttons. (If the
-			// anchored message is a recognized ask, defer to its config for correct labels.)
-			return anchoredMessage ? getButtonConfig(anchoredMessage, "act") : BUTTON_CONFIGS.followup
+		// awaiting_followup — the turn is over, so the composer must never be gated here.
+		//
+		// The anchored message supplies the button set and labels, but NOT the
+		// interaction gate: `getButtonConfig` falls back to `partial`
+		// (sendingDisabled: true) for any plain `say`, and the anchor is the turn's
+		// last message — so an agent that finished on a text message resolved to
+		// `partial` and left the input disabled. `awaiting_followup` is not in
+		// QUEUEABLE_PHASES either, so there is no queued-submit escape hatch: the user
+		// was left with a dead composer and no way to send the next message.
+		case "awaiting_followup": {
+			const anchored = anchoredMessage ? getButtonConfig(anchoredMessage, "act") : BUTTON_CONFIGS.followup
+			return anchored.sendingDisabled ? { ...anchored, sendingDisabled: false } : anchored
+		}
 		case "awaiting_approval":
 			// Approve/Reject (or Run Command / Save / etc.) — driven by the anchored ask so the
 			// labels match the tool kind. Falls back to generic tool approval.

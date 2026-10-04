@@ -236,6 +236,106 @@ describe("translateSessionEvent — pending prompts", () => {
 })
 
 // ---------------------------------------------------------------------------
+describe("translateSessionEvent — agent_event content_update (live tool output)", () => {
+	// Regression class: `content_update` used to be dropped for every tool except
+	// spawn_agent, so streamed command output and per-file read progress never
+	// reached the chat. A command running for minutes looked hung.
+	const updateEvent = (toolName: string, toolCallId: string, update: Record<string, unknown>) =>
+		({
+			type: "agent_event",
+			payload: {
+				sessionId: "session-1",
+				event: {
+					type: "content_update",
+					contentType: "tool",
+					toolName,
+					toolCallId,
+					update,
+				} as AgentEvent,
+			},
+		}) as never
+
+	it("renders streamed run_commands output as a say:command row", () => {
+		const state = new MessageTranslatorState()
+
+		const result = translateSessionEvent(
+			updateEvent("run_commands", "call-1", { type: "command_output", line: "compiling a" }),
+			state,
+		)
+
+		expect(result.messages).toHaveLength(1)
+		expect(result.messages[0]).toMatchObject({ type: "say", say: "command", partial: true })
+		expect(result.messages[0]?.text).toContain("compiling a")
+	})
+
+	it("accumulates output lines onto ONE row instead of stacking them", () => {
+		const state = new MessageTranslatorState()
+
+		translateSessionEvent(updateEvent("run_commands", "call-1", { line: "one" }), state)
+		const second = translateSessionEvent(updateEvent("run_commands", "call-1", { line: "two" }), state)
+
+		// A stable ts per call is what makes the webview upsert rather than append.
+		expect(second.messages[0]?.text).toContain("one")
+		expect(second.messages[0]?.text).toContain("two")
+	})
+
+	it("keeps separate rows for separate tool calls", () => {
+		const state = new MessageTranslatorState()
+
+		const first = translateSessionEvent(updateEvent("run_commands", "call-1", { line: "a" }), state)
+		const second = translateSessionEvent(updateEvent("run_commands", "call-2", { line: "b" }), state)
+
+		expect(second.messages[0]?.ts).not.toBe(first.messages[0]?.ts)
+	})
+
+	it("renders per-file read progress as say:tool content", () => {
+		const state = new MessageTranslatorState()
+
+		const result = translateSessionEvent(
+			updateEvent("read_files", "call-9", {
+				type: "read_files.progress",
+				query: "/src/a.ts",
+				completed: 1,
+				total: 3,
+				success: true,
+			}),
+			state,
+		)
+
+		expect(result.messages).toHaveLength(1)
+		expect(result.messages[0]).toMatchObject({ type: "say", say: "tool", partial: true })
+		const payload = JSON.parse(result.messages[0]?.text ?? "{}")
+		expect(payload.content).toContain("/src/a.ts")
+		expect(payload.content).toContain("1/3")
+	})
+
+	it("marks a failed read in the progress text", () => {
+		const state = new MessageTranslatorState()
+
+		const result = translateSessionEvent(
+			updateEvent("read_files", "call-9", {
+				type: "read_files.progress",
+				query: "/src/a.ts",
+				completed: 1,
+				total: 1,
+				success: false,
+			}),
+			state,
+		)
+
+		expect(JSON.parse(result.messages[0]?.text ?? "{}").content).toContain("failed")
+	})
+
+	it("still ignores unrecognized updates rather than emitting noise", () => {
+		const state = new MessageTranslatorState()
+
+		const result = translateSessionEvent(updateEvent("some_other_tool", "call-3", { whatever: true }), state)
+
+		expect(result.messages).toHaveLength(0)
+	})
+})
+
+// ---------------------------------------------------------------------------
 // translateSessionEvent — agent_event (content_start)
 // ---------------------------------------------------------------------------
 
@@ -2698,6 +2798,62 @@ describe("sdkToolToClineSayTool — fetch_web_content and skills (S6-39, S6-40)"
 
 // ---------------------------------------------------------------------------
 // S6-47: search_codebase renders query and path correctly
+// ---------------------------------------------------------------------------
+
+describe("sdkToolToClineSayTool — glob", () => {
+	function translateTool(toolName: string, input: unknown) {
+		const state = new MessageTranslatorState()
+		const event: CoreSessionEvent = {
+			type: "agent_event",
+			payload: {
+				sessionId: "s1",
+				event: {
+					type: "content_start",
+					contentType: "tool",
+					toolName,
+					toolCallId: "c1",
+					input,
+				} as AgentEvent,
+			},
+		}
+		const result = translateSessionEvent(event, state)
+		return JSON.parse(result.messages[0].text!)
+	}
+
+	it("renders patterns and scope for the object form", () => {
+		// Without this the webview hits its unknown-tool default and the user sees
+		// nothing at all for a call they may have to approve.
+		const tool = translateTool("glob", { patterns: ["**/*.test.ts", "*.md"], path: "src" })
+		expect(tool.tool).toBe("glob")
+		expect(tool.regex).toBe("**/*.test.ts, *.md")
+		expect(tool.path).toBe("src")
+	})
+
+	it("renders patterns for the bare string form", () => {
+		const tool = translateTool("glob", "*.ts")
+		expect(tool.tool).toBe("glob")
+		expect(tool.regex).toBe("*.ts")
+	})
+
+	it("renders patterns for the bare array form", () => {
+		const tool = translateTool("glob", ["*.ts", "*.tsx"])
+		expect(tool.regex).toBe("*.ts, *.tsx")
+	})
+
+	it("names the server for MCP resource and prompt tools", () => {
+		expect(translateTool("list_mcp_resources", {}).tool).toBe("listMcpResources")
+		expect(translateTool("list_mcp_prompts", { server: "github" })).toMatchObject({
+			tool: "listMcpPrompts",
+			serverName: "github",
+		})
+		expect(translateTool("read_mcp_resource", { server: "github", uri: "file:///a.md" })).toMatchObject({
+			tool: "readMcpResource",
+			path: "file:///a.md",
+			serverName: "github",
+		})
+	})
+})
+
 // ---------------------------------------------------------------------------
 
 describe("sdkToolToClineSayTool — search_codebase (S6-47)", () => {

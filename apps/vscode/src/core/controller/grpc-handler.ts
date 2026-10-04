@@ -121,15 +121,33 @@ async function handleStreamingRequest(
 		isLast: boolean = false,
 		sequenceNumber?: number,
 	) => {
-		await postMessageToWebview({
-			type: "grpc_response",
-			grpc_response: {
-				message: response,
-				request_id: request.request_id,
-				is_streaming: !isLast,
-				sequence_number: sequenceNumber,
-			},
-		})
+		// Every push to a streaming subscriber funnels through here, which makes this
+		// the one place that can tell the request registry whether the subscriber is
+		// still reachable. The registry uses that to decide what is genuinely stale
+		// (see cleanupStaleRequests) — it previously used registration age, which
+		// deleted live subscriptions on a timer.
+		try {
+			const delivered = await postMessageToWebview({
+				type: "grpc_response",
+				grpc_response: {
+					message: response,
+					request_id: request.request_id,
+					is_streaming: !isLast,
+					sequence_number: sequenceNumber,
+				},
+			})
+			// `undefined` means there is no webview to talk to at all, which the
+			// provider also logs. Treat only an explicit `false` as a failed delivery —
+			// that is postMessage's "the frame was not delivered" signal.
+			if (delivered === false) {
+				requestRegistry.noteDeliveryFailure(request.request_id)
+			} else {
+				requestRegistry.noteDeliverySuccess(request.request_id)
+			}
+		} catch (error) {
+			requestRegistry.noteDeliveryFailure(request.request_id)
+			throw error
+		}
 	}
 
 	try {
@@ -181,16 +199,22 @@ export async function handleGrpcRequestCancel(postMessageToWebview: PostMessageT
 // Registry to track active gRPC requests and their cleanup functions
 const requestRegistry = new GrpcRequestRegistry()
 
-// Periodically clean up stale gRPC requests that were never cancelled or
-// completed (e.g. webview reloaded while a streaming subscription was active).
-// 5-minute interval with a 10-minute max age prevents unbounded memory growth
-// without being aggressive enough to evict legitimate long-lived subscriptions.
+// Periodically release streaming subscriptions we can no longer deliver to.
+//
+// This is a LEAK backstop, not a lifetime limit. It only reaps a subscriber after
+// delivery to it has been continuously failing for STALE_REQUEST_MAX_AGE_MS; a
+// healthy subscription is never touched, however long it has been open. It used to
+// key on registration age instead, which reaped every live subscription 10-15
+// minutes after the webview mounted and left the host unable to push anything at
+// all — the "panel stopped refreshing" failure.
+//
+// Primary teardown is `releaseAll()`, which the webview provider calls on dispose.
 const STALE_REQUEST_MAX_AGE_MS = 10 * 60 * 1000
 const staleRequestSweeper = setInterval(
 	() => {
 		const cleaned = requestRegistry.cleanupStaleRequests(STALE_REQUEST_MAX_AGE_MS)
 		if (cleaned > 0) {
-			Logger.log(`[GrpcHandler] Cleaned up ${cleaned} stale gRPC requests`)
+			Logger.log(`[GrpcHandler] Released ${cleaned} undeliverable streaming subscription(s)`)
 		}
 	},
 	5 * 60 * 1000,

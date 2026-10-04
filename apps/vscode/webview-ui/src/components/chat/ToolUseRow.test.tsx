@@ -139,6 +139,56 @@ describe("ToolUseRow", () => {
 		})
 	})
 
+	describe("glob", () => {
+		it("shows the patterns that will be matched", () => {
+			r({ tool: buildTool("glob", { regex: "**/*.test.ts, *.md", path: "src" }) })
+			// The user must be able to see what is about to run; ToolUseRow's
+			// default branch renders nothing at all.
+			expect(screen.getByText(/Cline searched for files matching/)).toBeInTheDocument()
+			expect(screen.getAllByText("**/*.test.ts, *.md").length).toBeGreaterThan(0)
+			expect(screen.getByText("src")).toBeInTheDocument()
+		})
+
+		it("shows the result list once the call completed", () => {
+			r({ tool: buildTool("glob", { regex: "*.ts", content: "src/a.ts" }) })
+			expect(screen.getByTestId("code-accordian")).toBeInTheDocument()
+			expect(screen.getByTestId("ca-code")).toHaveTextContent("src/a.ts")
+		})
+
+		it("omits the result body while asking for approval", () => {
+			r({
+				tool: buildTool("glob", { regex: "*.ts" }),
+				message: { ...buildMsg(), type: "ask" },
+			})
+			expect(screen.getByText(/Cline wants to find files matching/)).toBeInTheDocument()
+			expect(screen.queryByTestId("code-accordian")).not.toBeInTheDocument()
+		})
+	})
+
+	describe("mcp resource tools", () => {
+		it("names the server when listing resources", () => {
+			r({ tool: buildTool("listMcpResources", { serverName: "github" }) })
+			expect(screen.getByText(/Cline listed the resources of/)).toBeInTheDocument()
+			expect(screen.getByText("github")).toBeInTheDocument()
+		})
+
+		it("names the server when listing prompts", () => {
+			r({ tool: buildTool("listMcpPrompts", { serverName: "github" }) })
+			expect(screen.getByText(/Cline listed the prompts of/)).toBeInTheDocument()
+		})
+
+		it("shows the uri and server when reading a resource", () => {
+			r({ tool: buildTool("readMcpResource", { path: "file:///a.md", serverName: "github" }) })
+			expect(screen.getByText(/Cline read the resource/)).toBeInTheDocument()
+			expect(screen.getAllByText("file:///a.md").length).toBeGreaterThan(0)
+		})
+
+		it("does not claim a server that was not given", () => {
+			r({ tool: buildTool("listMcpResources", {}) })
+			expect(screen.getByText("its MCP servers")).toBeInTheDocument()
+		})
+	})
+
 	describe("summarizeTask", () => {
 		it("renders header", () => {
 			r({ tool: buildTool("summarizeTask", { content: "s" }) })

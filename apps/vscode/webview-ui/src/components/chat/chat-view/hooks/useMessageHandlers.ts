@@ -2,7 +2,7 @@ import type { ClineMessage } from "@shared/ExtensionMessage"
 import { EmptyRequest, StringRequest } from "@shared/proto/cline/common"
 import { AskResponseRequest, NewTaskRequest } from "@shared/proto/cline/task"
 import { IntentEvent } from "@shared/proto/cline/ui"
-import { useCallback, useRef } from "react"
+import { useCallback, useMemo, useRef } from "react"
 import { useExtensionState, useMessagesState } from "@/context/ExtensionStateContext"
 import { SlashServiceClient, TaskServiceClient, UiServiceClient } from "@/services/grpc-client"
 import { reportWebviewDiagnostic } from "../../../../utils/reportWebviewError"
@@ -513,10 +513,17 @@ export function useMessageHandlers(messages: ClineMessage[], chatState: ChatStat
 		startNewTask()
 	}, [startNewTask])
 
-	return {
-		handleSendMessage,
-		executeButtonAction,
-		handleTaskCloseButtonClick,
-		startNewTask,
-	}
+	// Memoized because this object is embedded in MessageRowContext's value. A fresh
+	// literal on every render invalidated that memo on every streaming chunk, which
+	// re-rendered every visible message row (MessageRenderer is not memoized) — an
+	// O(visible rows) cost paid per frame for the whole conversation.
+	return useMemo(
+		() => ({
+			handleSendMessage,
+			executeButtonAction,
+			handleTaskCloseButtonClick,
+			startNewTask,
+		}),
+		[handleSendMessage, executeButtonAction, handleTaskCloseButtonClick, startNewTask],
+	)
 }

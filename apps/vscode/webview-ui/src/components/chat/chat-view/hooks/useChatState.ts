@@ -1,6 +1,7 @@
 import { ClineMessage } from "@shared/ExtensionMessage"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatState, PendingUserMessage } from "../types/chatTypes"
+import { findTaskMessage } from "../utils/messageUtils"
 
 /**
  * Custom hook for managing chat state
@@ -30,8 +31,13 @@ export function useChatState(messages: ClineMessage[]): ChatState {
 	const secondLastMessage = useMemo(() => messages.at(-2), [messages])
 	const clineAsk = useMemo(() => (lastMessage?.type === "ask" ? lastMessage.ask : undefined), [lastMessage])
 
-	// Clear expanded rows when task changes
-	const task = useMemo(() => messages.at(0), [messages])
+	// Clear expanded rows when task changes.
+	// `task` uses the canonical selector (same one ChatView uses for the Virtuoso
+	// key). It used to be plain `messages.at(0)`, which is the OLDEST message once
+	// scroll-up pagination has prepended history — so `task.ts` changed on every
+	// pagination batch and this effect wiped `expandedRows`, collapsing every
+	// manually-expanded row.
+	const task = useMemo(() => findTaskMessage(messages), [messages])
 	const clearExpandedRows = useCallback(() => {
 		setExpandedRows({})
 	}, [])

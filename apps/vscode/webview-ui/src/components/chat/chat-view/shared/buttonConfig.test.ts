@@ -223,6 +223,48 @@ describe("buttonsForPhase (TurnState-driven)", () => {
 		const mistake: ClineMessage = { ts: 8, type: "ask", ask: "mistake_limit_reached", text: "" }
 		expect(buttonsForPhase(ts("error", 8), mistake)).toEqual(BUTTON_CONFIGS.mistake_limit_reached)
 	})
+
+	// The live failure: a turn that ended on a text message produced
+	//   composer DISABLED (phase=awaiting_followup, sendingDisabled=true,
+	//                      queueable=false, legacyRunning=false, allowQueuedSubmit=false)
+	// The turn was over and the user could not type the next message.
+	describe("awaiting_followup never gates the composer", () => {
+		const anchorsThatResolveToAGatedConfig: Array<[string, ClineMessage]> = [
+			["a plain text say (the turn's last message, most common)", { ts: 10, type: "say", say: "text", text: "done" }],
+			["a reasoning say", { ts: 11, type: "say", say: "reasoning", text: "thinking" }],
+			["an api_req_started say", { ts: 12, type: "say", say: "api_req_started", text: "{}" }],
+		]
+
+		it.each(anchorsThatResolveToAGatedConfig)("stays enabled with %s as the anchor", (_label, anchor) => {
+			// Sanity: the anchor on its own DOES gate, which is what used to leak through.
+			expect(getButtonConfig(anchor).sendingDisabled).toBe(true)
+
+			const config = buttonsForPhase(ts("awaiting_followup", anchor.ts), anchor)
+			expect(config.sendingDisabled).toBe(false)
+		})
+
+		it("still takes the button set and labels from the anchor", () => {
+			// Forcing the gate open must not flatten the anchor's presentation.
+			const anchored: ClineMessage = { ts: 13, type: "say", say: "text", text: "done" }
+			const config = buttonsForPhase(ts("awaiting_followup", 13), anchored)
+			const fromAnchor = getButtonConfig(anchored)
+			expect(config.primaryText).toBe(fromAnchor.primaryText)
+			expect(config.secondaryText).toBe(fromAnchor.secondaryText)
+			expect(config.enableButtons).toBe(fromAnchor.enableButtons)
+		})
+
+		it("leaves an anchor that is already open untouched (identity preserved)", () => {
+			// No defensive copy when there is nothing to fix, so referential equality
+			// for the button config keeps working.
+			const open: ClineMessage = { ts: 14, type: "ask", ask: "followup", text: "" }
+			expect(buttonsForPhase(ts("awaiting_followup", 14), open)).toBe(BUTTON_CONFIGS.followup)
+		})
+
+		it("does not relax awaiting_approval, where gating is intended", () => {
+			const approval: ClineMessage = { ts: 15, type: "say", say: "text", text: "hi" }
+			expect(buttonsForPhase(ts("awaiting_approval", 15), approval).sendingDisabled).toBe(true)
+		})
+	})
 })
 
 describe("getButtonConfigFromState (dispatch + legacy fallback)", () => {

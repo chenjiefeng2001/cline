@@ -1,7 +1,7 @@
 import { sendShowWebviewEvent } from "@core/controller/ui/subscribeToShowWebview"
 import { WebviewProvider } from "@core/webview"
 import * as vscode from "vscode"
-import { handleGrpcRequest, handleGrpcRequestCancel } from "@/core/controller/grpc-handler"
+import { getRequestRegistry, handleGrpcRequest, handleGrpcRequestCancel } from "@/core/controller/grpc-handler"
 import { HostProvider } from "@/hosts/host-provider"
 import { ExtensionRegistryInfo } from "@/registry"
 import { telemetryService } from "@/services/telemetry"
@@ -344,7 +344,21 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 	 * @returns A thenable that resolves to a boolean indicating success, or undefined if the webview is not available
 	 */
 	private async postMessageToWebview(message: ExtensionMessage): Promise<boolean | undefined> {
-		return this.webview?.webview.postMessage(message)
+		const delivered = await this.webview?.webview.postMessage(message)
+		// `postMessage` resolves `false` when the frame was NOT delivered — the webview
+		// is not live, or the payload was over the transport's limit. Callers are all
+		// fire-and-forget and treat the send as best-effort, so this return value was
+		// previously discarded at the single choke point, which meant a dropped frame
+		// left no trace anywhere: the host logged nothing and the webview simply never
+		// received the update. Surfacing it makes "the panel stopped updating" a
+		// diagnosable event instead of a mystery.
+		if (delivered === false) {
+			Logger.warn(
+				`[VscodeWebviewProvider] postMessage was NOT delivered (webview not live, or payload over the ` +
+					`transport limit): ${message.type}${message.grpc_response?.request_id ? ` request_id=${message.grpc_response.request_id}` : ""}`,
+			)
+		}
+		return delivered
 	}
 
 	override async dispose() {
@@ -352,6 +366,18 @@ export class VscodeWebviewProvider extends WebviewProvider implements vscode.Web
 		if (this._pendingStatePush) {
 			clearTimeout(this._pendingStatePush)
 			this._pendingStatePush = null
+		}
+
+		// Release every streaming subscription this webview opened.
+		//
+		// A disposed webview cannot send `grpc_request_cancel`, so without this its
+		// subscriptions linger in the registry and every later push to them fails.
+		// Disposal IS the lifecycle signal, so teardown keys off it directly instead
+		// of waiting for the registry's leak backstop to guess from failed deliveries
+		// (see GrpcRequestRegistry.cleanupStaleRequests).
+		const released = getRequestRegistry().releaseAll()
+		if (released > 0) {
+			Logger.log(`[VscodeWebviewProvider] Webview disposed; released ${released} streaming subscription(s)`)
 		}
 
 		// WebviewView doesn't have a dispose method, it's managed by VSCode

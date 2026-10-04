@@ -178,7 +178,13 @@ const STATE_SIZE_FLOOR_FIELDS = [
  * @returns Object containing the state JSON and truncation status
  */
 function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTruncated: boolean } {
-	const sizeBytes = Buffer.byteLength(JSON.stringify(state), "utf8")
+	// Serialize ONCE and measure that string. This used to `JSON.stringify(state)` for
+	// the size check and then again for the payload, so an under-threshold state (the
+	// overwhelmingly common case) was built twice per push — and `postStateToWebview`
+	// is debounced to 50ms, so an 800KB payload meant ~1.6MB of string building every
+	// 50ms, which is main-thread work in the extension host competing with the turn.
+	const stateJson = JSON.stringify(state)
+	const sizeBytes = Buffer.byteLength(stateJson, "utf8")
 
 	// Record telemetry for all state sizes
 	recordStateSizeTelemetry(sizeBytes)
@@ -273,7 +279,7 @@ function prepareStateForIpc(state: ExtensionState): { stateJson: string; wasTrun
 			`taskHistory=${state.taskHistory?.length ?? 0})`,
 	)
 
-	return { stateJson: JSON.stringify(state), wasTruncated: false }
+	return { stateJson, wasTruncated: false }
 }
 
 /**
@@ -415,6 +421,36 @@ export interface StateDeltaMessage {
 }
 
 /**
+ * Would this delta exceed the IPC limit once serialized?
+ *
+ * Exported so the caller can react BEFORE handing the delta over (by pushing a
+ * bounded full snapshot instead) rather than discovering the refusal after the fact.
+ * Shares one serialization with `sendStateDelta` via `serializeStateDelta`.
+ */
+export function stateDeltaExceedsIpcLimit(delta: StateDeltaMessage): boolean {
+	return serializeStateDelta(delta) === null
+}
+
+/**
+ * Serialize a delta, or return null if it cannot be serialized or is over the IPC
+ * limit. Single definition of "shippable" shared by the predicate above and the send
+ * path, so they cannot disagree.
+ */
+function serializeStateDelta(delta: StateDeltaMessage): string | null {
+	let deltaJson: string
+	try {
+		deltaJson = JSON.stringify(delta)
+	} catch (error) {
+		Logger.error("Error serializing state delta:", error)
+		return null
+	}
+	if (Buffer.byteLength(deltaJson, "utf8") > STATE_SIZE_HARD_LIMIT) {
+		return null
+	}
+	return deltaJson
+}
+
+/**
  * Send a state delta to all active subscribers (incremental update).
  * This is lighter-weight than sendStateUpdate() because it ships only
  * the changed fields instead of the full ExtensionState.
@@ -430,13 +466,29 @@ export interface StateDeltaMessage {
  *
  * Fire-and-forget: errors are logged but not propagated. The next full
  * snapshot always carries ground truth.
+ *
+ * ## Why a delta needs a size guard
+ *
+ * `prepareStateForIpc` bounds the SNAPSHOT payload, but a delta ships one message
+ * verbatim and a single message can be arbitrarily large on its own (a big file
+ * read, a long command output). VS Code's `postMessage` fails on an oversized frame
+ * and this code deliberately ignores its boolean return, so an oversized delta used
+ * to be dropped in silence — and because the host skips the full snapshot whenever
+ * it shipped deltas (see sdk-session-event-coordinator.ts), nothing else carried
+ * that message. The webview was left with a transcript permanently missing its
+ * newest row.
+ *
+ * An oversized delta is therefore refused here rather than shipped and lost. The
+ * caller (`WebviewGrpcBridge.sendStateDelta`) reacts by pushing a full snapshot,
+ * which the truncation ladder bounds — see the size check there.
  */
 export async function sendStateDelta(delta: StateDeltaMessage): Promise<void> {
-	let deltaJson: string
-	try {
-		deltaJson = JSON.stringify(delta)
-	} catch (error) {
-		Logger.error("Error serializing state delta:", error)
+	const deltaJson = serializeStateDelta(delta)
+	if (deltaJson === null) {
+		// Dropped, NOT counted as delivered. The version is not advanced on the
+		// webview's side, so its gap detector fires and reconciles from a snapshot
+		// (see WebviewGrpcBridge.sendStateDelta, which pushes one up front).
+		Logger.warn(`[subscribeToState] Refused an unshippable state delta (type=${delta.type}); reconciling via snapshot`)
 		return
 	}
 

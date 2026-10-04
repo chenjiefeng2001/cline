@@ -286,6 +286,72 @@ const ToolUseRow = memo(({ tool, message, isExpanded, onToggleExpand, background
 					</Suspense>
 				</div>
 			)
+		case "glob":
+			return (
+				<div>
+					<div className={HEADER_CLASSNAMES}>
+						<ToolIcon name="search" />
+						<span className="font-bold">
+							{message.type === "ask" ? "Cline wants to find files matching" : "Cline searched for files matching"}{" "}
+							<code className="break-all">{tool.regex}</code>
+							{tool.path ? (
+								<span>
+									{" "}
+									in <code className="break-all">{tool.path}</code>
+								</span>
+							) : null}
+							:
+						</span>
+					</div>
+					{message.type === "ask" ? null : (
+						<CodeAccordian
+							code={tool.content ?? ""}
+							isExpanded={isExpanded}
+							language="shell-session"
+							onToggleExpand={onToggleExpand}
+							path={tool.regex}
+						/>
+					)}
+				</div>
+			)
+		case "listMcpResources":
+		case "listMcpPrompts":
+		case "readMcpResource": {
+			const labels = {
+				listMcpResources: ["list the resources of", "listed the resources of"],
+				listMcpPrompts: ["list the prompts of", "listed the prompts of"],
+				readMcpResource: ["read the resource", "read the resource"],
+			} as const
+			const [askLabel, doneLabel] = labels[tool.tool]
+			const subject = tool.tool === "readMcpResource" ? tool.path : tool.serverName || "its MCP servers"
+			return (
+				<div>
+					<div className={HEADER_CLASSNAMES}>
+						<ToolIcon name="globe" />
+						<span className="font-bold">
+							{message.type === "ask" ? `Cline wants to ${askLabel}` : `Cline ${doneLabel}`}{" "}
+							<code className="break-all">{subject}</code>
+							{tool.tool === "readMcpResource" && tool.serverName ? (
+								<span>
+									{" "}
+									from <code className="break-all">{tool.serverName}</code>
+								</span>
+							) : null}
+							:
+						</span>
+					</div>
+					{message.type === "ask" ? null : (
+						<CodeAccordian
+							code={tool.content ?? ""}
+							isExpanded={isExpanded}
+							language="shell-session"
+							onToggleExpand={onToggleExpand}
+							path={tool.path}
+						/>
+					)}
+				</div>
+			)
+		}
 		case "summarizeTask":
 			return (
 				<div>

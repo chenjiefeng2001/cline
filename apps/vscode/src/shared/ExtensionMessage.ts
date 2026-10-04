@@ -89,6 +89,34 @@ export interface ExtensionState {
 	shellIntegrationTimeout: number
 	terminalReuseEnabled?: boolean
 	maxConsecutiveMistakes: number
+	/**
+	 * Model round-trips allowed per turn. 0 means no limit, which is the default:
+	 * the cap is a guardrail against a runaway loop, not a correctness
+	 * requirement. Distinct from the proto `Settings.maxIterationsSetting` that
+	 * `updateSetting` writes, mirroring `maxConsecutiveMistakes`.
+	 */
+	maxIterationsSetting: number
+	/**
+	 * Guardrails and safety boundaries. All were already read into
+	 * CoreSessionConfig; exposing them here is what lets the settings dialog show
+	 * their real values instead of a hardcoded default that silently disagrees
+	 * with the running session.
+	 */
+	maxParallelToolCalls: number
+	runBudgetMaxTotalCost: number
+	fileBoundaryEnabled: boolean
+	fileBoundaryAdditionalRoots: string
+	agentTeamsEnabled: boolean
+	memoryEnabled: boolean
+	memoryRecallEnabled: boolean
+	memoryWriteEnabled: boolean
+	memoryAutoCaptureEnabled: boolean
+	webSearchEnabled: boolean
+	webSearchProvider: string
+	/** Never populated: the key is write-only from the dialog's perspective. */
+	webSearchApiKey: string
+	webSearchEngineId: string
+	webSearchMaxResults: number
 	/** Network request timeout in milliseconds (undefined = provider default). */
 	requestTimeoutMs?: number
 	defaultTerminalProfile?: string
@@ -304,6 +332,10 @@ export interface ClineSayTool {
 		| "listFilesRecursive"
 		| "listCodeDefinitionNames"
 		| "searchFiles"
+		| "glob"
+		| "listMcpResources"
+		| "readMcpResource"
+		| "listMcpPrompts"
 		| "webFetch"
 		| "webSearch"
 		| "summarizeTask"
@@ -319,6 +351,8 @@ export interface ClineSayTool {
 	/** One-based inclusive line range requested by read_file; readLineEnd omitted = open-ended read (for UI summaries). */
 	readLineStart?: number
 	readLineEnd?: number
+	/** MCP server the resource/prompt request was addressed to, for display. */
+	serverName?: string
 }
 
 // must keep in sync with system prompt

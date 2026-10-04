@@ -25,6 +25,7 @@ import {
 	useScrollBehavior,
 	WelcomeSection,
 } from "./chat-view"
+import { findTaskMessage } from "./chat-view/utils/messageUtils"
 
 interface ChatViewProps {
 	isHidden: boolean
@@ -110,7 +111,9 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 	// so task.ts would change on every scroll-up batch. MessagesArea falls back to
 	// task.ts for the Virtuoso key, so a changing task.ts remounts the list and
 	// initialTopMostItemIndex slams the view back to the bottom (the scroll bounce).
-	const task = useMemo(() => messages.find((message) => message.say === "task") ?? messages.at(0), [messages])
+	// `findTaskMessage` is shared with useChatState, which keys its expand-reset
+	// effect off the same value — two definitions here meant two different answers.
+	const task = useMemo(() => findTaskMessage(messages), [messages])
 	// Incremental message processing -- caches derived arrays across renders when
 	// messages haven't changed (ts/seq fingerprint), avoiding 7 full traversals per update.
 	const { modifiedMessages, visibleMessages, groupedMessages } = useIncrementalMessages(displayMessages, hooksEnabled)

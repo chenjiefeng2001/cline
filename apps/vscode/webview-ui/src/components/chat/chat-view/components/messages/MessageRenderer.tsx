@@ -1,6 +1,6 @@
 import type { ClineMessage } from "@shared/ExtensionMessage"
 import type React from "react"
-import { useMemo } from "react"
+import { memo, useCallback, useMemo, useRef } from "react"
 import BrowserSessionRow from "@/components/chat/BrowserSessionRow"
 import ChatRow from "@/components/chat/ChatRow"
 import { useExtensionState } from "@/context/ExtensionStateContext"
@@ -25,7 +25,7 @@ interface MessageRendererProps {
  * reference stays stable during streaming, allowing Virtuoso to reuse its
  * internal DOM cache instead of remounting every row.
  */
-export const MessageRenderer: React.FC<MessageRendererProps> = ({ index, isLast, messageOrGroup }) => {
+const MessageRendererInner: React.FC<MessageRendererProps> = ({ index, isLast, messageOrGroup }) => {
 	const { mode } = useExtensionState()
 	const {
 		modifiedMessages,
@@ -39,6 +39,20 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ index, isLast,
 		messageHandlers,
 		footerActive,
 	} = useMessageRowContext()
+
+	// Stable identity for ChatRow's `onCancelCommand`.
+	//
+	// ChatRow is memoized with `fast-deep-equal`, which compares functions by
+	// reference. An inline arrow here is a new function on every MessageRenderer
+	// render, so the deepEqual ALWAYS reported "changed" and ChatRow re-rendered for
+	// every visible row on every streaming chunk — the memo was dead code. Reading
+	// messageHandlers through a ref keeps the closure stable while still calling the
+	// latest handler.
+	const messageHandlersRef = useRef(messageHandlers)
+	messageHandlersRef.current = messageHandlers
+	const onCancelCommand = useCallback(() => {
+		messageHandlersRef.current.executeButtonAction("cancel")
+	}, [])
 
 	// Get reasoning content and response status for api_req_started messages
 	const reasoningData = useMemo(() => {
@@ -107,7 +121,7 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ index, isLast,
 				lastModifiedMessage={modifiedMessages.at(-1)}
 				message={messageOrGroup}
 				mode={mode}
-				onCancelCommand={() => messageHandlers.executeButtonAction("cancel")}
+				onCancelCommand={onCancelCommand}
 				onHeightChange={onHeightChange}
 				onLastRowContentChange={onLastRowContentChange}
 				onSetQuote={onSetQuote}
@@ -119,3 +133,11 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ index, isLast,
 		</div>
 	)
 }
+
+/**
+ * Memoized so a re-render of the list owner (a scroll tick, an expanded-row toggle,
+ * an `inputValue` change) does not re-render every mounted row. It does NOT stop a
+ * re-render when MessageRowContext itself changed — context propagation reaches
+ * consumers regardless of memo — which is correct, because those rows did change.
+ */
+export const MessageRenderer = memo(MessageRendererInner)

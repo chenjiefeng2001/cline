@@ -273,6 +273,58 @@ describe("formatCommandForTerminal", () => {
 })
 
 describe("executeForeground", () => {
+	it("streams output lines while keeping the return value intact", async () => {
+		// Output used to be shown only at completion, so a multi-minute build was
+		// indistinguishable from a hang. Streaming must not change what `execute`
+		// returns — the model still reads the complete result from the tool result.
+		const process = createFakeTerminalProcess({ lines: ["compiling a", "compiling b"] })
+		const terminalManager = createFakeTerminalManager(process)
+		const updates: unknown[] = []
+
+		const result = await executeForeground(
+			"build",
+			"/workspace",
+			terminalManager,
+			1000,
+			undefined,
+			undefined,
+			undefined,
+			(update) => updates.push(update),
+		)
+
+		expect(result).toBe("compiling a\ncompiling b")
+		expect(updates.length).toBeGreaterThan(0)
+		for (const update of updates) {
+			expect(update).toMatchObject({ type: "command_output" })
+		}
+	})
+
+	it("delivers the final throttled line", async () => {
+		// The last line of a failing build is usually the error, so the throttled
+		// tail is flushed on settle and must be observable.
+		const lines = Array.from({ length: 60 }, (_, i) => `line ${i}`)
+		const process = createFakeTerminalProcess({ lines })
+		const terminalManager = createFakeTerminalManager(process)
+		const updates: Array<{ line?: string; final?: boolean }> = []
+
+		await executeForeground("build", "/workspace", terminalManager, 100000, undefined, undefined, undefined, (u) =>
+			updates.push(u as { line?: string; final?: boolean }),
+		)
+
+		const final = updates.filter((u) => u.final === true)
+		expect(final).toHaveLength(1)
+		expect(final[0]?.line).toBe("line 59")
+	})
+
+	it("runs normally when no emitUpdate is supplied", async () => {
+		const process = createFakeTerminalProcess({ lines: ["ok"] })
+		const terminalManager = createFakeTerminalManager(process)
+
+		const result = await executeForeground("echo ok", "/workspace", terminalManager, 1000)
+
+		expect(result).toBe("ok")
+	})
+
 	it("returns output as-is on success (no exit code captured)", async () => {
 		const process = createFakeTerminalProcess({ lines: ["hello"] })
 		const terminalManager = createFakeTerminalManager(process)

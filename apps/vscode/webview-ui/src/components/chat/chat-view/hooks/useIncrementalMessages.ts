@@ -20,10 +20,9 @@
  * streaming partials causes visible jank on each keystroke / partial chunk.
  *
  * ## How it works
- * Compares the fingerprint of the incoming `displayMessages` with a cached
- * baseline. If the fingerprint matches (no changes), all four derived arrays
- * are returned from refs — zero work. If a change is detected, the full chain
- * runs once and the cache is updated.
+ * Keys the cache on the input array reference first, and on a fingerprint of every
+ * message's `ts`+`seq` second. When neither matches, the full chain runs once and the
+ * cache is updated.
  */
 
 import { combineApiRequests } from "@shared/combineApiRequests"
@@ -49,6 +48,22 @@ interface CachedMessageChain {
  * strategy: always includes length + last message (catches streaming appends),
  * plus a stride-based sample of intermediate messages to detect edits/collapses.
  * FNV-1a avoids string allocation and GC pressure from concatenation.
+ *
+ * ## Why this scans EVERY message
+ *
+ * It used to sample: length + the last message + a stride sample of ~15
+ * intermediate entries. That was unsound. `applyMessage` (messageReducer.ts)
+ * replaces a message IN PLACE, keeping the same `ts` and only raising `seq` — which
+ * is exactly how a partial message becomes its final version, how a
+ * `commandCompleted` flips, and how an `api_req_started` gains `cost`/usage. If the
+ * updated message sat at an unsampled index, the fingerprint was unchanged, the
+ * cache hit, and `modifiedMessages`/`visibleMessages`/`groupedMessages` were returned
+ * stale — the row never updated until something else changed the length or the tail.
+ * That is a stale transcript, i.e. the same "list stopped refreshing" family.
+ *
+ * So the hash now folds every element. It stays O(N) with no allocation, but it can
+ * no longer miss an update — and combined with the identity checks below, a changed
+ * fingerprint no longer forces a full recompute.
  */
 function fingerprint(messages: ClineMessage[]): number {
 	const len = messages.length
@@ -59,26 +74,10 @@ function fingerprint(messages: ClineMessage[]): number {
 	// Mix in length to catch truncation/append
 	hash = ((hash ^ (len & 0xffffffff)) * 16777619) >>> 0
 
-	// Always include the last message (changing during streaming)
-	const last = messages[len - 1]
-	hash = ((hash ^ (last.ts & 0xffffffff)) * 16777619) >>> 0
-	hash = ((hash ^ ((last.seq ?? 0) & 0xffffffff)) * 16777619) >>> 0
-
-	// Sample intermediate messages at a fixed stride to catch edits
-	// For small arrays (< 20) include all; for larger arrays sample ~10-20
-	if (len <= 20) {
-		for (let i = 0; i < len - 1; i++) {
-			const m = messages[i]
-			hash = ((hash ^ (m.ts & 0xffffffff)) * 16777619) >>> 0
-			hash = ((hash ^ ((m.seq ?? 0) & 0xffffffff)) * 16777619) >>> 0
-		}
-	} else {
-		const step = Math.max(1, Math.floor(len / 15))
-		for (let i = 0; i < len - 1; i += step) {
-			const m = messages[i]
-			hash = ((hash ^ (m.ts & 0xffffffff)) * 16777619) >>> 0
-			hash = ((hash ^ ((m.seq ?? 0) & 0xffffffff)) * 16777619) >>> 0
-		}
+	for (let i = 0; i < len; i++) {
+		const m = messages[i]
+		hash = ((hash ^ (m.ts & 0xffffffff)) * 16777619) >>> 0
+		hash = ((hash ^ ((m.seq ?? 0) & 0xffffffff)) * 16777619) >>> 0
 	}
 
 	return hash
@@ -98,6 +97,7 @@ export function useIncrementalMessages(
 } {
 	// Track the fingerprint of the last processed input
 	const cacheRef = useRef<{
+		messages: ClineMessage[]
 		fingerprint: number
 		hooksEnabled: boolean | undefined
 	} | null>(null)
@@ -106,12 +106,16 @@ export function useIncrementalMessages(
 
 	const currentFingerprint = useMemo(() => fingerprint(displayMessages), [displayMessages])
 
-	// Fast path: if fingerprint and hooksEnabled match, return cached result
+	// Fast path, strongest signal first: an identical array reference cannot have
+	// changed, so no hashing is needed at all. During streaming the store publishes a
+	// new array on every chunk, so the fingerprint comparison below is what carries
+	// the common case — and it now covers every message, so it cannot miss an
+	// in-place update.
 	if (
 		cacheRef.current !== null &&
 		cachedResultRef.current !== null &&
-		cacheRef.current.fingerprint === currentFingerprint &&
-		cacheRef.current.hooksEnabled === hooksEnabled
+		cacheRef.current.hooksEnabled === hooksEnabled &&
+		(cacheRef.current.messages === displayMessages || cacheRef.current.fingerprint === currentFingerprint)
 	) {
 		return {
 			modifiedMessages: cachedResultRef.current.modifiedMessages,
@@ -126,7 +130,7 @@ export function useIncrementalMessages(
 	const groupedMessages = groupLowStakesTools(groupMessages(visibleMessages))
 
 	// Update cache
-	cacheRef.current = { fingerprint: currentFingerprint, hooksEnabled }
+	cacheRef.current = { messages: displayMessages, fingerprint: currentFingerprint, hooksEnabled }
 	cachedResultRef.current = {
 		messages: displayMessages,
 		modifiedMessages,

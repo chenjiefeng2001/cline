@@ -150,20 +150,30 @@ export class WebviewGrpcBridge {
 	/**
 	 * Send an incremental state delta to the webview.
 	 *
-	 * The delta contains only the changed fields — the webview applies
-	 * it convergently without a full state rebuild. If the webview detects
-	 * a version gap, it falls back to requesting a full snapshot.
+	 * The delta contains only the changed fields — the webview applies it
+	 * convergently without a full state rebuild. If the webview detects a version
+	 * gap, it falls back to requesting a full snapshot.
+	 *
+	 * Deltas have no size guard of their own beyond `sendStateDelta`'s refusal: a
+	 * single message can be arbitrarily large on its own (a big file read, a long
+	 * command output) and the host skips the full snapshot whenever it shipped
+	 * deltas, so a dropped oversized delta would leave the webview permanently
+	 * missing that row. This is where the fallback lives, because only here do we
+	 * have `getStateFn` to rebuild a snapshot — and `prepareStateForIpc` bounds that
+	 * one through its truncation ladder.
 	 *
 	 * @param delta The state delta to ship to the webview.
 	 */
 	async sendStateDelta(delta: import("@/sdk/state-post-debouncer").StateDelta): Promise<void> {
+		const { sendStateDelta: sendDelta, stateDeltaExceedsIpcLimit } = await import("@core/controller/state/subscribeToState")
+		const wire = { type: delta.type, payload: delta, version: delta.version }
+		if (stateDeltaExceedsIpcLimit(wire)) {
+			Logger.warn("[WebviewGrpcBridge] Oversized state delta; pushing a bounded full snapshot instead")
+			await this.pushStateUpdate()
+			return
+		}
 		try {
-			const { sendStateDelta: sendDelta } = await import("@core/controller/state/subscribeToState")
-			await sendDelta({
-				type: delta.type,
-				payload: delta,
-				version: delta.version,
-			})
+			await sendDelta(wire)
 		} catch (error) {
 			Logger.error("[WebviewGrpcBridge] Failed to send state delta:", error)
 		}
