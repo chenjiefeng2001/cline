@@ -192,4 +192,91 @@ describe("RuntimeOAuthTokenManager", () => {
 		expect(second?.apiKey).toBe("access-new");
 		expect(getValidOpenAICodexCredentials).toHaveBeenCalledTimes(1);
 	});
+
+	it("does not let a non-forced in-flight resolve satisfy a forced refresh", async () => {
+		// The bug this guards: a 401 handler asking for a forced refresh could be
+		// handed the in-flight result of an ordinary resolve. That resolve is allowed
+		// to conclude the cached token is still good and return it untouched, so the
+		// caller retried with the exact credential it had just rejected and the raw
+		// gateway 401 surfaced. Sequential rather than concurrent here because the
+		// token endpoint rotates refresh tokens — two overlapping refreshes race and
+		// one loses it.
+		let releaseNonForced: () => void = () => {};
+		const nonForcedGate = new Promise<void>((resolve) => {
+			releaseNonForced = resolve;
+		});
+
+		getValidOpenAICodexCredentials
+			.mockImplementationOnce(async () => {
+				await nonForcedGate;
+				// Still "valid" as far as this caller is concerned: no network refresh.
+				return { access: "access-stale", refresh: "refresh-old", expires: Date.now() + 60_000 };
+			})
+			.mockImplementationOnce(async () => ({
+				access: "access-fresh",
+				refresh: "refresh-new",
+				expires: Date.now() + 60_000,
+			}));
+
+		const manager = new RuntimeOAuthTokenManager({
+			providerSettingsManager: {
+				getProviderSettings: vi.fn().mockReturnValue({
+					provider: "openai-codex",
+					auth: {
+						accessToken: "access-old",
+						refreshToken: "refresh-old",
+						expiresAt: Date.now() - 1_000,
+					},
+				}),
+				saveProviderSettings: vi.fn(),
+			} as never,
+		});
+
+		const nonForced = manager.resolveProviderApiKey({ providerId: "openai-codex" });
+		// Arrives while the ordinary resolve is still settling.
+		const forced = manager.resolveProviderApiKey({
+			providerId: "openai-codex",
+			forceRefresh: true,
+		});
+
+		releaseNonForced();
+		const [nonForcedResult, forcedResult] = await Promise.all([nonForced, forced]);
+
+		expect(nonForcedResult?.apiKey).toBe("access-stale");
+		// The whole point: the forced caller must not receive the stale credential.
+		expect(forcedResult?.apiKey).toBe("access-fresh");
+		expect(getValidOpenAICodexCredentials).toHaveBeenCalledTimes(2);
+	});
+
+	it("still de-duplicates concurrent forced refreshes", async () => {
+		getValidOpenAICodexCredentials.mockImplementationOnce(async () => ({
+			access: "access-forced",
+			refresh: "refresh-new",
+			expires: Date.now() + 60_000,
+		}));
+
+		const manager = new RuntimeOAuthTokenManager({
+			providerSettingsManager: {
+				getProviderSettings: vi.fn().mockReturnValue({
+					provider: "openai-codex",
+					auth: {
+						accessToken: "access-old",
+						refreshToken: "refresh-old",
+						expiresAt: Date.now() - 1_000,
+					},
+				}),
+				saveProviderSettings: vi.fn(),
+			} as never,
+		});
+
+		const [first, second] = await Promise.all([
+			manager.resolveProviderApiKey({ providerId: "openai-codex", forceRefresh: true }),
+			manager.resolveProviderApiKey({ providerId: "openai-codex", forceRefresh: true }),
+		]);
+
+		expect(first?.apiKey).toBe("access-forced");
+		expect(second?.apiKey).toBe("access-forced");
+		// Forced callers that overlap may share one refresh; they all want the same thing.
+		expect(getValidOpenAICodexCredentials).toHaveBeenCalledTimes(1);
+	});
 });

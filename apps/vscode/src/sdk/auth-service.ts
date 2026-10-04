@@ -375,8 +375,13 @@ export class AuthService {
 			}
 		}
 
-		// Verify the token is still valid (not past expiry)
-		if (expiresAt && Date.now() / 1000 >= expiresAt) {
+		// Verify the token is still valid (not past expiry).
+		// Re-read from _clineAuthInfo rather than reusing the `expiresAt` captured
+		// above: refreshAccessToken() replaces _clineAuthInfo with a new token AND a
+		// new expiresAt, so the pre-refresh value would reject a token that was just
+		// renewed. That turned every refresh inside the 5-minute buffer into a null.
+		const currentExpiresAt = this._clineAuthInfo.expiresAt
+		if (currentExpiresAt && Date.now() / 1000 >= currentExpiresAt) {
 			return null
 		}
 

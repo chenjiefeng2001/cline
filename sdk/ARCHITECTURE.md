@@ -138,6 +138,41 @@ runs not using the yolo preset still produce a `task.completed` signal.
 Each session emits at most one `task.completed`. See `DOC.md` for the
 event payload and `source` field.
 
+### Provider credential lifecycle
+
+OAuth access tokens expire on a wall clock, while a single agent turn does
+not: a turn that streams and runs tools can easily outlive the token. The
+runtime therefore refreshes in three places, and all three go through
+`RuntimeOAuthTokenManager` so they share one single-flight per provider.
+
+1. **Before the turn** — `LocalRuntimeHost.executeTurn` calls
+   `syncOAuthCredentials`, which renews when the stored credential is inside
+   its refresh buffer.
+2. **Before every model request** — the host composes a `beforeModel` hook
+   that calls the same `syncOAuthCredentials`. `updateConnection` mutates the
+   live `AgentConfig`, and the runtime invokes this hook before
+   `model.stream(...)`, so a renewal applies to the very next request. This is
+   what keeps a long turn alive instead of failing it partway through and
+   replaying every tool call it had already completed.
+3. **After an auth failure** — `runWithAuthRetry` forces a refresh, restores
+   the pre-turn baseline, and replays the turn once.
+
+Two invariants the credential layer depends on:
+
+- **A forced resolve is never satisfied by a non-forced one.** Concurrent
+  callers de-duplicate per provider, but joining an in-flight resolve is only
+  sound when that resolve is already forcing. An ordinary resolve may
+  legitimately conclude the cached token is still good and return it, which
+  would hand a 401 handler back the credential it had just rejected.
+- **Single-flight is sequential, never overlapping.** The token endpoint
+  rotates refresh tokens, so two concurrent refreshes race and one loses it.
+
+When a credential genuinely cannot be renewed, the host raises an error whose
+message carries the `Unauthorized` signal rather than a bespoke
+"requires re-authentication" string. Hosts already route that signal to their
+Sign In affordance, so a dead credential reaches the user as a recoverable
+step instead of an unexplained failure.
+
 ### Hub connection identity
 
 The websocket upgrade authenticates the *connection* (bearer token, or a

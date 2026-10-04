@@ -2676,8 +2676,40 @@ export class LocalRuntimeHost implements RuntimeHost {
 					event,
 				),
 		} as AgentConfig;
+		const hostBeforeModel = agentConfig.hooks?.beforeModel;
 		agentConfig.hooks = {
 			...agentConfig.hooks,
+			// Refresh OAuth credentials immediately before every model request, not
+			// just once per turn at `executeTurn`. A turn that streams and runs tools
+			// for longer than the access token's lifetime used to have exactly one
+			// recovery: fail mid-turn, then replay the whole turn from the baseline —
+			// redoing every tool call — and if that retry hit a concurrent refresh it
+			// replayed with the same dead credential and surfaced the raw gateway 401.
+			// Re-checking here costs a settings read (the validator short-circuits
+			// while the token is comfortably valid) and turns a lost turn into a
+			// transparent renewal between two tool calls.
+			//
+			// `updateConnection` mutates the live AgentConfig, and the runtime invokes
+			// this hook before `model.stream(...)`, so the renewal applies to the very
+			// request that follows. A credential that genuinely cannot be renewed
+			// throws here, reporting the real cause instead of letting an expired token
+			// reach the gateway.
+			//
+			// The host's own `beforeModel` runs first and its result is passed through
+			// untouched: hosts use it to steer a turn (the VS Code plan/act mode switch
+			// returns `stop`), and overwriting it would break them. Skipping the refresh
+			// on a stop avoids a pointless credential round trip.
+			beforeModel: async (context) => {
+				const result = await hostBeforeModel?.(context);
+				if (result?.stop) {
+					return result;
+				}
+				const liveSession = this.sessions.get(sessionId);
+				if (liveSession) {
+					await this.syncOAuthCredentials(liveSession);
+				}
+				return result;
+			},
 			onEvent: async (event) => {
 				await bootstrap.hooks?.onEvent?.(event);
 				if (event.type !== "assistant-message") return;
@@ -4238,7 +4270,15 @@ export class LocalRuntimeHost implements RuntimeHost {
 			});
 		} catch (error) {
 			if (error instanceof OAuthReauthRequiredError) {
-				throw new Error(`${error.providerId} requires re-authentication.`);
+				// Phrased so hosts classify this as an auth failure rather than a generic
+				// provider error. Every host already offers its Sign In affordance off the
+				// "unauthorized" signal (see the VS Code `onSendError` auth check and
+				// `isLikelyAuthError` in @cline/shared); a bare "requires
+				// re-authentication" matched none of them, so a credential that genuinely
+				// could not be renewed reached the user as a dead end with no way forward.
+				throw new Error(
+					`Unauthorized: ${error.providerId} credentials could not be refreshed. Sign in to Cline again to continue.`,
+				);
 			}
 			throw error;
 		}

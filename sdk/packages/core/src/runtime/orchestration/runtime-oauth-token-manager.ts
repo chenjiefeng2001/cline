@@ -49,9 +49,12 @@ export type RuntimeOAuthResolution = {
 export class RuntimeOAuthTokenManager {
 	private readonly providerSettingsManager: ProviderSettingsManager;
 	private readonly telemetry?: ITelemetryService;
+	// The in-flight entry records whether it is already forcing a refresh, so a
+	// forced caller is never satisfied by a non-forced resolve (see
+	// `resolveWithSingleFlight`).
 	private readonly refreshInFlight = new Map<
 		ManagedOAuthProviderId,
-		Promise<RuntimeOAuthResolution | null>
+		{ forced: boolean; promise: Promise<RuntimeOAuthResolution | null> }
 	>();
 
 	constructor(options?: {
@@ -85,8 +88,19 @@ export class RuntimeOAuthTokenManager {
 	): Promise<RuntimeOAuthResolution | null> {
 		const currentInFlight = this.refreshInFlight.get(storageProviderId);
 		if (currentInFlight) {
-			return currentInFlight;
+			// Joining an in-flight resolve is only sound when it is already forcing a
+			// refresh. A non-forced resolve can legitimately decide the cached token is
+			// still good and hand it back, which would silently downgrade this forced
+			// request and leave the caller retrying with the credential it just rejected.
+			if (!forceRefresh || currentInFlight.forced) {
+				return currentInFlight.promise;
+			}
+			// Let the non-forced resolve finish, then force one of our own. Sequential
+			// rather than concurrent on purpose: the token endpoint rotates refresh
+			// tokens, so two overlapping refreshes race and one loses it.
+			await currentInFlight.promise.catch(() => undefined);
 		}
+
 		const pending = this.resolveProviderApiKeyInternal(
 			providerId,
 			storageProviderId,
@@ -96,9 +110,13 @@ export class RuntimeOAuthTokenManager {
 				throw error;
 			})
 			.finally(() => {
-				this.refreshInFlight.delete(storageProviderId);
+				// Only clear our own entry: a forced refresh may have replaced it while
+				// the awaited non-forced one was settling.
+				if (this.refreshInFlight.get(storageProviderId)?.promise === pending) {
+					this.refreshInFlight.delete(storageProviderId);
+				}
 			});
-		this.refreshInFlight.set(storageProviderId, pending);
+		this.refreshInFlight.set(storageProviderId, { forced: forceRefresh, promise: pending });
 		return pending;
 	}
 

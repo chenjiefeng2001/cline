@@ -359,6 +359,62 @@ describe("AuthService", () => {
 			const token = await authService.getAuthToken()
 			expect(token).toBeNull()
 		})
+
+		it("returns the renewed token when the pre-refresh expiry had already passed", async () => {
+			// Regression: the post-refresh validity check reused the `expiresAt`
+			// captured *before* refreshing. Inside the 5-minute buffer every successful
+			// refresh was then measured against the already-expired old value and
+			// rejected, so `getAuthToken()` returned null ~5 minutes before the token
+			// actually died and every account endpoint failed with
+			// "No Cline account auth token found".
+			const staleExpiresAt = Math.floor(Date.now() / 1000) - 100
+			testAccess(authService)._clineAuthInfo = createTestAuthInfo({
+				expiresAt: staleExpiresAt,
+				refreshToken: "refresh-token",
+			})
+			testAccess(authService)._authenticated = true
+
+			const renewedExpiryMs = Date.now() + 3600 * 1000
+			vi.mocked(getValidClineCredentials).mockResolvedValue({
+				access: "renewed-access-token",
+				refresh: "renewed-refresh-token",
+				expires: renewedExpiryMs,
+				accountId: "user-123",
+				email: "test@example.com",
+			})
+
+			const token = await authService.getAuthToken()
+
+			expect(getValidClineCredentials).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.anything(),
+				expect.objectContaining({ forceRefresh: true }),
+			)
+			expect(token).toBe("workos:renewed-access-token")
+			// The renewed credential is what persists, expiry included.
+			expect(testAccess(authService)._clineAuthInfo?.expiresAt).toBe(renewedExpiryMs / 1000)
+		})
+
+		it("refreshes a token that is still valid but inside the buffer window", async () => {
+			// Two minutes left: not expired, but inside the 5-minute buffer, so the
+			// token is renewed ahead of any request that would otherwise 401.
+			testAccess(authService)._clineAuthInfo = createTestAuthInfo({
+				expiresAt: Math.floor(Date.now() / 1000) + 120,
+				refreshToken: "refresh-token",
+			})
+			testAccess(authService)._authenticated = true
+
+			const renewedExpiryMs = Date.now() + 3600 * 1000
+			vi.mocked(getValidClineCredentials).mockResolvedValue({
+				access: "renewed-access-token",
+				refresh: "renewed-refresh-token",
+				expires: renewedExpiryMs,
+				accountId: "user-123",
+				email: "test@example.com",
+			})
+
+			expect(await authService.getAuthToken()).toBe("workos:renewed-access-token")
+		})
 	})
 
 	describe("createAuthRequest()", () => {
