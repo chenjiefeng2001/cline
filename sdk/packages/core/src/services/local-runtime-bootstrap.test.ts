@@ -633,7 +633,16 @@ describe("prepareLocalRuntimeBootstrap", () => {
 			"x-shared": "config-wins",
 		});
 		expect(bootstrap.providerConfig.headers?.["User-Agent"]).toMatch(
-			/^Cline\//,
+			/^Cline(\/|$)/,
+		);
+		// Deliberately not `/^Cline\//`: whether a version suffix is present depends on
+		// `npm_package_version`, which only exists when the process was launched through
+		// a package-manager script. Asserting the slash made this test pass or fail based
+		// on how the suite was invoked rather than on the header logic under test. What
+		// matters here is that the UA is Cline's own — not the `ConfigAgent/0` the input
+		// supplied — and that a caller who knows its version wins over the environment.
+		expect(bootstrap.providerConfig.headers?.["User-Agent"]).not.toBe(
+			"ConfigAgent/0",
 		);
 	});
 
