@@ -117,6 +117,16 @@ cline dev log
 | `CLINE_COMMAND_PERMISSIONS` | JSON policy restricting shell commands |
 | `CLINE_MAX_ITERATIONS` | Iteration ceiling for ACP sessions, which have no flags (default: `50`) |
 | `CLINE_MAX_BUDGET_USD` | Spend ceiling in USD for ACP sessions (default: `5`) |
+| `CLINE_CLIENT_USER_AGENT` | Replace the `User-Agent` sent to Cline's gateway and the Codex backend |
+| `CLINE_CLIENT_TYPE` | Replace the `X-CLIENT-TYPE` client identity |
+| `CLINE_CLIENT_TITLE` | Replace the `X-Title` header |
+| `CLINE_CLIENT_REFERER` | Replace the `HTTP-Referer` header |
+| `CLINE_CODEX_ORIGINATOR` | Replace the `originator` sent to the Codex backend |
+
+The five `CLINE_CLIENT_*` / `CLINE_CODEX_ORIGINATOR` variables exist for
+deployments that front a different upstream and need a different product
+identity. They replace only those headers; the headers that identify the
+authenticated caller — account id, session id, task id — are never affected.
 
 ### CLINE_DATA_DIR
 

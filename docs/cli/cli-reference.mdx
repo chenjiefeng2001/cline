@@ -254,6 +254,11 @@ cline kanban
 | `CLINE_COMMAND_PERMISSIONS` | JSON policy restricting shell commands (see below) |
 | `CLINE_MAX_ITERATIONS` | Iteration ceiling for ACP sessions, which have no flag parser (default: `50`) |
 | `CLINE_MAX_BUDGET_USD` | Spend ceiling in USD for ACP sessions (default: `5`) |
+| `CLINE_CLIENT_USER_AGENT` | Replace the `User-Agent` sent to Cline's gateway and the Codex backend |
+| `CLINE_CLIENT_TYPE` | Replace the `X-CLIENT-TYPE` client identity |
+| `CLINE_CLIENT_TITLE` | Replace the `X-Title` header |
+| `CLINE_CLIENT_REFERER` | Replace the `HTTP-Referer` header |
+| `CLINE_CODEX_ORIGINATOR` | Replace the `originator` sent to the Codex backend |
 
 ### Run guardrails
 

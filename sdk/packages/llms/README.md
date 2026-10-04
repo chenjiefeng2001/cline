@@ -106,6 +106,57 @@ aborted request is not transient either.
 the CLI's `withTransientRetry` is one — so each can decide what to do about
 cancellation.
 
+## Client Identity Headers
+
+Two upstreams receive a description of the calling client: Cline's own billing
+gateway (`cline`, `cline-pass`) and OpenAI's Codex backend (`openai-codex`).
+
+| Header | Sent to | Value |
+|--------|---------|-------|
+| `User-Agent` | both | `Cline/<client version>`, or a bare `Cline` when the version is unknown |
+| `X-CLIENT-TYPE` | Cline gateway | `cline-vscode`, `cline-cli`, `cline-acp`, `cline-hub`, … |
+| `X-CLIENT-VERSION`, `X-PLATFORM`, `X-PLATFORM-VERSION`, `X-CORE-VERSION` | Cline gateway | the host's real values |
+| `X-Task-ID` | Cline gateway | the session id |
+| `originator` | Codex | `cline` |
+| `ChatGPT-Account-Id` | Codex | derived from the access token |
+
+Two rules the implementation holds to:
+
+- **Never invent a version.** There is no `unknown` placeholder and no pinned
+  fallback. A self-reported version that is obviously not a version reads as a
+  spoofed client to an upstream that classifies callers, which defeats the point
+  of reporting one. When the host genuinely does not know, the version header is
+  omitted and `User-Agent` is a bare `Cline`.
+- **The client version wins over the environment.** `userAgentVersion` comes from
+  `process.env.npm_package_version`, which is only set when the process was
+  launched through a package-manager script. Running the `cline` bin directly
+  leaves it unset, so it is a last resort, never the primary source.
+
+### Overriding the identity for a deployment
+
+An operator pointing a build at a self-hosted gateway may need a different
+product identity. Five headers can be replaced through the environment:
+
+```bash
+export CLINE_CLIENT_USER_AGENT="SelfHosted/2.0"
+export CLINE_CLIENT_TYPE="self-hosted"
+export CLINE_CLIENT_TITLE="Self Hosted"
+export CLINE_CLIENT_REFERER="https://llm.internal"
+export CLINE_CODEX_ORIGINATOR="my-gateway"
+```
+
+Read them with `resolveClientIdentityOverridesFromEnv()` and pass the result as
+`identityOverrides`. The channel is deliberately narrow:
+
+- only those five headers are replaceable, matched case-insensitively;
+- a header this layer does not send is never **injected**, only replaced;
+- headers that identify the authenticated caller rather than the client —
+  `ChatGPT-Account-Id`, `session_id`, `X-Task-ID`, `X-CORE-VERSION` — are not
+  overridable, so a config file cannot misattribute traffic.
+
+Anything sent through the stored/config/session header layers still loses to the
+derived values, as it always has; this is the supported way to change identity.
+
 ## Related Packages
 
 - `@cline/agents`: agent loop and tool execution
