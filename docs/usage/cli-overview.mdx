@@ -103,6 +103,9 @@ Source of truth: [CLI Reference](/cli/cli-reference)
 | `--json` | Output newline-delimited JSON messages |
 | `--thinking <level>` | Set reasoning effort: `none\|low\|medium\|high\|xhigh` (default `medium`) |
 | `-t, --timeout <seconds>` | Set task timeout |
+| `--max-iterations <count>` | Cap model round-trips per turn (default `50`) |
+| `--max-budget-usd <amount>` | Cap spend for a single run in USD (default `5`) |
+| `--max-parallel-tool-calls <count>` | Concurrent tool calls per turn (default `6`; `1` is serial) |
 
 ## Automation Patterns
 

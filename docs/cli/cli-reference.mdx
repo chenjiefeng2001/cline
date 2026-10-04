@@ -36,7 +36,7 @@ Options:
   --config <path>              Configuration directory (default: ~/.cline/data/settings)
   --data-dir <path>            Use isolated local state at this directory path (default: ~/.cline)
   --thinking <level>           Set reasoning effort level between none|low|medium|high|xhigh (default: medium)
-  --retries <count>            Maximum consecutive mistakes (retries) before halting
+  --retries <count>            Maximum consecutive mistakes (retries) before halting (default: 6)
   --hooks-dir <path>           Directory path to additional hooks for runtime hook injection (default: ~/.cline/hooks)
   --acp                        Run in Agent Client Protocol (ACP) mode for editor integration
   -i, --tui                    Open the terminal user interface (TUI) for interactive sessions
@@ -45,6 +45,9 @@ Options:
   -P, --provider <id>          Provider id (default: cline)
   -s, --system <system-prompt> Override the default system prompt
   -z, --zen                    Start a session that runs in the background hub
+  --max-iterations <count>     Maximum model round-trips per turn (default: 50; exceeding it finishes the turn as max_iterations)
+  --max-budget-usd <amount>    Spend ceiling in USD for a single run (default: 5; exceeding it finishes the turn as budget_exhausted)
+  --max-parallel-tool-calls <count>  Tool calls executed concurrently within one turn (default: 6; 1 forces serial)
   -h, --help                   display help for command
 
 Commands:
@@ -79,7 +82,10 @@ Commands:
 | `--config <path>` | Configuration directory (default: `~/.cline/data/settings`) |
 | `--data-dir <path>` | Use isolated local state at this directory path (default: `~/.cline`) |
 | `--thinking <level>` | Set reasoning effort: `none\|low\|medium\|high\|xhigh` (default `medium`) |
-| `--retries <count>` | Maximum consecutive mistakes (retries) before halting |
+| `--retries <count>` | Maximum consecutive mistakes (retries) before halting (default: `6`) |
+| `--max-iterations <count>` | Maximum model round-trips per turn (default: `50`). Reaching it ends the turn as `max_iterations` rather than crashing |
+| `--max-budget-usd <amount>` | Spend ceiling in USD for a single run (default: `5`). Reaching it ends the turn as `budget_exhausted` |
+| `--max-parallel-tool-calls <count>` | Tool calls executed concurrently within one turn (default: `6`; `1` forces serial). Only tools declared concurrency-safe batch together |
 | `--hooks-dir <path>` | Directory path to additional hooks for runtime hook injection (default: `~/.cline/hooks`) |
 | `--acp` | Run in Agent Client Protocol (ACP) mode for editor integration |
 | `-i, --tui` | Open the terminal user interface (TUI) for interactive sessions |
@@ -246,6 +252,19 @@ cline kanban
 | `CLINE_BUILD_ENV` | Set to `development` for debug features |
 | `CLINE_DEBUG_PORT_BASE` | Base port for Node.js inspector |
 | `CLINE_COMMAND_PERMISSIONS` | JSON policy restricting shell commands (see below) |
+| `CLINE_MAX_ITERATIONS` | Iteration ceiling for ACP sessions, which have no flag parser (default: `50`) |
+| `CLINE_MAX_BUDGET_USD` | Spend ceiling in USD for ACP sessions (default: `5`) |
+
+### Run guardrails
+
+`--max-iterations`, `--max-budget-usd` and `--max-parallel-tool-calls` apply to
+one-shot and interactive runs. ACP mode has no flags, so it reads the two
+guardrail values from `CLINE_MAX_ITERATIONS` and `CLINE_MAX_BUDGET_USD`, which
+default to the same 50 and 5.
+
+A value that is not a usable positive number — zero, negative, `NaN`, or blank —
+falls back to the default rather than removing the ceiling, so a typo in an
+environment variable cannot turn a guardrail off.
 
 ### CLINE_COMMAND_PERMISSIONS
 

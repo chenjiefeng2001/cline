@@ -255,7 +255,10 @@ Schedules can route results back to chat surfaces with `--delivery-adapter`, `--
 | `-c, --cwd <path>` | Working directory for tools |
 | `--config <path>` | Configuration directory (used for CLI home resolution) |
 | `--hooks-dir <path>` | Additional hooks directory hint for runtime hook injection |
-| `--acp` | ACP (Agent Client Protocol) mode |
+| `--acp` | ACP (Agent Client Protocol) mode. Has no flag parser, so the guardrails below come from `CLINE_MAX_ITERATIONS` / `CLINE_MAX_BUDGET_USD` |
+| `--max-iterations <count>` | Maximum model round-trips per turn (default: `50`). Ends the turn as `max_iterations` |
+| `--max-budget-usd <amount>` | Spend ceiling in USD for a single run (default: `5`). Ends the turn as `budget_exhausted` |
+| `--max-parallel-tool-calls <count>` | Tool calls executed concurrently within one turn (default: `6`; `1` forces serial). Only tools declared concurrency-safe batch together |
 | `--thinking [none\|low\|medium\|high\|xhigh]` | Model thinking level when supported. Defaults to `medium` when the flag is provided without a level; thinking is off when the flag is omitted. |
 | `--compaction <agentic\|basic\|off>` | Context compaction mode. Defaults to `basic`; use `agentic` for LLM compaction or `off` to disable. |
 | `--retries <count>` | Maximum consecutive mistakes (retries) before halting (default: `3`) |
@@ -337,6 +340,11 @@ Desktop-integrated approval mode is also supported via env wiring (`CLINE_TOOL_A
 - `CLINE_SANDBOX` - Set to `1` to force sandbox mode
 - `CLINE_SANDBOX_DATA_DIR` - Override sandbox state directory
 - `CLINE_TEAM_DATA_DIR` - Override team persistence directory
+- `CLINE_MAX_ITERATIONS` - Iteration ceiling for ACP sessions, which have no flags (default `50`)
+- `CLINE_MAX_BUDGET_USD` - Spend ceiling in USD for ACP sessions (default `5`)
+
+A guardrail value that is not a usable positive number falls back to the default
+rather than removing the ceiling, so a typo here cannot turn a guardrail off.
 - `CLINE_BUILD_ENV` - Runtime build mode for SDK-owned subprocess launches
 - `CLINE_DEBUG_HOST` - Host for development inspector listeners (default `127.0.0.1`)
 - `CLINE_DEBUG_PORT_BASE` - Base inspector port for development child processes
