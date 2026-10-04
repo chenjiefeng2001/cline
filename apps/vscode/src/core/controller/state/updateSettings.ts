@@ -135,6 +135,80 @@ export async function updateSettings(controller: Controller, request: UpdateSett
 			controller.stateManager.setGlobalState("maxConsecutiveMistakes", Number(request.maxConsecutiveMistakes))
 		}
 
+		// Update the per-turn iteration cap. 0 is meaningful ("no limit"), so the
+		// value is stored as given rather than being filtered as falsy — that
+		// mistake would make the UI show "unlimited" while the run was capped.
+		if (request.maxIterationsSetting !== undefined) {
+			const parsed = Number(request.maxIterationsSetting)
+			if (Number.isFinite(parsed) && parsed >= 0) {
+				controller.stateManager.setGlobalState("maxIterationsSetting", Math.floor(parsed))
+			}
+		}
+
+		// Guardrails and safety boundaries. Each was already read into
+		// CoreSessionConfig; these handlers give the webview a way to write them.
+		// Numeric bounds are validated rather than stored blindly, because a
+		// malformed value here would otherwise reach the runtime as an unbounded
+		// loop or a zero-concurrency configuration.
+		if (request.maxParallelToolCalls !== undefined) {
+			const parsed = Number(request.maxParallelToolCalls)
+			if (Number.isInteger(parsed) && parsed >= 1) {
+				controller.stateManager.setGlobalState("maxParallelToolCalls", parsed)
+			}
+		}
+		if (request.runBudgetMaxTotalCost !== undefined) {
+			const parsed = Number(request.runBudgetMaxTotalCost)
+			// 0 means "no ceiling"; negative spend makes no sense.
+			if (Number.isFinite(parsed) && parsed >= 0) {
+				controller.stateManager.setGlobalState("runBudgetMaxTotalCost", parsed)
+			}
+		}
+		if (request.fileBoundaryEnabled !== undefined) {
+			controller.stateManager.setGlobalState("fileBoundaryEnabled", !!request.fileBoundaryEnabled)
+		}
+		if (request.fileBoundaryAdditionalRoots !== undefined) {
+			controller.stateManager.setGlobalState("fileBoundaryAdditionalRoots", String(request.fileBoundaryAdditionalRoots))
+		}
+		if (request.agentTeamsEnabled !== undefined) {
+			controller.stateManager.setGlobalState("agentTeamsEnabled", !!request.agentTeamsEnabled)
+		}
+		// Memory write paths retain data outside the conversation, so each switch
+		// is stored only when explicitly sent rather than being derived from a
+		// master flag.
+		for (const [field, key] of [
+			["memoryEnabled", "memoryEnabled"],
+			["memoryRecallEnabled", "memoryRecallEnabled"],
+			["memoryWriteEnabled", "memoryWriteEnabled"],
+			["memoryAutoCaptureEnabled", "memoryAutoCaptureEnabled"],
+		] as const) {
+			const value = request[field]
+			if (value !== undefined) {
+				controller.stateManager.setGlobalState(key, !!value)
+			}
+		}
+		// Web search egress. The provider's own environment variable takes priority over
+		// this key, so an operator can override a stored value without editing
+		// settings; it is read back through getGlobalSettingsKey like its siblings.
+		if (request.webSearchEnabled !== undefined) {
+			controller.stateManager.setGlobalState("webSearchEnabled", !!request.webSearchEnabled)
+		}
+		for (const [field, key] of [
+			["webSearchProvider", "webSearchProvider"],
+			["webSearchApiKey", "webSearchApiKey"],
+			["webSearchEngineId", "webSearchEngineId"],
+		] as const) {
+			const value = request[field]
+			if (value !== undefined) {
+				controller.stateManager.setGlobalState(key, String(value))
+			}
+		}
+		if (request.webSearchMaxResults !== undefined) {
+			const parsed = Number(request.webSearchMaxResults)
+			if (Number.isFinite(parsed) && parsed > 0) {
+				controller.stateManager.setGlobalState("webSearchMaxResults", Math.floor(parsed))
+			}
+		}
+
 		// Update network request timeout (ms). Mirrors the CLI/ACP pass-through
 		// path (Settings.request_timeout_ms) so the webview toggle round-trips.
 		// 0/negative is treated as "unset" (provider default), which is what the

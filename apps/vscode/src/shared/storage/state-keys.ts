@@ -314,7 +314,19 @@ const USER_SETTINGS_FIELDS = {
 	agentTeamsEnabled: { default: false as boolean },
 	// Model round-trips allowed per turn. Previously absent, which meant an
 	// unbounded loop; max_iterations is a finish reason, not a crash.
-	maxIterationsSetting: { default: 50 as number },
+	//
+	// 0 means "no limit" and is passed to the runtime as `maxIterations:
+	// undefined`, which is the runtime's own unbounded sentinel. A positive value
+	// caps the turn. 0 is the default because the cap is a guardrail against a
+	// runaway loop, not a correctness requirement, and silently truncating a long
+	// autonomous run is worse than letting the user stop it.
+	maxIterationsSetting: { default: 0 as number },
+	// Tool calls executed concurrently within one assistant turn. The runtime has
+	// implemented this for a long time and nothing set it, so every turn ran strictly
+	// serially even when the model emitted five independent reads at once.
+	// Only tools declaring `concurrency: "safe"` batch together; anything else still
+	// runs alone in emission order. Set to 1 to restore fully serial execution.
+	maxParallelToolCalls: { default: 6 as number },
 	// Spend ceiling in USD for a single agent run. AgentRunBudget was implemented
 	// and conformance-tested in the SDK with no caller; budget_exhausted is a finish
 	// reason and the in-flight turn still completes.

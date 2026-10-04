@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useExtensionState } from "@/context/ExtensionStateContext"
+import { DebouncedTextField } from "../common/DebouncedTextField"
 import Section from "../Section"
 import { updateSetting } from "../utils/settingsHandlers"
 
@@ -244,6 +245,17 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		backgroundEditEnabled,
 		showFeatureTips,
 		maxConsecutiveMistakes,
+		maxIterationsSetting,
+		maxParallelToolCalls,
+		runBudgetMaxTotalCost,
+		fileBoundaryEnabled,
+		fileBoundaryAdditionalRoots,
+		agentTeamsEnabled,
+		memoryEnabled,
+		memoryRecallEnabled,
+		memoryWriteEnabled,
+		memoryAutoCaptureEnabled,
+		webSearchEnabled,
 		requestTimeoutMs,
 	} = useExtensionState()
 
@@ -322,6 +334,131 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 									label="Max Consecutive Mistakes"
 									onCommit={(value) => updateSetting("maxConsecutiveMistakes", value ?? 0)}
 									value={maxConsecutiveMistakes ?? 3}
+								/>
+							</div>
+							<div className="pt-3">
+								<NumberSettingField
+									description="Maximum model round-trips per turn. Set to 0 for no limit — useful for long autonomous runs, where a hard stop can truncate real work. Leave a value as a guardrail against a runaway loop."
+									id="max-iterations"
+									label="Max Iterations"
+									min={0}
+									onCommit={(value) => updateSetting("maxIterationsSetting", value ?? 0)}
+									placeholder="0"
+									value={maxIterationsSetting ?? 0}
+								/>
+							</div>
+							<div className="pt-3">
+								<NumberSettingField
+									description="Spend ceiling in USD for a single agent run. 0 removes the ceiling. Reaching it ends the turn as budget_exhausted rather than crashing."
+									id="run-budget-max-total-cost"
+									label="Run Budget (USD)"
+									min={0}
+									onCommit={(value) => updateSetting("runBudgetMaxTotalCost", value ?? 0)}
+									placeholder="0"
+									value={runBudgetMaxTotalCost ?? 5}
+								/>
+							</div>
+							<div className="pt-3">
+								<NumberSettingField
+									description="Tool calls run concurrently within one assistant turn. Only tools that declare themselves concurrency-safe batch together; everything else still runs alone. Set to 1 for fully serial execution."
+									id="max-parallel-tool-calls"
+									label="Max Parallel Tool Calls"
+									min={1}
+									onCommit={(value) => updateSetting("maxParallelToolCalls", value ?? 1)}
+									placeholder="6"
+									value={maxParallelToolCalls ?? 6}
+								/>
+							</div>
+							<div className="space-y-2 py-3">
+								<FeatureRow
+									checked={agentTeamsEnabled}
+									description="Enables the multi-agent team tool surface. This changes the model's tool set substantially, so it is separate from the subagent toggle above."
+									label="Agent Teams"
+									onChange={(checked) => updateSetting("agentTeamsEnabled", checked)}
+								/>
+							</div>
+						</div>
+					</div>
+
+					{/* File-tool workspace boundary */}
+					<div>
+						<div className="text-xs font-medium text-foreground/80 uppercase tracking-wider mb-3">Files</div>
+						<div
+							className="relative p-3 pt-0 my-3 rounded-md border border-editor-widget-border/50"
+							id="file-boundary">
+							<div className="space-y-2 py-3">
+								<FeatureRow
+									checked={fileBoundaryEnabled ?? true}
+									description="Restricts the file tools to the session workspace. Turning this off lets the agent reach any path on disk — prefer adding directories below instead."
+									label="Restrict Files To Workspace"
+									onChange={(checked) => updateSetting("fileBoundaryEnabled", checked)}
+								/>
+							</div>
+							<div className="pt-3">
+								<div className="space-y-2">
+									<Label className="text-sm font-medium text-foreground">Additional Roots</Label>
+									<p className="text-xs text-muted-foreground">
+										Extra directories the file tools may touch, in addition to the workspace. Accepts a JSON
+										array or a comma/newline separated list.
+									</p>
+									<DebouncedTextField
+										id="file-boundary-additional-roots"
+										initialValue={fileBoundaryAdditionalRoots ?? ""}
+										onChange={(value) => updateSetting("fileBoundaryAdditionalRoots", value)}
+										placeholder="/path/to/one, /path/to/two"
+									/>
+								</div>
+							</div>
+						</div>
+					</div>
+
+					{/* Memory */}
+					<div>
+						<div className="text-xs font-medium text-foreground/80 uppercase tracking-wider mb-3">Memory</div>
+						<div
+							className="relative p-3 pt-0 my-3 rounded-md border border-editor-widget-border/50"
+							id="memory-features">
+							<div className="space-y-2 py-3">
+								<FeatureRow
+									checked={memoryEnabled}
+									description="Master switch for cross-session project memory. Off opens no store and exposes no tool."
+									label="Memory"
+									onChange={(checked) => updateSetting("memoryEnabled", checked)}
+								/>
+								<FeatureRow
+									checked={memoryRecallEnabled}
+									description="Exposes the recall_memory tool, which only reads stored memories."
+									label="Memory Recall"
+									onChange={(checked) => updateSetting("memoryRecallEnabled", checked)}
+								/>
+								<FeatureRow
+									checked={memoryWriteEnabled}
+									description="Exposes the remember tool. This is the agent-initiated write path and retains data outside the conversation, so it is opt-in."
+									label="Memory Write"
+									onChange={(checked) => updateSetting("memoryWriteEnabled", checked)}
+								/>
+								<FeatureRow
+									checked={memoryAutoCaptureEnabled}
+									description="Extracts memories from completed turns automatically, instead of only when the agent chooses to write one."
+									label="Auto Capture"
+									onChange={(checked) => updateSetting("memoryAutoCaptureEnabled", checked)}
+								/>
+							</div>
+						</div>
+					</div>
+
+					{/* Web search */}
+					<div>
+						<div className="text-xs font-medium text-foreground/80 uppercase tracking-wider mb-3">Web Search</div>
+						<div
+							className="relative p-3 pt-0 my-3 rounded-md border border-editor-widget-border/50"
+							id="web-search-features">
+							<div className="space-y-2 py-3">
+								<FeatureRow
+									checked={webSearchEnabled}
+									description="Enables live web search. A search sends the model's query text to a third-party provider — a different kind of data egress than reading a file."
+									label="Web Search"
+									onChange={(checked) => updateSetting("webSearchEnabled", checked)}
 								/>
 							</div>
 						</div>

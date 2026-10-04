@@ -307,6 +307,7 @@ message Settings {
   optional int32 web_search_max_results = 201;
   optional string web_search_engine_id = 202;
   optional string web_search_api_key = 203;
+  optional int32 max_parallel_tool_calls = 204;
 }
 
 message State {
@@ -464,6 +465,36 @@ message UpdateSettingsRequest {
   // Auto-compact threshold in percent of the usable input budget (50-100).
   // Maps 1:1 to the SDK trigger ratio /100; unset keeps the SDK default (90%).
   optional double auto_compact_threshold = 46;
+  // Model round-trips allowed per turn. 0 means no limit (the runtime's
+  // unbounded sentinel); a positive value caps the turn.
+  optional int32 max_iterations_setting = 47;
+  // Guardrails and safety boundaries. These already existed on `Settings` and
+  // were already read into the session config, but had no field here, so the
+  // webview had no way to write them: they were settable only by hand-editing
+  // global state. Numbers continue from 47.
+  optional int32 max_parallel_tool_calls = 48;
+  // Spend ceiling in USD for one agent run (0 = no ceiling).
+  optional double run_budget_max_total_cost = 49;
+  // Restrict the file tools to the session workspace.
+  optional bool file_boundary_enabled = 50;
+  // Extra directories the file tools may touch. A string rather than a repeated
+  // field: the state-proto generator has no array support and would emit a
+  // scalar, so a real array would round-trip as a joined string.
+  optional string file_boundary_additional_roots = 51;
+  optional bool agent_teams_enabled = 52;
+  // Cross-session memory. Split into switches because the write paths retain
+  // data outside the conversation and should be opted into deliberately.
+  optional bool memory_enabled = 53;
+  optional bool memory_recall_enabled = 54;
+  optional bool memory_write_enabled = 55;
+  optional bool memory_auto_capture_enabled = 56;
+  // Live web search. Off by default: a search sends the model's query text to a
+  // third-party provider, which is a different kind of egress than file reads.
+  optional bool web_search_enabled = 57;
+  optional string web_search_provider = 58;
+  optional string web_search_api_key = 59;
+  optional string web_search_engine_id = 60;
+  optional int32 web_search_max_results = 61;
 }
 
 message UpdateTerminalConnectionTimeoutRequest {

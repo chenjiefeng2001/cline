@@ -378,6 +378,7 @@ export {
 	createHookAuditHooks,
 	createHookConfigFileExtension,
 	createHookConfigFileHooks,
+	createPreCompactHookEmitter,
 	createSubprocessHooks,
 	HOOK_CONFIG_FILE_EVENT_MAP,
 	HOOKS_CONFIG_DIRECTORY_NAME,

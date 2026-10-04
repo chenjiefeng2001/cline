@@ -13,6 +13,10 @@ export default defineConfig({
 			"src/core/storage/remote-config/**/*.test.ts",
 			"src/core/controller/state/**/*.test.ts",
 			"src/core/controller/slash/**/*.test.ts",
+			// The gRPC subscription registry. Headless (no `vscode` import): it owns the
+			// staleness policy that decides whether a webview streaming subscription is
+			// still wanted, and that policy once reaped live subscriptions on a timer.
+			"src/core/controller/grpc-request-registry.test.ts",
 			"src/services/mcp/__tests__/settingsLock.test.ts",
 			"src/shared/model-catalog/provider-helpers.test.ts",
 			"src/core/controller/models/__tests__/providerCatalogHandlers.test.ts",

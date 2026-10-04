@@ -18,6 +18,17 @@ const mockExtensionState = vi.hoisted(() => ({
 		remoteConfigSettings: {},
 		backgroundEditEnabled: false,
 		maxConsecutiveMistakes: 3,
+		maxIterationsSetting: 0,
+		maxParallelToolCalls: 6,
+		runBudgetMaxTotalCost: 5,
+		fileBoundaryEnabled: true,
+		fileBoundaryAdditionalRoots: "",
+		agentTeamsEnabled: false,
+		memoryEnabled: false,
+		memoryRecallEnabled: false,
+		memoryWriteEnabled: false,
+		memoryAutoCaptureEnabled: false,
+		webSearchEnabled: false,
 		requestTimeoutMs: undefined,
 	},
 }))
@@ -148,6 +159,110 @@ describe("FeatureSettingsSection", () => {
 		fireEvent.blur(input)
 
 		expect(mockUpdateSetting).toHaveBeenCalledWith("maxConsecutiveMistakes", 5)
+	})
+
+	it("renders Max Iterations defaulting to 0 (no limit)", () => {
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+
+		expect(screen.getByText("Max Iterations")).toBeTruthy()
+		expect(screen.getByText(/Set to 0 for no limit/)).toBeTruthy()
+
+		const input = container.querySelector("#max-iterations") as HTMLInputElement
+		expect(input).toBeTruthy()
+		expect(input.value).toBe("0")
+	})
+
+	it("commits Max Iterations, including 0 to disable the limit", () => {
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+		const input = container.querySelector("#max-iterations") as HTMLInputElement
+
+		fireEvent.input(input, { target: { value: "25" } })
+		fireEvent.blur(input)
+		expect(mockUpdateSetting).toHaveBeenCalledWith("maxIterationsSetting", 25)
+
+		// 0 is the documented "unlimited" value, so the field must accept it —
+		// min=0 rather than min=1.
+		fireEvent.input(input, { target: { value: "0" } })
+		fireEvent.blur(input)
+		expect(mockUpdateSetting).toHaveBeenCalledWith("maxIterationsSetting", 0)
+	})
+
+	it("rejects a negative Max Iterations value without committing", () => {
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+		const input = container.querySelector("#max-iterations") as HTMLInputElement
+
+		mockUpdateSetting.mockClear()
+		fireEvent.input(input, { target: { value: "-1" } })
+		fireEvent.blur(input)
+
+		expect(mockUpdateSetting).not.toHaveBeenCalled()
+		expect(screen.getByText(/whole number/)).toBeTruthy()
+	})
+
+	it("exposes the guardrails the session factory already reads", () => {
+		// Each of these was wired into CoreSessionConfig with no UI at all, so the
+		// dialog showed nothing and the values could only be changed by hand.
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+
+		expect((container.querySelector("#run-budget-max-total-cost") as HTMLInputElement).value).toBe("5")
+		expect((container.querySelector("#max-parallel-tool-calls") as HTMLInputElement).value).toBe("6")
+		// FeatureRow keys its Switch by label, so toggles are queried by label
+		// rather than by an id attribute.
+		expect(screen.getByText("Restrict Files To Workspace")).toBeTruthy()
+		expect(screen.getByText("Agent Teams")).toBeTruthy()
+		expect(container.querySelector("#file-boundary-additional-roots")).toBeTruthy()
+	})
+
+	it("commits the budget ceiling, including 0 to remove it", () => {
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+		const input = container.querySelector("#run-budget-max-total-cost") as HTMLInputElement
+
+		// NumberSettingField parses with parseInt, so the field is whole dollars.
+		fireEvent.input(input, { target: { value: "3" } })
+		fireEvent.blur(input)
+		expect(mockUpdateSetting).toHaveBeenCalledWith("runBudgetMaxTotalCost", 3)
+
+		fireEvent.input(input, { target: { value: "0" } })
+		fireEvent.blur(input)
+		expect(mockUpdateSetting).toHaveBeenCalledWith("runBudgetMaxTotalCost", 0)
+	})
+
+	it("commits Max Parallel Tool Calls and rejects 0", () => {
+		// 1 is the documented "fully serial" escape hatch, so min=1 — 0 would be an
+		// invalid worker count rather than a meaningful setting.
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+		const input = container.querySelector("#max-parallel-tool-calls") as HTMLInputElement
+
+		fireEvent.input(input, { target: { value: "1" } })
+		fireEvent.blur(input)
+		expect(mockUpdateSetting).toHaveBeenCalledWith("maxParallelToolCalls", 1)
+
+		mockUpdateSetting.mockClear()
+		fireEvent.input(input, { target: { value: "0" } })
+		fireEvent.blur(input)
+		expect(mockUpdateSetting).not.toHaveBeenCalled()
+	})
+
+	it("renders the memory switches and the web search toggle", () => {
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+
+		// FeatureRow keys each Switch by its label, so the switch element is
+		// located by that id. A text query is ambiguous here: the "Memory" section
+		// heading and the "Memory" toggle share wording.
+		for (const label of ["Memory", "Memory Recall", "Memory Write", "Auto Capture", "Web Search"]) {
+			expect(container.querySelector(`[id="${label}"]`), `missing toggle: ${label}`).toBeTruthy()
+		}
+	})
+
+	it("toggles the file boundary and agent teams", () => {
+		const { container } = render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+
+		// The click must land on the Switch, not on its label text.
+		fireEvent.click(container.querySelector('[id="Restrict Files To Workspace"]') as Element)
+		expect(mockUpdateSetting).toHaveBeenCalledWith("fileBoundaryEnabled", expect.any(Boolean))
+
+		fireEvent.click(container.querySelector('[id="Agent Teams"]') as Element)
+		expect(mockUpdateSetting).toHaveBeenCalledWith("agentTeamsEnabled", expect.any(Boolean))
 	})
 
 	it("renders Request Timeout (ms) in the Advanced section", () => {

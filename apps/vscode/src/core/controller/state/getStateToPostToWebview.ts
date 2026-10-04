@@ -68,6 +68,25 @@ export async function getStateToPostToWebview(controller: {
 	const customPrompt = stateManager.getGlobalSettingsKey("customPrompt")
 	const mcpResponsesCollapsed = stateManager.getGlobalStateKey("mcpResponsesCollapsed")
 	const maxConsecutiveMistakes = stateManager.getGlobalSettingsKey("maxConsecutiveMistakes")
+	// 0 is the documented "no limit" value and is meaningful here, so `?? 0` is
+	// applied before the default rather than after: `|| 50` would erase it.
+	const maxIterationsSetting = stateManager.getGlobalSettingsKey("maxIterationsSetting") ?? 0
+	const maxParallelToolCalls = stateManager.getGlobalSettingsKey("maxParallelToolCalls") ?? 6
+	const runBudgetMaxTotalCost = stateManager.getGlobalSettingsKey("runBudgetMaxTotalCost") ?? 5
+	const fileBoundaryEnabled = stateManager.getGlobalSettingsKey("fileBoundaryEnabled") ?? true
+	const fileBoundaryAdditionalRoots = stateManager.getGlobalSettingsKey("fileBoundaryAdditionalRoots") ?? ""
+	const agentTeamsEnabled = stateManager.getGlobalSettingsKey("agentTeamsEnabled") ?? false
+	const memoryEnabled = stateManager.getGlobalSettingsKey("memoryEnabled") ?? false
+	const memoryRecallEnabled = stateManager.getGlobalSettingsKey("memoryRecallEnabled") ?? false
+	const memoryWriteEnabled = stateManager.getGlobalSettingsKey("memoryWriteEnabled") ?? false
+	const memoryAutoCaptureEnabled = stateManager.getGlobalSettingsKey("memoryAutoCaptureEnabled") ?? false
+	const webSearchEnabled = stateManager.getGlobalSettingsKey("webSearchEnabled") ?? false
+	const webSearchProvider = stateManager.getGlobalSettingsKey("webSearchProvider") ?? ""
+	// Deliberately NOT the stored key: a secret must not be posted into the
+	// webview. The dialog shows it as a write-only field instead.
+	const webSearchApiKey = ""
+	const webSearchEngineId = stateManager.getGlobalSettingsKey("webSearchEngineId") ?? ""
+	const webSearchMaxResults = stateManager.getGlobalSettingsKey("webSearchMaxResults") ?? 5
 	const requestTimeoutMs = stateManager.getGlobalSettingsKey("requestTimeoutMs")
 	const favoritedModelIds = stateManager.getGlobalStateKey("favoritedModelIds")
 	const lastDismissedInfoBannerVersion = stateManager.getGlobalStateKey("lastDismissedInfoBannerVersion") || 0
@@ -162,6 +181,21 @@ export async function getStateToPostToWebview(controller: {
 		onboardingModels,
 		mcpResponsesCollapsed,
 		maxConsecutiveMistakes,
+		maxIterationsSetting,
+		maxParallelToolCalls,
+		runBudgetMaxTotalCost,
+		fileBoundaryEnabled,
+		fileBoundaryAdditionalRoots,
+		agentTeamsEnabled,
+		memoryEnabled,
+		memoryRecallEnabled,
+		memoryWriteEnabled,
+		memoryAutoCaptureEnabled,
+		webSearchEnabled,
+		webSearchProvider,
+		webSearchApiKey,
+		webSearchEngineId,
+		webSearchMaxResults,
 		requestTimeoutMs,
 		customPrompt,
 		shouldShowAnnouncement,

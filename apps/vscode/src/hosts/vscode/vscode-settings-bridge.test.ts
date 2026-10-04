@@ -103,6 +103,37 @@ describe("computeSettingsImport (initial import)", () => {
 			expect(stateKey.length).toBeGreaterThan(0)
 		}
 	})
+
+	it("maps every key declared in package.json contributes.configuration", () => {
+		// Without this, a setting can be added to package.json, show up in the
+		// VS Code settings UI, and then silently do nothing because the bridge
+		// has no mapping for it. That is exactly how the guardrails below
+		// (file boundary, spend ceiling, iteration cap) ended up configured
+		// nowhere at all.
+		const pkg = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as {
+			contributes: {
+				configuration: { properties: Record<string, unknown> }
+			}
+		}
+		const declared = Object.keys(pkg.contributes.configuration.properties).map((key) => key.replace(/^cline\./, ""))
+		for (const key of declared) {
+			expect(
+				Object.hasOwn(SETTINGS_SCHEMA_MAP, key),
+				`cline.${key} is declared in package.json but missing from SETTINGS_SCHEMA_MAP`,
+			).toBe(true)
+		}
+	})
+
+	it("routes the guardrail and safety settings to their state keys", () => {
+		// Spelled out because these are the ones whose absence was a real bug:
+		// each was already read into CoreSessionConfig but had no way to be set.
+		expect(SETTINGS_SCHEMA_MAP.maxIterations).toBe("maxIterationsSetting")
+		expect(SETTINGS_SCHEMA_MAP.maxParallelToolCalls).toBe("maxParallelToolCalls")
+		expect(SETTINGS_SCHEMA_MAP.runBudgetMaxTotalCost).toBe("runBudgetMaxTotalCost")
+		expect(SETTINGS_SCHEMA_MAP.fileBoundaryEnabled).toBe("fileBoundaryEnabled")
+		expect(SETTINGS_SCHEMA_MAP.fileBoundaryAdditionalRoots).toBe("fileBoundaryAdditionalRoots")
+		expect(SETTINGS_SCHEMA_MAP.agentTeamsEnabled).toBe("agentTeamsEnabled")
+	})
 })
 
 describe("computeSettingsOverride (live edits)", () => {

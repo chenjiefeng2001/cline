@@ -435,6 +435,69 @@
 				"cline.openTelemetryEnabled": {
 					"type": "boolean",
 					"description": "Enable OpenTelemetry instrumentation and exporting."
+				},
+				"cline.maxIterations": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Maximum model round-trips per turn (0 = no limit). The cap is a guardrail against a runaway loop; leave it at 0 unless you need a hard stop."
+				},
+				"cline.maxParallelToolCalls": {
+					"type": "number",
+					"minimum": 1,
+					"description": "Tool calls executed concurrently within one assistant turn. Only tools that declare themselves concurrency-safe batch together; everything else still runs alone. Set to 1 for fully serial execution."
+				},
+				"cline.runBudgetMaxTotalCost": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Spend ceiling in USD for a single agent run (0 = no ceiling). Reaching it finishes the turn as budget_exhausted rather than crashing."
+				},
+				"cline.fileBoundaryEnabled": {
+					"type": "boolean",
+					"description": "Restrict file tools (read_files, editor) to the session workspace. Turning this off lets the agent reach any path on disk — prefer adding directories to cline.fileBoundaryAdditionalRoots instead."
+				},
+				"cline.fileBoundaryAdditionalRoots": {
+					"type": "string",
+					"description": "Extra directories the file tools may touch, in addition to the workspace. Accepts a JSON array or a newline/comma separated list."
+				},
+				"cline.agentTeamsEnabled": {
+					"type": "boolean",
+					"description": "Enable the multi-agent team tool surface. This changes the model's tool set substantially, so it is separate from cline.subagentsEnabled."
+				},
+				"cline.memoryEnabled": {
+					"type": "boolean",
+					"description": "Enable cross-session project memory. The master switch: opens no store and exposes no tool."
+				},
+				"cline.memoryRecallEnabled": {
+					"type": "boolean",
+					"description": "Expose the recall_memory tool, which only reads stored memories."
+				},
+				"cline.memoryWriteEnabled": {
+					"type": "boolean",
+					"description": "Expose the remember tool. This is the agent-initiated write path and retains data outside the conversation, so it is opt-in."
+				},
+				"cline.memoryAutoCaptureEnabled": {
+					"type": "boolean",
+					"description": "Automatically extract memories from completed turns instead of only writing them when the agent chooses to."
+				},
+				"cline.webSearchEnabled": {
+					"type": "boolean",
+					"description": "Enable live web search. A search sends the model's query text to a third-party provider, which is a different kind of data egress than reading a file."
+				},
+				"cline.webSearchProvider": {
+					"type": "string",
+					"description": "Web search backend (for example 'exa' or 'tavily')."
+				},
+				"cline.webSearchApiKey": {
+					"type": "string",
+					"description": "API key for the web search provider. The provider's own environment variable takes priority, so an operator can override a stored key without editing settings."
+				},
+				"cline.webSearchEngineId": {
+					"type": "string",
+					"description": "Search engine identifier passed to the web search provider."
+				},
+				"cline.webSearchMaxResults": {
+					"type": "number",
+					"description": "Maximum number of web search results to return."
 				}
 			}
 		}

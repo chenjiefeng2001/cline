@@ -41,6 +41,29 @@ export const SETTINGS_SCHEMA_MAP: Record<string, string> = {
 	worktreesEnabled: "worktreesEnabled",
 	yoloMode: "yoloModeToggled",
 	openTelemetryEnabled: "openTelemetryEnabled",
+	// Guardrails and safety boundaries. These were already read into
+	// CoreSessionConfig but had no entry here, so they could only be changed by
+	// hand-editing global state — a security control (the file boundary) and a
+	// spend control (the budget ceiling) among them.
+	maxIterations: "maxIterationsSetting",
+	maxParallelToolCalls: "maxParallelToolCalls",
+	runBudgetMaxTotalCost: "runBudgetMaxTotalCost",
+	fileBoundaryEnabled: "fileBoundaryEnabled",
+	fileBoundaryAdditionalRoots: "fileBoundaryAdditionalRoots",
+	agentTeamsEnabled: "agentTeamsEnabled",
+	// Memory is split into switches because the write paths retain data outside
+	// the conversation and should be opted into deliberately.
+	memoryEnabled: "memoryEnabled",
+	memoryRecallEnabled: "memoryRecallEnabled",
+	memoryWriteEnabled: "memoryWriteEnabled",
+	memoryAutoCaptureEnabled: "memoryAutoCaptureEnabled",
+	// Web search is off by default: it sends the model's query text to a
+	// third-party provider, which is a different kind of egress than file reads.
+	webSearchEnabled: "webSearchEnabled",
+	webSearchProvider: "webSearchProvider",
+	webSearchApiKey: "webSearchApiKey",
+	webSearchEngineId: "webSearchEngineId",
+	webSearchMaxResults: "webSearchMaxResults",
 }
 
 /** Minimal surface of the VS Code configuration API used by the bridge. */

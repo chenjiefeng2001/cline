@@ -40,9 +40,47 @@ describe("error boundaries report to the extension", () => {
 })
 
 describe("webview_ready is not gated on optional wiring", () => {
-	const effectStart = ctx.indexOf("stateSubscriptionRef.current = StateServiceClient.subscribeToState")
+	// The subscription used to be spelled out inline here. It is now created by
+	// subscribeToStateStream(), which is the only place allowed to subscribe — both
+	// this mount and the self-healing re-subscription in requestFullSync go through
+	// it so a recovery can never install a less capable frame handler than the one
+	// it replaced. The contract under test is unchanged: ready is sent after the
+	// state subscription is wired.
+	const effectStart = ctx.indexOf("stateSubscriptionRef.current = subscribeToStateStream(")
 	const ready = ctx.indexOf('postMessage({ type: "webview_ready" })')
 	const endOfEffect = ctx.indexOf("}, [])", ready)
+
+	it("routes the mount-time subscription through subscribeToStateStream", () => {
+		expect(effectStart).toBeGreaterThan(-1)
+		// ...and that helper is the one carrying both stream channels.
+		const helper = ctx.slice(ctx.indexOf("const subscribeToStateStream"))
+		expect(helper).toContain("onResponse: handleStateFrame")
+	})
+
+	it("has exactly one subscribeToState call site, so recovery cannot downgrade the handler", () => {
+		// `requestFullSync` cancels the mount subscription and installs a replacement.
+		// When that replacement was spelled out inline it handled only `stateJson` and
+		// ignored `deltaJson`, so one detected delta gap permanently cost the webview
+		// delta handling — and the gap detector itself, which lived in the discarded
+		// closure, so it could never recover or be re-detected. During a turn the host
+		// skips the full snapshot whenever it shipped deltas, which froze `turnState`
+		// and the footer/input gate for the remainder of the turn.
+		//
+		// Collapsing both call sites onto `subscribeToStateStream` makes that class of
+		// regression structurally impossible: there is nowhere else to subscribe.
+		const occurrences = ctx.split("StateServiceClient.subscribeToState(").length - 1
+		expect(occurrences).toBe(1)
+	})
+
+	it("handles both the snapshot and the delta channel in one frame handler", () => {
+		const handler = ctx.slice(ctx.indexOf("const handleStateFrame"), ctx.indexOf("const subscribeToStateStream"))
+		expect(handler).toContain("if (response.stateJson)")
+		expect(handler).toContain("if (response.deltaJson)")
+		expect(handler).toContain('case "append_message"')
+		// The gap detector must live in the shared handler too, otherwise a recovery
+		// subscription could not notice the NEXT gap.
+		expect(handler).toContain("requestFullSyncRef.current()")
+	})
 
 	it("is sent after the state subscription is wired", () => {
 		expect(effectStart).toBeGreaterThan(-1)

@@ -1,17 +1,16 @@
 import { DEFAULT_AUTO_APPROVAL_SETTINGS } from "@shared/AutoApprovalSettings"
 import { DEFAULT_BROWSER_SETTINGS } from "@shared/BrowserSettings"
-import { type ClineMessage, DEFAULT_PLATFORM, type ExtensionState, type TurnState } from "@shared/ExtensionMessage"
+import { DEFAULT_PLATFORM, type ExtensionState } from "@shared/ExtensionMessage"
 import { DEFAULT_MCP_DISPLAY_MODE } from "@shared/McpDisplayMode"
 import type { UserInfo } from "@shared/proto/cline/account"
 import { EmptyRequest } from "@shared/proto/cline/common"
 import type { OpenRouterCompatibleModelInfo, ProviderModelsResponse } from "@shared/proto/cline/models"
 import { OnboardingModelGroup, type TerminalProfile } from "@shared/proto/cline/state"
-import { LoadHistoryBatchRequest } from "@shared/proto/cline/task"
 import { convertProtoToClineMessage } from "@shared/proto-conversions/cline-message"
 import { convertProtoMcpServersToMcpServers } from "@shared/proto-conversions/mcp/mcp-server-conversion"
 import { fromProtobufModels } from "@shared/proto-conversions/models/typeConversion"
 import type React from "react"
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 import {
 	type ModelInfo,
 	openRouterDefaultModelId,
@@ -22,58 +21,39 @@ import {
 import { Environment } from "../../../src/shared/config-types"
 import type { McpServer, McpViewTab } from "../../../src/shared/mcp"
 import {
-	createReplicaState,
-	type ReplicaState,
-	applyBatchPrepend as reducerApplyBatchPrepend,
 	applyMessage as reducerApplyMessage,
 	applyStateSnapshot as reducerApplyStateSnapshot,
 } from "../components/chat/chat-view/messageReducer"
 import { PLATFORM_CONFIG } from "../config/platform.config"
-import {
-	McpServiceClient,
-	ModelsServiceClient,
-	StateServiceClient,
-	TaskServiceClient,
-	UiServiceClient,
-} from "../services/grpc-client"
-import { createFrameCoalescer, type FrameCoalescer, scheduleAnimationFrame } from "../utils/messageFrameScheduler"
+import { McpServiceClient, ModelsServiceClient, StateServiceClient, UiServiceClient } from "../services/grpc-client"
 import { reportWebviewError } from "../utils/reportWebviewError"
+import {
+	getReplica,
+	MessagesStateProvider,
+	persistReplicaState,
+	publishReplica,
+	resetMessagesStore,
+	restoreReplicaState,
+	setHasMoreMessages,
+	setReplica,
+} from "./messagesStore"
 
 export type ProviderId = string
 
-/**
- * High-frequency message state, decoupled from the low-frequency
- * ExtensionStateContext (V12 方案3 — fine-grained subscription).
- *
- * Streaming deltas, partial messages and transcript snapshots only update this
- * context, so settings/theme changes no longer re-render the message list and,
- * symmetrically, message updates no longer re-render settings/theme consumers.
- */
-export interface MessagesState {
-	clineMessages: ClineMessage[]
-	turnState?: TurnState
-	messageTruncated?: boolean
-	totalMessageCount?: number
-	/** Conversation/replica fence (see messageReducer.ts). */
-	epoch: number
-	/** Highest state snapshot version applied. */
-	stateVersion: number
-	/** True while older messages may still be loaded via loadHistoryBatch. */
-	hasMoreMessages: boolean
-	loadHistoryBatch: (taskId: string, beforeTs: number) => Promise<void>
-}
+export type { MessagesState } from "./messagesStore"
+// The transcript store moved to its own module. Re-exported here because these are
+// the established import sites for `useMessagesState` / `loadHistoryBatch`.
+export { loadHistoryBatch, useMessagesState } from "./messagesStore"
 
 /**
  * Low-frequency extension state. Message-transcript fields live in
- * MessagesStateContext (see above); they are excluded here so the main context
- * value stays stable while messages stream (V12 方案3).
+ * MessagesStateContext (see messagesStore.ts); they are excluded here so the main
+ * context value stays stable while messages stream (V12 方案3).
  */
 export type MainExtensionState = Omit<
 	ExtensionState,
 	"clineMessages" | "turnState" | "messageTruncated" | "totalMessageCount" | "epoch" | "stateVersion"
 >
-
-const MessagesStateContext = createContext<MessagesState | undefined>(undefined)
 
 interface ProviderModelsState {
 	providerId: ProviderId
@@ -359,6 +339,21 @@ export const ExtensionStateContextProvider: React.FC<{
 		terminalReuseEnabled: true,
 		vscodeTerminalExecutionMode: "backgroundExec",
 		maxConsecutiveMistakes: 3,
+		maxIterationsSetting: 0,
+		maxParallelToolCalls: 6,
+		runBudgetMaxTotalCost: 5,
+		fileBoundaryEnabled: true,
+		fileBoundaryAdditionalRoots: "",
+		agentTeamsEnabled: false,
+		memoryEnabled: false,
+		memoryRecallEnabled: false,
+		memoryWriteEnabled: false,
+		memoryAutoCaptureEnabled: false,
+		webSearchEnabled: false,
+		webSearchProvider: "",
+		webSearchApiKey: "",
+		webSearchEngineId: "",
+		webSearchMaxResults: 5,
 		requestTimeoutMs: undefined,
 		defaultTerminalProfile: "default",
 		isNewUser: false,
@@ -507,6 +502,227 @@ export const ExtensionStateContextProvider: React.FC<{
 	const MAX_FULL_SYNC_RETRIES = 3
 
 	/**
+	 * `requestFullSync` is called from the delta-gap branch of `handleStateFrame`,
+	 * while `requestFullSync` re-subscribes using `handleStateFrame`. That is a
+	 * cycle between two useCallbacks, so the indirection goes through a ref.
+	 * `handleStateFrame` only ever runs inside an async gRPC callback (never during
+	 * render), so reading the ref at call time cannot observe a stale callback.
+	 */
+	const requestFullSyncRef = useRef<() => void>(() => {})
+
+	/**
+	 * Pending full-sync re-subscription timer, so unmount cannot leave a timer that
+	 * installs a subscription into a torn-down tree.
+	 */
+	const pendingFullSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+	/**
+	 * Handle one frame from the `subscribeToState` stream.
+	 *
+	 * A frame is EITHER a full snapshot (`stateJson`) OR an incremental delta
+	 * (`deltaJson`) — see the `State` proto. This single handler covers both, and
+	 * EVERY subscription to that stream must use it.
+	 *
+	 * It used to be duplicated: the mount-time subscription handled both channels,
+	 * while the subscription `requestFullSync` installed to recover from a detected
+	 * gap handled only `stateJson`. So the self-healing path silently downgraded the
+	 * main path — one detected gap permanently cost the webview delta handling for
+	 * the rest of the page's life, together with the gap detector itself (which
+	 * lived in the discarded closure), so it could never recover or be re-detected.
+	 * During a turn the host skips the full snapshot whenever it shipped deltas
+	 * (see sdk-session-event-coordinator.ts), which left `turnState` frozen and the
+	 * footer/input gate stuck for the remainder of the turn.
+	 */
+	const handleStateFrame = useCallback(
+		(response: any) => {
+			// CHANNEL 1: Full state snapshot (ground truth — replaces everything)
+			if (response.stateJson) {
+				// V17 (P0): gate BEFORE parsing. The backend mirrors the snapshot's
+				// stateVersion in the out-of-band `response.stateVersion` field, so a
+				// stale/duplicate/out-of-order snapshot (already superseded by a newer
+				// snapshot or by deltas) can be dropped without paying the main-thread
+				// cost of JSON.parse-ing the whole ExtensionState.
+				//
+				// NOTE: uses the SNAPSHOT version space (lastSnapshotVersionRef), which is
+				// distinct from the delta version space (lastStateVersionRef). Mixing the
+				// two would drop every subsequent full snapshot because delta versions
+				// run far ahead of snapshot versions.
+				const oobStateVersion = response.stateVersion ?? 0
+				if (oobStateVersion > 0 && oobStateVersion <= lastSnapshotVersionRef.current) {
+					return
+				}
+				try {
+					const stateData = JSON.parse(response.stateJson) as ExtensionState
+					const incomingStateVersion = stateData.stateVersion ?? 0
+
+					// Route the snapshot's transcript through the convergent-replica reducer:
+					// merge by ts/seq within the same epoch (never truncate), replace on a
+					// newer epoch, ignore stale/older snapshots. Pagination metadata
+					// travels with the snapshot so it is owned/reset by the conversation fence.
+					const prevEpoch = getReplica().epoch
+					setReplica(
+						reducerApplyStateSnapshot(
+							getReplica(),
+							stateData.clineMessages ?? [],
+							stateData.epoch ?? 0,
+							incomingStateVersion,
+							stateData.turnState,
+							stateData.messageTruncated,
+							stateData.totalMessageCount,
+						),
+					)
+					if (getReplica().epoch !== prevEpoch) {
+						setHasMoreMessages(true)
+					}
+
+					// Publish the (seq-gated) transcript + pagination metadata to the
+					// messages store.
+					publishReplica()
+
+					const {
+						clineMessages: _clineMessages,
+						turnState: _turnState,
+						epoch: _epoch,
+						stateVersion: _stateVersion,
+						...restStateData
+					} = stateData
+
+					setState((prevState) => {
+						// Versioning logic for autoApprovalSettings
+						const incomingVersion = stateData.autoApprovalSettings?.version ?? 1
+						const currentVersion = prevState.autoApprovalSettings?.version ?? 1
+						const shouldUpdateAutoApproval = incomingVersion > currentVersion
+
+						const newState = {
+							...restStateData,
+							autoApprovalSettings: shouldUpdateAutoApproval
+								? stateData.autoApprovalSettings
+								: prevState.autoApprovalSettings,
+						}
+
+						// Update welcome screen state based on API configuration if welcome view not in progress
+						if (!newState.welcomeViewCompleted && !showWelcome) {
+							setShowWelcome(true)
+							setOnboardingModels(newState.onboardingModels)
+						} else if (newState.welcomeViewCompleted) {
+							setShowWelcome(false)
+							setOnboardingModels(undefined)
+						}
+
+						setDidHydrateState(true)
+						setHydrationTimedOut(false)
+						console.log(
+							`[TurnUi] hydrated from full sync in ${Date.now() - hydrationStartedAtRef.current}ms ` +
+								`(snapshotStateVersion=${incomingStateVersion}, messages=${stateData.clineMessages?.length ?? 0}, ` +
+								`truncated=${stateData.messageTruncated ?? false}, phase=${stateData.turnState?.phase ?? "none"}, ` +
+								`epoch=${stateData.epoch ?? "none"}, stateBytes=${response.stateJson.length})`,
+						)
+
+						return newState
+					})
+
+					// V17: track the SNAPSHOT version high-water mark (separate from the
+					// delta version space) so the out-of-band gate can drop stale full
+					// snapshots while the delta gap detector stays independent.
+					lastSnapshotVersionRef.current = Math.max(lastSnapshotVersionRef.current, incomingStateVersion)
+
+					// A snapshot applied cleanly, so whatever gap triggered a full sync is
+					// reconciled. Resetting here is also correct for the mount-time
+					// subscription: there is nothing left to retry.
+					fullSyncRetryCountRef.current = 0
+					console.log("[StateDelta] Full sync completed successfully")
+				} catch (error) {
+					console.error("Error parsing state JSON during full sync:", error)
+				}
+				return
+			}
+
+			// CHANNEL 2: State delta (incremental update — patch only changed fields)
+			// The backend sends `{ type, payload, version }` where payload is the StateDelta
+			// from state-post-debouncer: `{ type: "append_message", message, version }` or
+			// `{ type: "update_message", messageId, patch, version }`.
+			if (response.deltaJson) {
+				try {
+					const raw = JSON.parse(response.deltaJson)
+					const deltaVersion = raw.version ?? 0
+
+					// Self-healing: if we missed a delta (gap in version), request full sync
+					if (lastStateVersionRef.current > 0 && deltaVersion > lastStateVersionRef.current + 1) {
+						console.warn(
+							`[StateDelta] Gap detected: last=${lastStateVersionRef.current}, delta=${deltaVersion}. Requesting full sync.`,
+						)
+						requestFullSyncRef.current()
+						return
+					}
+
+					if (deltaVersion > 0) {
+						lastStateVersionRef.current = deltaVersion
+					}
+
+					const inner = raw.payload
+					switch (raw.type) {
+						case "append_message":
+							if (inner?.message) {
+								const before = getReplica()
+								const next = reducerApplyMessage(before, inner.message)
+								if (next !== before) {
+									setReplica(next)
+									publishReplica()
+								}
+							}
+							break
+
+						case "update_message":
+							// Extract messageId (ts) and patch from the inner delta
+							if (inner?.messageId) {
+								const patchMessage = { ts: inner.messageId, ...inner.patch }
+								const before = getReplica()
+								const next = reducerApplyMessage(before, patchMessage as any)
+								if (next !== before) {
+									setReplica(next)
+									publishReplica()
+								}
+							}
+							break
+
+						case "replace_all":
+							// Settings/state replacement — the message transcript is not part of
+							// the main state, so a plain spread suffices.
+							setState((prevState) => ({ ...prevState, ...inner }))
+							break
+
+						default:
+							console.warn("[StateDelta] Unknown delta type:", raw.type)
+					}
+				} catch (error) {
+					console.error("Error processing state delta:", error)
+				}
+			}
+		},
+		[showWelcome],
+	)
+
+	/**
+	 * Subscribe to the state stream. Both the mount-time subscription and the
+	 * self-healing re-subscription in `requestFullSync` go through here, so a
+	 * recovery can never install a less capable handler than the one it replaced.
+	 */
+	const subscribeToStateStream = useCallback(
+		(label: string) =>
+			StateServiceClient.subscribeToState(EmptyRequest.create({}), {
+				onResponse: handleStateFrame,
+				onError: (error: any) => {
+					console.error(`Error in ${label} state subscription:`, error)
+					// Don't reset retry count here - let it retry on next delta gap
+				},
+				onComplete: () => {
+					console.log(`${label} state subscription completed`)
+				},
+			}),
+		[handleStateFrame],
+	)
+
+	/**
 	 * Request a full state snapshot from the backend via the streaming subscription.
 	 * This is the self-healing fallback when the webview detects a gap in deltas.
 	 * Includes retry logic with exponential backoff to handle transient failures.
@@ -531,95 +747,15 @@ export const ExtensionStateContextProvider: React.FC<{
 		// Add exponential backoff delay for retries
 		const delay = Math.min(1000 * 2 ** (fullSyncRetryCountRef.current - 1), 5000)
 
-		setTimeout(() => {
-			stateSubscriptionRef.current = StateServiceClient.subscribeToState(EmptyRequest.create({}), {
-				onResponse: (response: any) => {
-					if (response.stateJson) {
-						// V17 (P0): gate BEFORE parsing using the snapshot-version high-water mark.
-						const oobStateVersion = response.stateVersion ?? 0
-						if (oobStateVersion > 0 && oobStateVersion <= lastSnapshotVersionRef.current) {
-							return
-						}
-						try {
-							const stateData = JSON.parse(response.stateJson) as ExtensionState
-							const incomingStateVersion = stateData.stateVersion ?? 0
-
-							// Route the snapshot's transcript through the convergent-replica reducer:
-							// merge by ts/seq within the same epoch (never truncate), replace on a
-							// newer epoch, ignore stale/older snapshots. Pagination metadata
-							// travels with the snapshot so it is owned/reset by the conversation fence.
-							const prevEpoch = replicaRef.current.epoch
-							replicaRef.current = reducerApplyStateSnapshot(
-								replicaRef.current,
-								stateData.clineMessages ?? [],
-								stateData.epoch ?? 0,
-								incomingStateVersion,
-								stateData.turnState,
-								stateData.messageTruncated,
-								stateData.totalMessageCount,
-							)
-							if (replicaRef.current.epoch !== prevEpoch) {
-								setHasMoreMessages(true)
-							}
-
-							// Publish the (seq-gated) transcript + pagination metadata through the
-							// high-frequency messages context (V12 方案3).
-							publishReplica()
-
-							const {
-								clineMessages: _clineMessages,
-								turnState: _turnState,
-								epoch: _epoch,
-								stateVersion: _stateVersion,
-								...restStateData
-							} = stateData
-							setState((prevState) => {
-								const incomingVersion = stateData.autoApprovalSettings?.version ?? 1
-								const currentVersion = prevState.autoApprovalSettings?.version ?? 1
-								const shouldUpdateAutoApproval = incomingVersion > currentVersion
-								const newState = {
-									...restStateData,
-									autoApprovalSettings: shouldUpdateAutoApproval
-										? stateData.autoApprovalSettings
-										: prevState.autoApprovalSettings,
-								}
-								if (!newState.welcomeViewCompleted && !showWelcome) {
-									setShowWelcome(true)
-									setOnboardingModels(newState.onboardingModels)
-								} else if (newState.welcomeViewCompleted) {
-									setShowWelcome(false)
-									setOnboardingModels(undefined)
-								}
-								setDidHydrateState(true)
-								setHydrationTimedOut(false)
-								console.log(
-									`[TurnUi] hydrated in ${Date.now() - hydrationStartedAtRef.current}ms ` +
-										`(snapshotStateVersion=${incomingStateVersion}, messages=${stateData.clineMessages?.length ?? 0}, ` +
-										`truncated=${stateData.messageTruncated ?? false}, phase=${stateData.turnState?.phase ?? "none"}, ` +
-										`epoch=${stateData.epoch ?? "none"}, stateBytes=${response.stateJson.length})`,
-								)
-								return newState
-							})
-							lastSnapshotVersionRef.current = Math.max(lastSnapshotVersionRef.current, incomingStateVersion)
-
-							// Success - reset retry count
-							fullSyncRetryCountRef.current = 0
-							console.log("[StateDelta] Full sync completed successfully")
-						} catch (error) {
-							console.error("Error parsing state JSON during full sync:", error)
-						}
-					}
-				},
-				onError: (error: any) => {
-					console.error("Error in full sync state subscription:", error)
-					// Don't reset retry count here - let it retry on next delta gap
-				},
-				onComplete: () => {
-					console.log("Full sync state subscription completed")
-				},
-			})
+		// The subscription is REPLACED, not merely added, so nothing observes deltas
+		// during `delay`. It comes back delta-capable, so the next gap after this
+		// window is detected normally and recovered from.
+		pendingFullSyncTimerRef.current = setTimeout(() => {
+			pendingFullSyncTimerRef.current = null
+			stateSubscriptionRef.current = subscribeToStateStream("full sync")
 		}, delay)
-	}, [showWelcome])
+	}, [subscribeToStateStream])
+	requestFullSyncRef.current = requestFullSync
 
 	/**
 	 * Hydration watchdog. Without it, any failure to deliver the FIRST snapshot
@@ -682,136 +818,22 @@ export const ExtensionStateContextProvider: React.FC<{
 		}
 	}, [])
 	const mcpServersSubscriptionRef = useRef<(() => void) | null>(null)
-	// Convergent-replica state for clineMessages. The partial-message stream and the full state
-	// snapshots both feed this reducer so the transcript converges correctly regardless of
-	// arrival order, duplication, or loss. See messageReducer.ts.
-	const replicaRef = useRef<ReplicaState>(createReplicaState())
 
-	/**
-	 * Persist ReplicaState to sessionStorage for recovery on webview re-creation.
-	 * This helps maintain conversation state when VS Code recycles the webview.
-	 */
-	const persistReplicaState = useCallback(() => {
-		try {
-			const stateToPersist = {
-				messages: replicaRef.current.messages.slice(-100), // Keep last 100 messages
-				epoch: replicaRef.current.epoch,
-				stateVersion: replicaRef.current.stateVersion,
-				turnState: replicaRef.current.turnState,
-				messageTruncated: replicaRef.current.messageTruncated,
-				totalMessageCount: replicaRef.current.totalMessageCount,
-				timestamp: Date.now(),
-			}
-			sessionStorage.setItem("cline_replica_state", JSON.stringify(stateToPersist))
-		} catch (error) {
-			console.warn("[ExtensionState] Failed to persist replica state:", error)
-		}
-	}, [])
-
-	/**
-	 * Restore ReplicaState from sessionStorage if available and recent.
-	 * Returns true if state was restored, false otherwise.
-	 */
-	const restoreReplicaState = useCallback((): boolean => {
-		try {
-			const saved = sessionStorage.getItem("cline_replica_state")
-			if (!saved) return false
-
-			const parsed = JSON.parse(saved)
-			const age = Date.now() - (parsed.timestamp || 0)
-
-			// Only restore if less than 5 minutes old
-			if (age > 5 * 60 * 1000) {
-				sessionStorage.removeItem("cline_replica_state")
-				return false
-			}
-
-			// Restore the replica state
-			replicaRef.current = {
-				...replicaRef.current,
-				messages: parsed.messages || [],
-				epoch: parsed.epoch || 0,
-				stateVersion: parsed.stateVersion || 0,
-				turnState: parsed.turnState,
-				messageTruncated: parsed.messageTruncated,
-				totalMessageCount: parsed.totalMessageCount,
-			}
-
-			console.log(
-				`[ExtensionState] Restored replica state: ${parsed.messages?.length || 0} messages, epoch=${parsed.epoch}`,
-			)
-			return true
-		} catch (error) {
-			console.warn("[ExtensionState] Failed to restore replica state:", error)
-			sessionStorage.removeItem("cline_replica_state")
-			return false
-		}
-	}, [])
-
-	// Persist replica state on unmount or when messages change significantly
+	// The convergent-replica transcript (clineMessages) lives in the external store
+	// (./messagesStore), NOT in React state here. The partial-message stream, the state
+	// deltas and the full state snapshots all feed `getReplica()/setReplica()`, and
+	// `publishReplica()` schedules a frame-coalesced store emission.
+	//
+	// It used to be `useState` in this provider, which meant every streaming chunk
+	// re-rendered the provider, produced a new ExtensionStateContext identity, and
+	// re-rendered all ~240 `useExtensionState()` consumers plus every visible message
+	// row — per frame, at an O(N) cost in the number of messages. See messagesStore.ts.
+	//
+	// Persist replica state on unmount.
 	useEffect(() => {
 		return () => {
 			persistReplicaState()
 		}
-	}, [persistReplicaState])
-
-	/**
-	 * React state mirror of the replica, published through MessagesStateContext
-	 * (V12 方案3). Kept separate from the main ExtensionState so high-frequency
-	 * message traffic does not re-render settings/theme consumers.
-	 */
-	const [replicaMessages, setReplicaMessages] = useState<{
-		clineMessages: ClineMessage[]
-		turnState?: TurnState
-		epoch: number
-		stateVersion: number
-		messageTruncated?: boolean
-		totalMessageCount?: number
-	}>({
-		clineMessages: [],
-		epoch: 0,
-		stateVersion: 0,
-	})
-
-	// Frame-coalesced publish (V12 方案6): deltas/partials/snapshots arriving
-	// within a single animation frame are merged into ONE setReplicaMessages,
-	// so streaming bursts do not render intermediate frames.
-	const messageFlushSchedulerRef = useRef<FrameCoalescer | null>(null)
-	/**
-	 * Publish the current replica to the messages context. Only triggers a
-	 * re-render when the transcript actually changed (reference comparison —
-	 * the reducer returns the same object for no-op merges). Pagination
-	 * metadata (messageTruncated / totalMessageCount) is owned by the replica
-	 * itself (see messageReducer.ts), so it resets automatically on task
-	 * switch instead of leaking stale values from the previous conversation.
-	 */
-	const publishReplica = useCallback(() => {
-		if (!messageFlushSchedulerRef.current) {
-			messageFlushSchedulerRef.current = createFrameCoalescer(() => {
-				const replica = replicaRef.current
-				setReplicaMessages((prev) => {
-					const transcriptChanged =
-						prev.clineMessages !== replica.messages ||
-						prev.turnState !== replica.turnState ||
-						prev.epoch !== replica.epoch ||
-						prev.stateVersion !== replica.stateVersion ||
-						prev.messageTruncated !== replica.messageTruncated ||
-						prev.totalMessageCount !== replica.totalMessageCount
-					if (!transcriptChanged) {
-						return prev
-					}
-					return {
-						clineMessages: replica.messages,
-						turnState: replica.turnState,
-						epoch: replica.epoch,
-						stateVersion: replica.stateVersion,
-						messageTruncated: replica.messageTruncated,
-						totalMessageCount: replica.totalMessageCount,
-					}
-				})
-			}, scheduleAnimationFrame)
-		}
-		messageFlushSchedulerRef.current.schedule()
 	}, [])
 
 	// Subscribe to state updates and UI events using the gRPC streaming API
@@ -823,171 +845,10 @@ export const ExtensionStateContextProvider: React.FC<{
 			publishReplica()
 		}
 
-		// Set up state subscription
-		stateSubscriptionRef.current = StateServiceClient.subscribeToState(EmptyRequest.create({}), {
-			onResponse: (response: any) => {
-				// CHANNEL 1: Full state snapshot (ground truth — replaces everything)
-				if (response.stateJson) {
-					// V17 (P0): gate BEFORE parsing. The backend mirrors the snapshot's
-					// stateVersion in the out-of-band `response.stateVersion` field, so a
-					// stale/duplicate/out-of-order snapshot (already superseded by a newer
-					// snapshot or by deltas) can be dropped without paying the main-thread
-					// cost of JSON.parse-ing the whole ExtensionState.
-					// NOTE: uses the SNAPSHOT version space (lastSnapshotVersionRef), which is
-					// distinct from the delta version space (lastStateVersionRef). Mixing the
-					// two would drop every subsequent full snapshot because delta versions
-					// run far ahead of snapshot versions.
-					const oobStateVersion = response.stateVersion ?? 0
-					if (oobStateVersion > 0 && oobStateVersion <= lastSnapshotVersionRef.current) {
-						return
-					}
-					try {
-						const stateData = JSON.parse(response.stateJson) as ExtensionState
-						const incomingStateVersion = stateData.stateVersion ?? 0
-
-						// Route the snapshot's transcript through the convergent-replica reducer:
-						// merge by ts/seq within the same epoch (never truncate), replace on a
-						// newer epoch, ignore stale/older snapshots. Pagination metadata
-						// travels with the snapshot so it is owned/reset by the conversation fence.
-						const prevEpoch = replicaRef.current.epoch
-						replicaRef.current = reducerApplyStateSnapshot(
-							replicaRef.current,
-							stateData.clineMessages ?? [],
-							stateData.epoch ?? 0,
-							incomingStateVersion,
-							stateData.turnState,
-							stateData.messageTruncated,
-							stateData.totalMessageCount,
-						)
-						if (replicaRef.current.epoch !== prevEpoch) {
-							setHasMoreMessages(true)
-						}
-
-						// Publish the (seq-gated) transcript + pagination metadata through the
-						// high-frequency messages context (V12 方案3).
-						publishReplica()
-
-						const {
-							clineMessages: _clineMessages,
-							turnState: _turnState,
-							epoch: _epoch,
-							stateVersion: _stateVersion,
-							...restStateData
-						} = stateData
-
-						setState((prevState) => {
-							// Versioning logic for autoApprovalSettings
-							const incomingVersion = stateData.autoApprovalSettings?.version ?? 1
-							const currentVersion = prevState.autoApprovalSettings?.version ?? 1
-							const shouldUpdateAutoApproval = incomingVersion > currentVersion
-
-							const newState = {
-								...restStateData,
-								autoApprovalSettings: shouldUpdateAutoApproval
-									? stateData.autoApprovalSettings
-									: prevState.autoApprovalSettings,
-							}
-
-							// Update welcome screen state based on API configuration if welcome view not in progress
-							if (!newState.welcomeViewCompleted && !showWelcome) {
-								setShowWelcome(true)
-								setOnboardingModels(newState.onboardingModels)
-							} else if (newState.welcomeViewCompleted) {
-								setShowWelcome(false)
-								setOnboardingModels(undefined)
-							}
-
-							setDidHydrateState(true)
-							setHydrationTimedOut(false)
-							console.log(
-								`[TurnUi] hydrated from full sync in ${Date.now() - hydrationStartedAtRef.current}ms ` +
-									`(snapshotStateVersion=${incomingStateVersion}, messages=${stateData.clineMessages?.length ?? 0}, ` +
-									`truncated=${stateData.messageTruncated ?? false}, phase=${stateData.turnState?.phase ?? "none"})`,
-							)
-
-							return newState
-						})
-
-						// V17: track the SNAPSHOT version high-water mark (separate from the
-						// delta version space) so the out-of-band gate can drop stale full
-						// snapshots while the delta gap detector stays independent.
-						lastSnapshotVersionRef.current = Math.max(lastSnapshotVersionRef.current, incomingStateVersion)
-					} catch (error) {
-						console.error("Error parsing state JSON:", error)
-					}
-					return
-				}
-
-				// CHANNEL 2: State delta (incremental update — patch only changed fields)
-				// The backend sends `{ type, payload, version }` where payload is the StateDelta
-				// from state-post-debouncer: `{ type: "append_message", message, version }` or
-				// `{ type: "update_message", messageId, patch, version }`.
-				if (response.deltaJson) {
-					try {
-						const raw = JSON.parse(response.deltaJson)
-						const deltaVersion = raw.version ?? 0
-
-						// Self-healing: if we missed a delta (gap in version), request full sync
-						if (lastStateVersionRef.current > 0 && deltaVersion > lastStateVersionRef.current + 1) {
-							console.warn(
-								`[StateDelta] Gap detected: last=${lastStateVersionRef.current}, delta=${deltaVersion}. Requesting full sync.`,
-							)
-							requestFullSync()
-							return
-						}
-
-						if (deltaVersion > 0) {
-							lastStateVersionRef.current = deltaVersion
-						}
-
-						const inner = raw.payload
-						switch (raw.type) {
-							case "append_message":
-								if (inner?.message) {
-									const before = replicaRef.current
-									const next = reducerApplyMessage(before, inner.message)
-									if (next !== before) {
-										replicaRef.current = next
-										publishReplica()
-									}
-								}
-								break
-
-							case "update_message":
-								// Extract messageId (ts) and patch from the inner delta
-								if (inner?.messageId) {
-									const patchMessage = { ts: inner.messageId, ...inner.patch }
-									const before = replicaRef.current
-									const next = reducerApplyMessage(before, patchMessage as any)
-									if (next !== before) {
-										replicaRef.current = next
-										publishReplica()
-									}
-								}
-								break
-
-							case "replace_all":
-								// Settings/state replacement — the message transcript is not part of
-								// the main state, so a plain spread suffices.
-								setState((prevState) => ({ ...prevState, ...inner }))
-								break
-
-							default:
-								console.warn("[StateDelta] Unknown delta type:", raw.type)
-						}
-					} catch (error) {
-						console.error("Error processing state delta:", error)
-					}
-					return
-				}
-			},
-			onError: (error: any) => {
-				console.error("Error in state subscription:", error)
-			},
-			onComplete: () => {
-				console.log("State subscription completed")
-			},
-		})
+		// Set up state subscription. Uses the same frame handler as the
+		// self-healing re-subscription in requestFullSync, so both channels
+		// (full snapshot AND incremental delta) are always handled.
+		stateSubscriptionRef.current = subscribeToStateStream("state")
 
 		// Subscribe to MCP button clicked events with webview type
 		mcpButtonUnsubscribeRef.current = UiServiceClient.subscribeToMcpButtonClicked(
@@ -1110,11 +971,11 @@ export const ExtensionStateContextProvider: React.FC<{
 					// higher seq, fence stale epochs, never let an out-of-order or duplicate
 					// delivery corrupt the transcript. Unstamped (classic/legacy) messages
 					// default to epoch 0 and merge by ts as before.
-					const before = replicaRef.current
+					const before = getReplica()
 					const next = reducerApplyMessage(before, partialMessage)
 					if (next !== before) {
 						// Stale/ignored — no change.
-						replicaRef.current = next
+						setReplica(next)
 						publishReplica()
 					}
 				} catch (error) {
@@ -1227,9 +1088,20 @@ export const ExtensionStateContextProvider: React.FC<{
 				// a stale high-water mark from a previous lifecycle would trigger a
 				// spurious gap detection on the very first delta after reconnection.
 				lastStateVersionRef.current = 0
-				// Cancel any pending frame-coalesced message flush.
-				messageFlushSchedulerRef.current?.cancel()
-				messageFlushSchedulerRef.current = null
+				// ...and the snapshot high-water mark, which lives in the same
+				// minter.nextSeq() space. Leaving it set would make the out-of-band
+				// snapshot gate (see handleStateFrame) drop the first snapshot after a
+				// re-creation whenever its version had not advanced past the
+				// pre-teardown value.
+				lastSnapshotVersionRef.current = 0
+				// Cancel a pending full-sync re-subscription, then cancel any pending
+				// frame-coalesced flush and drop the transcript, so a remount starts
+				// from a clean slate and no timer fires into a torn-down tree.
+				if (pendingFullSyncTimerRef.current) {
+					clearTimeout(pendingFullSyncTimerRef.current)
+					pendingFullSyncTimerRef.current = null
+				}
+				resetMessagesStore()
 				if (stateSubscriptionRef.current) {
 					stateSubscriptionRef.current()
 					stateSubscriptionRef.current = null
@@ -1377,212 +1249,247 @@ export const ExtensionStateContextProvider: React.FC<{
 		refreshLiteLlmModels,
 	])
 
-	const [hasMoreMessages, setHasMoreMessages] = useState(true)
+	// `hasMoreMessages` and `loadHistoryBatch` now live in the messages store
+	// alongside the transcript (see ./messagesStore). They were provider state
+	// purely so they could be handed out through MessagesStateContext, and holding
+	// them here meant a scroll-up pagination batch re-rendered this provider.
+	// `loadHistoryBatch` is re-exported from ./messagesStore for existing importers.
 
-	/**
-	 * Load a batch of older messages when scrolling up past the truncation window.
-	 * Calls the backend's loadHistoryBatch RPC and prepends the batch to the
-	 * message replica via reducerApplyBatchPrepend.
-	 */
-	const loadHistoryBatch = useCallback(
-		async (taskId: string, beforeTs: number) => {
-			if (!taskId || taskId === "") {
-				console.warn("[loadHistoryBatch] No taskId provided, skipping")
-				return
-			}
-			try {
-				const response = await TaskServiceClient.loadHistoryBatch(
-					LoadHistoryBatchRequest.create({
-						taskId,
-						beforeTs,
-						limit: 50,
-					}),
-				)
-				if (!response.messages || response.messages.length === 0) {
-					// No more messages available
-					setHasMoreMessages(false)
-					return
-				}
+	// The setters below were inline arrow properties of `contextValue`. They have to
+	// be hoisted into stable callbacks because `contextValue` is memoized: an inline
+	// arrow is a new identity on every render, which both defeats the memo and
+	// changes the identity of every one of these functions for all ~240 consumers.
+	const setShouldShowAnnouncement = useCallback((value: boolean) => {
+		setState((prevState) => ({ ...prevState, shouldShowAnnouncement: value }))
+	}, [])
+	const setGlobalClineRulesToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, globalClineRulesToggles: toggles }))
+	}, [])
+	const setLocalClineRulesToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, localClineRulesToggles: toggles }))
+	}, [])
+	const setLocalCursorRulesToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, localCursorRulesToggles: toggles }))
+	}, [])
+	const setLocalWindsurfRulesToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, localWindsurfRulesToggles: toggles }))
+	}, [])
+	const setLocalAgentsRulesToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, localAgentsRulesToggles: toggles }))
+	}, [])
+	const setLocalWorkflowToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, localWorkflowToggles: toggles }))
+	}, [])
+	const setGlobalWorkflowToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, globalWorkflowToggles: toggles }))
+	}, [])
+	const setGlobalSkillsToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, globalSkillsToggles: toggles }))
+	}, [])
+	const setLocalSkillsToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, localSkillsToggles: toggles }))
+	}, [])
+	const setRemoteRulesToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, remoteRulesToggles: toggles }))
+	}, [])
+	const setRemoteWorkflowToggles = useCallback((toggles: Record<string, boolean>) => {
+		setState((prevState) => ({ ...prevState, remoteWorkflowToggles: toggles }))
+	}, [])
+	const setUserInfo = useCallback((userInfo?: UserInfo) => {
+		setState((prevState) => ({ ...prevState, userInfo }))
+	}, [])
 
-				// Convert protobuf messages to ClineMessage[]
-				const incoming = response.messages.map(convertProtoToClineMessage).filter(Boolean) as ClineMessage[]
+	// Memoized so a low-frequency change (a settings write, a view toggle, a full
+	// state snapshot) does not hand a new identity to every `useExtensionState()`
+	// consumer in the webview — 111 files, ~240 call sites. Rebuilding this object
+	// per render is what previously made any provider render a tree-wide re-render.
+	const contextValue: ExtensionStateContextType = useMemo(
+		() => ({
+			...state,
+			didHydrateState,
+			hydrationTimedOut,
+			retryHydration,
+			showWelcome,
+			onboardingModels,
+			openRouterModels,
+			vercelAiGatewayModels,
+			hicapModels,
+			liteLlmModels,
+			openAiModels,
+			requestyModels,
+			groqModels: groqModelsState,
+			basetenModels: basetenModelsState,
+			huggingFaceModels,
+			providerModelsByProvider,
+			latestModelRequestIdByProvider,
+			mcpServers,
+			totalTasksSize,
+			availableTerminalProfiles,
+			showMarketplace,
+			showMcp,
+			mcpTab,
+			showSettings,
+			settingsTargetSection,
+			settingsInitialModelTab,
+			showHistory,
+			showAccount,
+			showWorktrees,
+			showAnnouncement,
+			globalClineRulesToggles: state.globalClineRulesToggles || {},
+			localClineRulesToggles: state.localClineRulesToggles || {},
+			localCursorRulesToggles: state.localCursorRulesToggles || {},
+			localWindsurfRulesToggles: state.localWindsurfRulesToggles || {},
+			localAgentsRulesToggles: state.localAgentsRulesToggles || {},
+			localWorkflowToggles: state.localWorkflowToggles || {},
+			globalWorkflowToggles: state.globalWorkflowToggles || {},
+			remoteRulesToggles: state.remoteRulesToggles || {},
+			remoteWorkflowToggles: state.remoteWorkflowToggles || {},
+			enableCheckpointsSetting: state.enableCheckpointsSetting,
 
-				// Apply batch prepend to the replica
-				replicaRef.current = reducerApplyBatchPrepend(replicaRef.current, incoming, undefined, response.totalCount)
+			// Navigation functions
+			navigateToMarketplace,
+			navigateToMcp,
+			navigateToSettings,
+			navigateToSettingsModelPicker,
+			navigateToHistory,
+			navigateToAccount,
+			navigateToWorktrees,
+			navigateToChat,
 
-				// Publish the merged transcript + pagination metadata through the messages context
-				publishReplica()
-
-				// Update hasMore flag from response
-				if (response.hasMore !== undefined) {
-					setHasMoreMessages(response.hasMore)
-				}
-			} catch (error) {
-				console.error("[loadHistoryBatch] Error loading history batch:", error)
-			}
-		},
-		[], // stable — no external deps; uses refs internally
+			// Hide functions
+			hideSettings,
+			hideHistory,
+			hideAccount,
+			hideWorktrees,
+			hideAnnouncement,
+			closeMarketplaceView,
+			setShowAnnouncement,
+			setShowWelcome,
+			setOnboardingModels,
+			startProviderModelsRequest,
+			applyProviderModelsResponse,
+			setShouldShowAnnouncement,
+			setMcpServers,
+			setRequestyModels,
+			setGroqModels,
+			setBasetenModels,
+			setHuggingFaceModels,
+			setShowMarketplace,
+			setShowMcp,
+			closeMcpView,
+			setGlobalClineRulesToggles,
+			setLocalClineRulesToggles,
+			setLocalCursorRulesToggles,
+			setLocalWindsurfRulesToggles,
+			setLocalAgentsRulesToggles,
+			setLocalWorkflowToggles,
+			setGlobalWorkflowToggles,
+			setGlobalSkillsToggles,
+			setLocalSkillsToggles,
+			setRemoteRulesToggles,
+			setRemoteWorkflowToggles,
+			setMcpTab,
+			setTotalTasksSize,
+			refreshOpenRouterModels,
+			refreshVercelAiGatewayModels,
+			refreshHicapModels,
+			refreshLiteLlmModels,
+			onRelinquishControl,
+			setUserInfo,
+			expandTaskHeader,
+			setExpandTaskHeader,
+		}),
+		[
+			state,
+			didHydrateState,
+			hydrationTimedOut,
+			retryHydration,
+			showWelcome,
+			onboardingModels,
+			openRouterModels,
+			vercelAiGatewayModels,
+			hicapModels,
+			liteLlmModels,
+			openAiModels,
+			requestyModels,
+			groqModelsState,
+			basetenModelsState,
+			huggingFaceModels,
+			providerModelsByProvider,
+			latestModelRequestIdByProvider,
+			mcpServers,
+			totalTasksSize,
+			availableTerminalProfiles,
+			showMarketplace,
+			showMcp,
+			mcpTab,
+			showSettings,
+			settingsTargetSection,
+			settingsInitialModelTab,
+			showHistory,
+			showAccount,
+			showWorktrees,
+			showAnnouncement,
+			navigateToMarketplace,
+			navigateToMcp,
+			navigateToSettings,
+			navigateToSettingsModelPicker,
+			navigateToHistory,
+			navigateToAccount,
+			navigateToWorktrees,
+			navigateToChat,
+			hideSettings,
+			hideHistory,
+			hideAccount,
+			hideWorktrees,
+			hideAnnouncement,
+			closeMarketplaceView,
+			setShowAnnouncement,
+			setShowWelcome,
+			setOnboardingModels,
+			startProviderModelsRequest,
+			applyProviderModelsResponse,
+			setShouldShowAnnouncement,
+			setMcpServers,
+			setRequestyModels,
+			setGroqModels,
+			setBasetenModels,
+			setHuggingFaceModels,
+			setShowMarketplace,
+			setShowMcp,
+			closeMcpView,
+			setGlobalClineRulesToggles,
+			setLocalClineRulesToggles,
+			setLocalCursorRulesToggles,
+			setLocalWindsurfRulesToggles,
+			setLocalAgentsRulesToggles,
+			setLocalWorkflowToggles,
+			setGlobalWorkflowToggles,
+			setGlobalSkillsToggles,
+			setLocalSkillsToggles,
+			setRemoteRulesToggles,
+			setRemoteWorkflowToggles,
+			setMcpTab,
+			setTotalTasksSize,
+			refreshOpenRouterModels,
+			refreshVercelAiGatewayModels,
+			refreshHicapModels,
+			refreshLiteLlmModels,
+			onRelinquishControl,
+			setUserInfo,
+			expandTaskHeader,
+		],
 	)
 
-	const contextValue: ExtensionStateContextType = {
-		...state,
-		didHydrateState,
-		hydrationTimedOut,
-		retryHydration,
-		showWelcome,
-		onboardingModels,
-		openRouterModels,
-		vercelAiGatewayModels,
-		hicapModels,
-		liteLlmModels,
-		openAiModels,
-		requestyModels,
-		groqModels: groqModelsState,
-		basetenModels: basetenModelsState,
-		huggingFaceModels,
-		providerModelsByProvider,
-		latestModelRequestIdByProvider,
-		mcpServers,
-		totalTasksSize,
-		availableTerminalProfiles,
-		showMarketplace,
-		showMcp,
-		mcpTab,
-		showSettings,
-		settingsTargetSection,
-		settingsInitialModelTab,
-		showHistory,
-		showAccount,
-		showWorktrees,
-		showAnnouncement,
-		globalClineRulesToggles: state.globalClineRulesToggles || {},
-		localClineRulesToggles: state.localClineRulesToggles || {},
-		localCursorRulesToggles: state.localCursorRulesToggles || {},
-		localWindsurfRulesToggles: state.localWindsurfRulesToggles || {},
-		localAgentsRulesToggles: state.localAgentsRulesToggles || {},
-		localWorkflowToggles: state.localWorkflowToggles || {},
-		globalWorkflowToggles: state.globalWorkflowToggles || {},
-		remoteRulesToggles: state.remoteRulesToggles || {},
-		remoteWorkflowToggles: state.remoteWorkflowToggles || {},
-		enableCheckpointsSetting: state.enableCheckpointsSetting,
-
-		// Navigation functions
-		navigateToMarketplace,
-		navigateToMcp,
-		navigateToSettings,
-		navigateToSettingsModelPicker,
-		navigateToHistory,
-		navigateToAccount,
-		navigateToWorktrees,
-		navigateToChat,
-
-		// Hide functions
-		hideSettings,
-		hideHistory,
-		hideAccount,
-		hideWorktrees,
-		hideAnnouncement,
-		closeMarketplaceView,
-		setShowAnnouncement,
-		setShowWelcome,
-		setOnboardingModels,
-		startProviderModelsRequest,
-		applyProviderModelsResponse,
-		setShouldShowAnnouncement: (value) =>
-			setState((prevState) => ({
-				...prevState,
-				shouldShowAnnouncement: value,
-			})),
-		setMcpServers,
-		setRequestyModels,
-		setGroqModels,
-		setBasetenModels,
-		setHuggingFaceModels,
-		setShowMarketplace,
-		setShowMcp,
-		closeMcpView,
-		setGlobalClineRulesToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				globalClineRulesToggles: toggles,
-			})),
-		setLocalClineRulesToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				localClineRulesToggles: toggles,
-			})),
-		setLocalCursorRulesToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				localCursorRulesToggles: toggles,
-			})),
-		setLocalWindsurfRulesToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				localWindsurfRulesToggles: toggles,
-			})),
-		setLocalAgentsRulesToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				localAgentsRulesToggles: toggles,
-			})),
-		setLocalWorkflowToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				localWorkflowToggles: toggles,
-			})),
-		setGlobalWorkflowToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				globalWorkflowToggles: toggles,
-			})),
-		setGlobalSkillsToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				globalSkillsToggles: toggles,
-			})),
-		setLocalSkillsToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				localSkillsToggles: toggles,
-			})),
-		setRemoteRulesToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				remoteRulesToggles: toggles,
-			})),
-		setRemoteWorkflowToggles: (toggles) =>
-			setState((prevState) => ({
-				...prevState,
-				remoteWorkflowToggles: toggles,
-			})),
-		setMcpTab,
-		setTotalTasksSize,
-		refreshOpenRouterModels,
-		refreshVercelAiGatewayModels,
-		refreshHicapModels,
-		refreshLiteLlmModels,
-		onRelinquishControl,
-		setUserInfo: (userInfo?: UserInfo) => setState((prevState) => ({ ...prevState, userInfo })),
-		expandTaskHeader,
-		setExpandTaskHeader,
-	}
-
-	const messagesContextValue: MessagesState = {
-		clineMessages: replicaMessages.clineMessages,
-		turnState: replicaMessages.turnState,
-		messageTruncated: replicaMessages.messageTruncated,
-		totalMessageCount: replicaMessages.totalMessageCount,
-		epoch: replicaMessages.epoch,
-		stateVersion: replicaMessages.stateVersion,
-		hasMoreMessages,
-		loadHistoryBatch,
-	}
-
+	// MessagesStateContext is provided by MessagesStateProvider, which subscribes to
+	// the external transcript store. It is rendered as a CHILD so that streaming
+	// traffic never re-renders this provider: React bails out of the `children`
+	// subtree (the same element identity on every render) and propagates the context
+	// change only to the components that actually read MessagesStateContext.
 	return (
-		<MessagesStateContext.Provider value={messagesContextValue}>
-			<ExtensionStateContext.Provider value={contextValue}>{children}</ExtensionStateContext.Provider>
-		</MessagesStateContext.Provider>
+		<ExtensionStateContext.Provider value={contextValue}>
+			<MessagesStateProvider>{children}</MessagesStateProvider>
+		</ExtensionStateContext.Provider>
 	)
 }
 
@@ -1590,14 +1497,6 @@ export const useExtensionState = () => {
 	const context = useContext(ExtensionStateContext)
 	if (context === undefined) {
 		throw new Error("useExtensionState must be used within an ExtensionStateContextProvider")
-	}
-	return context
-}
-
-export const useMessagesState = () => {
-	const context = useContext(MessagesStateContext)
-	if (context === undefined) {
-		throw new Error("useMessagesState must be used within an ExtensionStateContextProvider")
 	}
 	return context
 }
