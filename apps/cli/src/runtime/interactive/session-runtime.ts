@@ -18,6 +18,7 @@ import {
 import type { Message } from "@cline/shared";
 import { createCliCore } from "../../session/session";
 import { submitAndExitInTerminal } from "../../utils/approval";
+import { withTransientRetry } from "../../utils/retry";
 import type {
 	ChatCommandState,
 	ForkSessionResult,
@@ -543,11 +544,18 @@ export function createInteractiveSessionRuntime(input: {
 				: new Error("interactive session manager is unavailable");
 		}
 		const manager = sessionManager;
+		// Transient provider/transport failures (ECONNRESET, 503, rate limits) are
+		// retried here so the CLI matches the extension's behaviour. The
+		// session-not-found recovery below is a different concern and still runs first.
+		const sendTurn = () =>
+			withTransientRetry(() =>
+				manager.send({
+					sessionId: activeSessionId,
+					...turnInput,
+				}),
+			);
 		try {
-			return await manager.send({
-				sessionId: activeSessionId,
-				...turnInput,
-			});
+			return await sendTurn();
 		} catch (error) {
 			if (
 				abortRequested ||
@@ -560,10 +568,7 @@ export function createInteractiveSessionRuntime(input: {
 			if (!activeSessionId || abortRequested || shutdownRequested) {
 				throw error;
 			}
-			return await manager.send({
-				sessionId: activeSessionId,
-				...turnInput,
-			});
+			return await sendTurn();
 		}
 	};
 

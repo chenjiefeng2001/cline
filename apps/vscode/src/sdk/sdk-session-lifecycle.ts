@@ -6,6 +6,7 @@ import type {
 	RestoreResult,
 	StartSessionResult,
 } from "@cline/core"
+import { computeRetryDelayMs, DEFAULT_PROVIDER_RETRY_POLICY, isTransientProviderError } from "@cline/llms"
 import { formatModeSwitchNotice, type ModeSwitchNotice } from "@cline/shared"
 import { StateManager } from "@/core/storage/StateManager"
 import type { VscodeTerminalManager } from "@/hosts/vscode/terminal/VscodeTerminalManager"
@@ -16,11 +17,6 @@ import type { SdkForegroundCommandCoordinator } from "./sdk-foreground-command-c
 import { buildToolPolicies } from "./sdk-tool-policies"
 import type { SdkSessionHost } from "./session-host"
 import { VscodeSessionHost } from "./vscode-session-host"
-
-// ─── Auto-retry configuration ────────────────────────────────────────────
-const MAX_AUTO_RETRIES = 3
-const RETRY_BASE_DELAY_MS = 2_000
-const RETRY_MAX_DELAY_MS = 30_000
 
 // ─── Turn-end drain ──────────────────────────────────────────────────────
 /**
@@ -48,28 +44,13 @@ export const TURN_DRAIN_TIMEOUT_MS = 1000
 
 /**
  * Determine whether an error is transient and worth retrying automatically.
- * Permanent errors (auth, billing, bad request) should NOT be retried.
+ *
+ * Re-exported from `@cline/llms` (see `providers/transient-errors.ts`) rather than
+ * implemented here. The classification is a fact about the provider and the transport,
+ * not about this host, and keeping a second copy is how the CLI ended up with no
+ * automatic retry at all while the extension retried transparently.
  */
-export function isRetryableError(error: unknown): boolean {
-	if (error instanceof DOMException && error.name === "TIMEOUT") return true
-	if (error instanceof Error) {
-		if (error.name === "TIMEOUT") return true
-		const msg = error.message.toLowerCase()
-		// Network / transport errors
-		if (msg.includes("econnreset") || msg.includes("econnrefused") || msg.includes("enotfound")) return true
-		if (msg.includes("network") || msg.includes("socket hang up")) return true
-		// Server-side transient errors
-		if (msg.includes("502") || msg.includes("503") || msg.includes("504")) return true
-		if (msg.includes("bad gateway") || msg.includes("service unavailable") || msg.includes("gateway timeout")) return true
-		// Rate limiting (transient — backoff helps)
-		if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) return true
-		// Model overloaded / capacity errors
-		if (msg.includes("overloaded") || msg.includes("capacity") || msg.includes("load")) return true
-		// Streaming stalls
-		if (msg.includes("stream") && (msg.includes("stall") || msg.includes("reset") || msg.includes("broken"))) return true
-	}
-	return false
-}
+export { isTransientProviderError as isRetryableError }
 
 type RequestToolApprovalHandler = NonNullable<Parameters<typeof VscodeSessionHost.create>[0]["requestToolApproval"]>
 type AskQuestionHandler = NonNullable<Parameters<typeof VscodeSessionHost.create>[0]["askQuestion"]>
@@ -532,15 +513,15 @@ export class SdkSessionLifecycle {
 					}
 
 					// ── Auto-retry for transient errors ─────────────────────
-					if (attempt < MAX_AUTO_RETRIES && isRetryableError(error)) {
-						const delay = Math.min(RETRY_BASE_DELAY_MS * 2 ** attempt, RETRY_MAX_DELAY_MS)
-						const jitter = delay * 0.2 * Math.random()
-						const totalDelay = Math.round(delay + jitter)
+					// Policy and backoff come from @cline/llms so this host and the CLI
+					// retry identically (see providers/transient-errors.ts).
+					if (attempt < DEFAULT_PROVIDER_RETRY_POLICY.maxRetries && isTransientProviderError(error)) {
+						const totalDelay = computeRetryDelayMs(attempt, DEFAULT_PROVIDER_RETRY_POLICY)
 						const errorMsg = error instanceof Error ? error.message : String(error)
 						Logger.warn(
-							`[SdkController] Turn failed (attempt ${attempt + 1}/${MAX_AUTO_RETRIES + 1}), retrying in ${totalDelay}ms: ${errorMsg}`,
+							`[SdkController] Turn failed (attempt ${attempt + 1}/${DEFAULT_PROVIDER_RETRY_POLICY.maxRetries + 1}), retrying in ${totalDelay}ms: ${errorMsg}`,
 						)
-						this.options.onAutoRetry?.(attempt + 1, MAX_AUTO_RETRIES, totalDelay, error)
+						this.options.onAutoRetry?.(attempt + 1, DEFAULT_PROVIDER_RETRY_POLICY.maxRetries, totalDelay, error)
 						setTimeout(() => attemptSend(attempt + 1), totalDelay)
 						return
 					}

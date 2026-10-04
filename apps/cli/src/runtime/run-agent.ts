@@ -19,6 +19,7 @@ import {
 } from "../utils/approval";
 import { formatCliErrorMessage } from "../utils/cline-pass-errors";
 import { handleEvent, handleTeamEvent } from "../utils/events";
+import { withTransientRetry } from "../utils/retry";
 import {
 	shouldZeroClineFreeModelCost,
 	zeroCliAgentEventCost,
@@ -336,12 +337,14 @@ export async function runAgent(
 			result = started.result;
 		} else {
 			result = await runWithTraceparentFromEnv(() =>
-				sessionManager.send({
-					sessionId: started.sessionId,
-					prompt: userInput,
-					userImages: userImages.length > 0 ? userImages : undefined,
-					userFiles: userFiles.length > 0 ? userFiles : undefined,
-				}),
+				withTransientRetry(() =>
+					sessionManager.send({
+						sessionId: started.sessionId,
+						prompt: userInput,
+						userImages: userImages.length > 0 ? userImages : undefined,
+						userFiles: userFiles.length > 0 ? userFiles : undefined,
+					}),
+				),
 			).finally(clearRunTimeout);
 		}
 		if (!result) {

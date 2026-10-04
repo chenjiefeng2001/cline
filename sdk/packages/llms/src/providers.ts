@@ -45,6 +45,13 @@ export {
 	isClinePassLimitMessage,
 } from "./providers/errors";
 export {
+	computeRetryDelayMs,
+	DEFAULT_PROVIDER_RETRY_POLICY,
+	isAbortLikeError,
+	isTransientProviderError,
+	type ProviderRetryPolicy,
+} from "./providers/transient-errors";
+export {
 	getRegisteredHandler,
 	getRegisteredHandlerAsync,
 	hasRegisteredHandler,
