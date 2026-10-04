@@ -24,14 +24,47 @@ function writeExecutable(dir: string, name: string): void {
 	writeExecutableScript(dir, name, "#!/bin/sh\necho ok\n");
 }
 
+/**
+ * Writes a fake executable into `dir` so it can be found on PATH.
+ *
+ * On POSIX that is a single `#!/bin/sh` script. Windows needs more care:
+ * `CreateProcess` cannot run an extensionless file, so launching resolves
+ * through `PATHEXT` to a `.cmd`. Both names are therefore written on Windows —
+ * the `.cmd` for a real launch, and the extensionless copy because several
+ * tests pass an explicit `"linux"` platform to the resolver under test, which
+ * looks for the bare name only.
+ */
 function writeExecutableScript(
 	dir: string,
 	name: string,
 	content: string,
+	posixContent: string = content,
 ): void {
-	const filePath = join(dir, name);
-	writeFileSync(filePath, content, "utf8");
-	chmodSync(filePath, 0o755);
+	writeFileSync(join(dir, name), content, "utf8");
+	chmodSync(join(dir, name), 0o755);
+
+	if (process.platform === "win32") {
+		writeFileSync(join(dir, `${name}.cmd`), toBatchScript(posixContent), "utf8");
+	}
+}
+
+/**
+ * Translates the tiny `sh` subset these fixtures use into batch syntax:
+ * `exit N` becomes `exit /b N` and `echo X` becomes `echo X`.
+ */
+function toBatchScript(shSource: string): string {
+	return shSource
+		.split(/\r?\n/)
+		.map((line) => {
+			const trimmed = line.trim();
+			const exit = /^exit\s+(\S+)$/.exec(trimmed);
+			if (exit) {
+				return `exit /b ${exit[1]}`;
+			}
+			return trimmed;
+		})
+		.filter((line) => line.length > 0)
+		.join("\r\n");
 }
 
 describe("kanban command helpers", () => {
@@ -152,17 +185,26 @@ describe("kanban command helpers", () => {
 
 	it("installs kanban before launch when missing", async () => {
 		const dir = createTempDir();
+		// The installer must materialize a `kanban` executable that the launcher
+		// then finds on PATH. The POSIX version uses a heredoc; on Windows a batch
+		// file cannot nest one, so it copies a pre-written stub into place instead.
+		const stubPath = join(dir, "kanban.cmd.stub");
+		writeFileSync(
+			stubPath,
+			process.platform === "win32" ? "exit /b 6" : "#!/bin/sh\nexit 6\n",
+			"utf8",
+		);
+		const installCommand =
+			process.platform === "win32"
+				? // `copy` is the cmd builtin; `cp` does not exist there, so a POSIX
+					// command here would silently install nothing.
+					`copy /Y "${stubPath}" "${dir}\\kanban.cmd" >NUL`
+				: `cat > "${dir}/kanban" <<'EOF'\n#!/bin/sh\nexit 6\nEOF\nchmod +x "${dir}/kanban"`;
+
 		writeExecutableScript(
 			dir,
 			"npm",
-			`#!/bin/sh
-/bin/cat > "${dir}/kanban" <<'EOF'
-#!/bin/sh
-exit 6
-EOF
-/bin/chmod +x "${dir}/kanban"
-exit 0
-`,
+			`#!/bin/sh\n${installCommand}\nexit 0\n`,
 		);
 		process.env.PATH = dir;
 

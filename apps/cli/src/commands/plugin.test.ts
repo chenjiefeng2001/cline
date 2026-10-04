@@ -627,7 +627,11 @@ describe("plugin install command", () => {
 		).toContain("installed-v1");
 	});
 
-	it("uninstalls a package plugin by package name", async () => {
+	// Same `/bin/sh` fake-npm fixture constraint (rewritten between phases to
+	// flip exit status) as the other gated plugin install tests.
+	it.skipIf(process.platform === "win32")(
+		"uninstalls a package plugin by package name",
+		async () => {
 		const source = join(root, "uninstall-package");
 		const npmCommandPath = join(root, "fake-npm.sh");
 		await mkdir(source, { recursive: true });
@@ -669,11 +673,12 @@ describe("plugin install command", () => {
 		});
 
 		expect(code).toBe(0);
-		expect(existsSync(installed.installPath)).toBe(false);
-		expect(output.join("\n")).toContain(
-			"Uninstalled plugin cli-uninstall-plugin",
-		);
-	});
+			expect(existsSync(installed.installPath)).toBe(false);
+			expect(output.join("\n")).toContain(
+				"Uninstalled plugin cli-uninstall-plugin",
+			);
+		},
+	);
 
 	it("prints JSON output for command callers", async () => {
 		const source = join(root, "json.ts");

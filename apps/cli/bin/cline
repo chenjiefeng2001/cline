@@ -66,10 +66,20 @@ try {
 }
 
 function run(target) {
-	const result = childProcess.spawnSync(target, process.argv.slice(2), {
-		stdio: "inherit",
-		env: childEnv,
-	});
+	// A script cannot be exec'd directly on Windows (no `#!` support, and
+	// CreateProcess will not run a `.cmd` without a shell), so an explicit
+	// interpreter is paired with its script. Real installs resolve to a native
+	// `cline.exe` and take the single-argument path unchanged.
+	const scriptPath = process.env.CLINE_BIN_SCRIPT_PATH;
+	const command = scriptPath ? [target, scriptPath] : [target];
+	const result = childProcess.spawnSync(
+		command[0],
+		command.slice(1).concat(process.argv.slice(2)),
+		{
+			stdio: "inherit",
+			env: childEnv,
+		},
+	);
 	if (result.error) {
 		console.error(result.error.message);
 		process.exit(1);

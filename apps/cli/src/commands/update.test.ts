@@ -224,14 +224,22 @@ describe("hub restart owner selection", () => {
 
 	it("uses the shared hub owner outside production builds", () => {
 		process.env.CLINE_BUILD_ENV = "development";
-		process.env.CLINE_DATA_DIR = "/tmp/cline-update-test-data";
+		process.env.CLINE_DATA_DIR = join(tmpdir(), "cline-update-test-data");
 		delete process.env.CLINE_HUB_DISCOVERY_PATH;
 
 		const owner = resolveCliHubOwnerContext();
 
-		expect(owner.discoveryPath).toContain("/locks/hub/owners/");
+		// Compared as path segments, not as a literal: `join` emits "\" on
+		// Windows, so a hardcoded "/" separator fails there while the behaviour
+		// under test (shared owner, not the production path) is platform-agnostic.
+		const segments = owner.discoveryPath.split(/[\\/]/);
+		expect(
+			segments.includes("locks") &&
+				segments.includes("hub") &&
+				segments.includes("owners"),
+		).toBe(true);
 		expect(owner.discoveryPath).not.toBe(
-			"/tmp/cline-update-test-data/locks/hub/production.json",
+			join(process.env.CLINE_DATA_DIR, "locks", "hub", "production.json"),
 		);
 	});
 });

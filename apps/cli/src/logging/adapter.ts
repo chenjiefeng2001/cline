@@ -135,6 +135,19 @@ function createWritableDestination(
 ): DestinationStream | undefined {
 	try {
 		mkdirSync(dirname(destinationPath), { recursive: true });
+		// Refuse a directory before handing the path to pino.
+		//
+		// `openSync(dir, "a")` SUCCEEDS on Windows, so the probe below would treat
+		// a directory as a valid log file. pino then builds a SonicBoom stream that
+		// can never become ready and never closes, which keeps the event loop alive
+		// forever — the process (or a vitest worker) hangs on exit instead of
+		// falling back to stderr.
+		//
+		// ENOENT is the normal case (the log file is created below), so only an
+		// existing directory is rejected.
+		if (existsSync(destinationPath) && statSync(destinationPath).isDirectory()) {
+			return undefined;
+		}
 		const fd = openSync(destinationPath, "a");
 		closeSync(fd);
 		const dest = pino.destination({

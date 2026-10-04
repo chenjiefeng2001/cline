@@ -35,7 +35,19 @@ export async function resolveSystemPrompt(input: {
 	});
 }
 
-const FILE_MENTION_PREFIX = String.raw`(?:\/|~\/|\.{1,2}\/)`;
+// A mention must resolve to a real path, so it needs a recognisable root:
+// POSIX absolute, `~/`, `./`, `../`, or a Windows drive (`C:\` / `C:/`).
+//
+// The drive form is required on Windows, where the common case is an absolute
+// path pasted from Explorer or a shell. Without it `@C:\Users\me\notes.md` was
+// left untouched: the mention was never detected, so the prompt kept the raw
+// `@...` text and no attachment was produced.
+//
+// Requiring the `:` keeps this from matching email addresses — in
+// `someone@example.com` the prefix after `@` is `example.com`, which is not a
+// drive spec.
+const WINDOWS_DRIVE_PREFIX = String.raw`[A-Za-z]:[\\/]`;
+const FILE_MENTION_PREFIX = String.raw`(?:\/|~\/|\.{1,2}\/|${WINDOWS_DRIVE_PREFIX})`;
 const FILE_MENTION_PATTERN_TEST = new RegExp(
 	String.raw`@(?:"${FILE_MENTION_PREFIX}[^"\r\n]+"|${FILE_MENTION_PREFIX}\S+)`,
 	"i",
