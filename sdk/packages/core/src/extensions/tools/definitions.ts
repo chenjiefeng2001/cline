@@ -44,6 +44,9 @@ import {
 	EditFileInputSchema,
 	type FetchWebContentInput,
 	FetchWebContentInputSchema,
+	type GlobInput,
+	GlobInputSchema,
+	GlobUnionInputSchema,
 	type ReadFileRequest,
 	type ReadFilesInput,
 	ReadFilesInputSchema,
@@ -65,6 +68,7 @@ import type {
 	DefaultToolsConfig,
 	EditorExecutor,
 	FileReadExecutor,
+	GlobExecutor,
 	SearchExecutor,
 	ShellExecutor,
 	SkillsExecutorWithMetadata,
@@ -256,6 +260,10 @@ export function createReadFilesTool(
 			"Binary files that are not image and large files are not supported. " +
 			"Returns file contents or error messages for each path. ",
 		inputSchema: zodToJsonSchema(ReadFilesInputSchema),
+		// Reads only: no shared mutable state, no external side effects. Safe to batch
+		// with other reads and with searches when the run resolves to parallel
+		// execution.
+		concurrency: "safe",
 		timeoutMs: timeoutMs * 2, // Account for multiple files
 		retryable: true,
 		maxRetries: 1,
@@ -294,6 +302,11 @@ export function createReadFilesTool(
 				requests = [validate];
 			}
 
+			// Mutated from concurrent branches below. `++` is used rather than
+			// `completed += 1` so the read-modify-write is a single synchronous step
+			// — no await can interleave inside it.
+			let completed = 0;
+
 			return Promise.all(
 				requests.map(async (request): Promise<ToolOperationResult> => {
 					const rangeError = getReadFileRangeError(request);
@@ -312,6 +325,25 @@ export function createReadFilesTool(
 							timeoutMs,
 							`File read timed out after ${timeoutMs}ms`,
 						);
+						// Stream progress so a multi-file read is observable while it runs.
+						// Without this the whole batch lands at once at the end, which for
+						// a dozen files over a slow mount is indistinguishable from a hang.
+						// The final `execute` return value is unchanged — updates are
+						// progress only and must never be mistaken for the result.
+						//
+						// REACHABILITY: consumed on the hub path
+						// (`hub-runtime-host.ts:261` wires `emitUpdate` to a progress
+						// callback) and, since 2026-10-04, on the VS Code path too:
+						// `message-translator.ts` maps `content_update` for every tool to
+						// the existing `say:"tool"` partial channel, which `ToolUseRow`
+						// renders. See doc/agent-capability-gap-review-2026-10-03.md §5.1.
+						context.emitUpdate?.({
+							type: "read_files.progress",
+							query: formatReadFileQuery(request),
+							completed: ++completed,
+							total: requests.length,
+							success: true,
+						});
 						return {
 							query: formatReadFileQuery(request),
 							result: content,
@@ -319,6 +351,14 @@ export function createReadFilesTool(
 						};
 					} catch (error) {
 						const msg = formatError(error);
+						context.emitUpdate?.({
+							type: "read_files.progress",
+							query: formatReadFileQuery(request),
+							completed: ++completed,
+							total: requests.length,
+							success: false,
+							error: `Error reading file: ${msg}`,
+						});
 						return {
 							query: formatReadFileQuery(request),
 							result: "",
@@ -352,6 +392,8 @@ export function createSearchTool(
 			"Use for finding code patterns, function definitions, class names, imports, etc. " +
 			`Output beyond ~${Math.round(MAX_SEARCH_OUTPUT_CHARS / 1000)}k characters per query is middle-truncated; narrow patterns beat broad ones.`,
 		inputSchema: zodToJsonSchema(SearchCodebaseInputSchema),
+		// Reads only: no shared mutable state, no external side effects.
+		concurrency: "safe",
 		timeoutMs: timeoutMs * 2,
 		retryable: true,
 		maxRetries: 1,
@@ -385,6 +427,93 @@ export function createSearchTool(
 							query,
 							result: "",
 							error: `Search failed: ${msg}`,
+							success: false,
+						};
+					}
+				}),
+			);
+		},
+	});
+}
+
+/**
+ * Create the glob tool
+ *
+ * Finds files by name pattern. Complements search_codebase rather than
+ * overlapping it: search matches text inside files, glob answers which files
+ * exist, which is the question a model otherwise answers by shelling out to
+ * `find`/`ls` and paying a full command round-trip for a directory listing.
+ */
+export function createGlobTool(
+	executor: GlobExecutor,
+	config: Pick<DefaultToolsConfig, "cwd" | "searchTimeoutMs"> = {},
+): AgentTool<GlobInput, ToolOperationResult[]> {
+	const timeoutMs = config.searchTimeoutMs ?? 30000;
+	const cwd = config.cwd ?? process.cwd();
+
+	return createTool<GlobInput, ToolOperationResult[]>({
+		name: "glob",
+		description:
+			"Find files by name pattern, e.g. `**/*.test.ts`, `src/**/index.ts`, or `package.json`. " +
+			"`*` and `?` match within one path segment, `**` crosses directories, `[a-z]` is a character class; a pattern without `/` matches the filename at any depth. " +
+			"Returns workspace-relative paths from the same workspace index that backs search_codebase, which excludes VCS metadata such as .git. " +
+			"Prefer this over running `find`/`ls` to locate files. Supports multiple patterns in one call.",
+		inputSchema: zodToJsonSchema(GlobInputSchema),
+		// Reads only, and the backing index is shared with search: no side effects.
+		concurrency: "safe",
+		timeoutMs,
+		retryable: true,
+		maxRetries: 1,
+		execute: async (input, context) => {
+			const validate = validateWithZod(GlobUnionInputSchema, input);
+			const rawPatterns = Array.isArray(validate)
+				? validate
+				: typeof validate === "object"
+					? Array.isArray(validate.patterns)
+						? validate.patterns
+						: [validate.patterns]
+					: [validate];
+			const patterns = rawPatterns.filter(
+				(pattern): pattern is string => typeof pattern === "string" && pattern.trim() !== "",
+			);
+			const scope =
+				typeof validate === "object" && !Array.isArray(validate) && validate.path
+					? validate.path
+					: undefined;
+
+			if (patterns.length === 0) {
+				return [
+					{
+						query: "",
+						result: "",
+						error: "No glob patterns provided",
+						success: false,
+					},
+				];
+			}
+
+			// The scope is threaded through context rather than the executor
+			// signature so a single GlobExecutor serves every pattern of one call,
+			// keeping the executor contract identical to SearchExecutor.
+			const globContext: AgentToolContext = scope
+				? { ...context, globPath: scope }
+				: context;
+
+			return Promise.all(
+				patterns.map(async (pattern): Promise<ToolOperationResult> => {
+					try {
+						const results = await withTimeout(
+							executor(pattern, cwd, globContext),
+							timeoutMs,
+							`Glob timed out after ${timeoutMs}ms`,
+						);
+						return { query: pattern, result: results, success: true };
+					} catch (error) {
+						const msg = formatError(error);
+						return {
+							query: pattern,
+							result: "",
+							error: `Glob failed: ${msg}`,
 							success: false,
 						};
 					}
@@ -875,6 +1004,7 @@ export function createDefaultTools(
 		executors,
 		enableReadFiles = true,
 		enableSearch = true,
+		enableGlob = true,
 		enableBash = true,
 		enableWebFetch = true,
 		enableApplyPatch = false,
@@ -895,6 +1025,11 @@ export function createDefaultTools(
 	// Add search_codebase tool if enabled and executor provided
 	if (enableSearch && executors.search) {
 		tools.push(createSearchTool(executors.search, config));
+	}
+
+	// Add glob tool if enabled and executor provided
+	if (enableGlob && executors.glob) {
+		tools.push(createGlobTool(executors.glob, config));
 	}
 
 	// Add run_commands tool if enabled and executor provided

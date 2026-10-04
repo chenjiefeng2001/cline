@@ -7,6 +7,7 @@ import {
 import {
 	buildRunCommandsDescription,
 	createDefaultTools,
+	createGlobTool,
 	createReadFilesTool,
 	createSearchTool,
 	createShellTool,
@@ -38,6 +39,117 @@ function createMockSkillsExecutor(
 	executor.configuredSkills = configuredSkills;
 	return executor;
 }
+
+describe("glob tool", () => {
+	it("is included only when enabled with a glob executor", () => {
+		// Hosts that never pass a glob executor must not advertise the tool, or the
+		// model would call something that cannot run.
+		const withoutExecutor = createDefaultTools({
+			executors: {},
+			enableGlob: true,
+		});
+		expect(withoutExecutor.map((tool) => tool.name)).not.toContain("glob");
+
+		const withExecutor = createDefaultTools({
+			executors: { glob: async () => "" },
+			enableGlob: true,
+		});
+		expect(withExecutor.map((tool) => tool.name)).toContain("glob");
+	});
+
+	it("can be turned off while the executor is present", () => {
+		const tools = createDefaultTools({
+			executors: { glob: async () => "" },
+			enableGlob: false,
+		});
+		expect(tools.map((tool) => tool.name)).not.toContain("glob");
+	});
+
+	it("batches several patterns into one call", async () => {
+		const executor = vi.fn(async (pattern: string) => `matched ${pattern}`);
+		const tool = createGlobTool(executor as never);
+
+		const results = (await tool.execute({ patterns: ["*.ts", "*.md"] }, {
+			agentId: "a",
+			iteration: 1,
+		})) as Array<{ query: string; result: string; success: boolean }>;
+
+		expect(executor).toHaveBeenCalledTimes(2);
+		expect(results).toHaveLength(2);
+		expect(results.map((entry) => entry.query)).toEqual(["*.ts", "*.md"]);
+		expect(results.every((entry) => entry.success)).toBe(true);
+	});
+
+	it("accepts a single pattern string", async () => {
+		const executor = vi.fn(async () => "one hit");
+		const tool = createGlobTool(executor as never);
+
+		// `GlobInput` is the documented shape; the union schema also tolerates a bare
+		// string because models emit it, so the runtime path must handle it too.
+		const results = (await tool.execute("*.ts" as never, {
+			agentId: "a",
+			iteration: 1,
+		})) as Array<{ query: string }>;
+
+		expect(results).toHaveLength(1);
+		expect(results[0]?.query).toBe("*.ts");
+	});
+
+	it("passes the requested subdirectory through context for every pattern", async () => {
+		const seen: Array<string | undefined> = [];
+		const executor = vi.fn(async (_pattern: string, _cwd: string, context: never) => {
+			seen.push((context as { globPath?: string }).globPath);
+			return "";
+		});
+		const tool = createGlobTool(executor as never);
+
+		await tool.execute({ patterns: ["*.ts", "*.md"], path: "src/tools" }, {
+			agentId: "a",
+			iteration: 1,
+		});
+
+		expect(seen).toEqual(["src/tools", "src/tools"]);
+	});
+
+	it("isolates a failing pattern so the rest of the batch still reports", async () => {
+		const executor = vi.fn(async (pattern: string) => {
+			if (pattern === "*.ts") {
+				throw new Error("outside the workspace root");
+			}
+			return `matched ${pattern}`;
+		});
+		const tool = createGlobTool(executor as never);
+
+		const results = (await tool.execute({ patterns: ["*.ts", "*.md"] }, {
+			agentId: "a",
+			iteration: 1,
+		})) as Array<{ query: string; error?: string; success: boolean; result: string }>;
+
+		expect(results[0]?.success).toBe(false);
+		expect(results[0]?.error).toContain("outside the workspace root");
+		expect(results[1]?.success).toBe(true);
+		expect(results[1]?.result).toContain("matched *.md");
+	});
+
+	it("rejects an empty pattern list instead of silently returning nothing", async () => {
+		const tool = createGlobTool((async () => "") as never);
+		const results = (await tool.execute({ patterns: ["  "] }, {
+			agentId: "a",
+			iteration: 1,
+		})) as Array<{ error?: string; success: boolean }>;
+
+		expect(results[0]?.success).toBe(false);
+		expect(results[0]?.error).toContain("No glob patterns");
+	});
+
+	it("documents the pattern syntax so the model can write patterns", () => {
+		const tool = createGlobTool((async () => "") as never);
+
+		expect(tool.description).toContain("**");
+		expect(tool.description).toContain("*` and `?`");
+		expect(tool.description).toContain("[a-z]");
+	});
+});
 
 describe("default skills tool", () => {
 	it("is included only when enabled with a skills executor", () => {
@@ -1356,6 +1468,80 @@ describe("default run_commands tool", () => {
 });
 
 describe("default read_files tool", () => {
+	it("streams per-file progress without changing the returned result", async () => {
+		// Without progress updates a multi-file read lands all at once at the end,
+		// which over a slow mount is indistinguishable from a hang. The updates are
+		// progress only: the tool's return value must stay exactly what it was.
+		const updates: unknown[] = [];
+		const execute = vi.fn(async (request: { path: string }) => `contents of ${request.path}`);
+		const tool = createReadFilesTool(execute);
+
+		const result = await tool.execute(
+			{ files: [{ path: "/tmp/a.ts" }, { path: "/tmp/b.ts" }] },
+			{
+				agentId: "agent-1",
+				conversationId: "conv-1",
+				iteration: 1,
+				emitUpdate: (update) => updates.push(update),
+			},
+		);
+
+		expect(result).toEqual([
+			{ query: "/tmp/a.ts", result: "contents of /tmp/a.ts", success: true },
+			{ query: "/tmp/b.ts", result: "contents of /tmp/b.ts", success: true },
+		]);
+		expect(updates).toHaveLength(2);
+		for (const update of updates) {
+			expect(update).toMatchObject({ type: "read_files.progress", total: 2 });
+		}
+		// `completed` must be a distinct 1..n per file even though the reads run
+		// concurrently, and must never exceed the total.
+		const completed = updates.map((u) => (u as { completed: number }).completed);
+		expect([...completed].sort()).toEqual([1, 2]);
+	});
+
+	it("reports a failed read as progress too", async () => {
+		const updates: unknown[] = [];
+		const execute = vi.fn(async (request: { path: string }) => {
+			if (request.path === "/tmp/bad.ts") {
+				throw new Error("EACCES");
+			}
+			return "ok";
+		});
+		const tool = createReadFilesTool(execute);
+
+		const result = await tool.execute(
+			{ files: [{ path: "/tmp/ok.ts" }, { path: "/tmp/bad.ts" }] },
+			{
+				agentId: "agent-1",
+				conversationId: "conv-1",
+				iteration: 1,
+				emitUpdate: (update) => updates.push(update),
+			},
+		);
+
+		expect(updates).toHaveLength(2);
+		expect(updates.some((u) => (u as { success: boolean }).success === false)).toBe(true);
+		// The error still reaches the caller through the return value.
+		expect(result[1]).toMatchObject({ query: "/tmp/bad.ts", success: false });
+	});
+
+	it("works when no emitUpdate is supplied", async () => {
+		// `emitUpdate` is optional on AgentToolContext; a host that does not
+		// subscribe must not break the read.
+		const execute = vi.fn(async () => "fine");
+		const tool = createReadFilesTool(execute);
+
+		const result = await tool.execute(
+			{ files: [{ path: "/tmp/a.ts" }] },
+			{ agentId: "a", conversationId: "c", iteration: 1 },
+		);
+
+		expect(result).toEqual([
+			{ query: "/tmp/a.ts", result: "fine", success: true },
+		]);
+	});
+
 	it("validates ranged file requests and passes them to the executor", async () => {
 		const execute = vi.fn(async () => "selected lines");
 		const tool = createReadFilesTool(execute);

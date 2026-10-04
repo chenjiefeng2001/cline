@@ -37,6 +37,7 @@ const TOOL_NAME_TO_FLAG: Record<
 		DefaultToolsConfig,
 		| "enableReadFiles"
 		| "enableSearch"
+		| "enableGlob"
 		| "enableBash"
 		| "enableWebFetch"
 		| "enableApplyPatch"
@@ -48,6 +49,7 @@ const TOOL_NAME_TO_FLAG: Record<
 > = {
 	read_files: "enableReadFiles",
 	search_codebase: "enableSearch",
+	glob: "enableGlob",
 	run_commands: "enableBash",
 	fetch_web_content: "enableWebFetch",
 	apply_patch: "enableApplyPatch",

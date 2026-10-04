@@ -5,6 +5,9 @@ const TOOL_KIND_MAP: Record<string, ToolKind> = {
 	Read: "read",
 	read_files: "read",
 	Glob: "search",
+	// Cline's own name for the same capability. Without it Zed and other ACP
+	// clients fall back to "other" and render it as a generic tool call.
+	glob: "search",
 	Grep: "search",
 	search_codebase: "search",
 	Edit: "edit",

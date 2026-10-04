@@ -153,6 +153,15 @@ export function formatToolInput(toolName: string, input: unknown): string {
 				return truncate(obj.queries.join(", "), 120);
 			}
 			break;
+		case "glob":
+			if (Array.isArray(obj.patterns)) {
+				const patterns = obj.patterns.join(", ");
+				return truncate(
+					typeof obj.path === "string" ? `${patterns} (in ${obj.path})` : patterns,
+					120,
+				);
+			}
+			break;
 		case "fetch_web_content":
 			if (Array.isArray(obj.requests)) {
 				return truncate(

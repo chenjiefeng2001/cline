@@ -48,3 +48,6 @@ export const MAX_READ_OUTPUT_CHARS = 48_000;
 
 /** Max characters returned per search query; beyond this the middle is elided. */
 export const MAX_SEARCH_OUTPUT_CHARS = 48_000;
+
+/** Max characters returned per glob pattern; beyond this the middle is elided. */
+export const MAX_GLOB_OUTPUT_CHARS = 24_000;

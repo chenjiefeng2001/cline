@@ -113,6 +113,37 @@ export const SearchCodebaseInputSchema = z.object({
 });
 
 /**
+ * Schema for glob tool input
+ *
+ * `patterns` mirrors search_codebase's `queries`: models reliably batch a list
+ * when the schema offers one, and each pattern is a cheap index lookup so
+ * batching costs nothing. `path` is accepted once for the whole call because a
+ * model batching patterns almost always means "all of these, somewhere in this
+ * directory".
+ */
+export const GlobInputSchema = z.object({
+	patterns: z
+		.array(z.string())
+		.describe(
+			"Array of glob patterns to match against workspace-relative paths. `*` and `?` stay within one path segment, `**` crosses directories, `[a-z]` is a character class. A pattern with no `/` matches the filename at any depth.",
+		),
+	path: z
+		.string()
+		.optional()
+		.describe(
+			"Optional subdirectory to scope every pattern to, relative to the workspace root. Must stay inside the workspace.",
+		),
+});
+
+/** Union schema accepting a single pattern, an array, or the full object. */
+export const GlobUnionInputSchema = z.union([
+	GlobInputSchema,
+	z.array(z.string()),
+	z.string(),
+	z.object({ patterns: z.string(), path: z.string().optional() }),
+]);
+
+/**
  * Union schema for search_codebase tool input, allowing either a single string, an array of strings, or the full object schema
  */
 export const SearchCodebaseUnionInputSchema = z.union([
@@ -303,6 +334,11 @@ export type ReadFilesInput = z.infer<typeof ReadFilesInputSchema>;
  * Input for the search_codebase tool
  */
 export type SearchCodebaseInput = z.infer<typeof SearchCodebaseInputSchema>;
+
+/**
+ * Input for the glob tool
+ */
+export type GlobInput = z.infer<typeof GlobInputSchema>;
 
 /**
  * Input for the run_commands tool

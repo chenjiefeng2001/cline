@@ -1,6 +1,24 @@
 import type { AutoApprovalSettings } from "@shared/AutoApprovalSettings"
 import type { McpHub } from "@/services/mcp/McpHub"
 
+const READ_TOOL_NAMES = [
+	"read_files",
+	"read_file",
+	"list_files",
+	"list_code_definition_names",
+	"search_codebase",
+	"search_files",
+	"glob",
+]
+
+/**
+ * MCP tools that address a server's catalogue rather than a server's tool set.
+ * They have no `<server>__<tool>` name to route, so they are listed explicitly;
+ * they are gated on the same MCP toggle as per-server tools because they read
+ * third-party data over the network.
+ */
+const MCP_RESOURCE_TOOL_NAMES = ["list_mcp_resources", "read_mcp_resource", "list_mcp_prompts"]
+
 /**
  * Build SDK `toolPolicies` for tools governed by Cline's auto-approval UI.
  *
@@ -22,10 +40,11 @@ export function buildToolPolicies(
 		}
 	}
 
-	set(["read_files", "read_file", "list_files", "list_code_definition_names", "search_codebase", "search_files"])
+	set(READ_TOOL_NAMES)
 	set(["editor", "replace_in_file", "write_to_file", "apply_patch", "delete_file"])
 	set(["run_commands", "execute_command"])
 	set(["fetch_web_content", "web_fetch", "web_search"])
+	set(MCP_RESOURCE_TOOL_NAMES)
 
 	if (mcpHub) {
 		for (const server of mcpHub.getServers()) {
@@ -69,13 +88,18 @@ export function isToolAutoApproved(toolName: string, settings: AutoApprovalSetti
 		return !!tool?.autoApprove
 	}
 
+	if (MCP_RESOURCE_TOOL_NAMES.includes(toolName)) {
+		// No per-tool setting exists for these, so the MCP toggle decides. Leaving
+		// them out would make them fall through to `false` and be permanently
+		// un-approvable, which is worse than the toggle-driven behaviour.
+		return !!settings.actions.useMcp
+	}
+
 	return false
 }
 
 function isReadTool(toolName: string): boolean {
-	return ["read_files", "read_file", "list_files", "list_code_definition_names", "search_codebase", "search_files"].includes(
-		toolName,
-	)
+	return READ_TOOL_NAMES.includes(toolName)
 }
 
 export function isEditTool(toolName: string): boolean {

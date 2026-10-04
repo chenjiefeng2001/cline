@@ -69,6 +69,20 @@ export type SearchExecutor = (
 ) => Promise<string>;
 
 /**
+ * Executor for finding files by name pattern
+ *
+ * @param pattern - Glob pattern, e.g. `src/**\/*.test.ts`
+ * @param cwd - Workspace root; patterns resolve relative to it
+ * @param context - Tool execution context
+ * @returns Matching workspace-relative paths as a formatted string
+ */
+export type GlobExecutor = (
+	pattern: string,
+	cwd: string,
+	context: AgentToolContext,
+) => Promise<string>;
+
+/**
  * Executor for running shell commands
  *
  * @param command - Shell command to execute
@@ -201,6 +215,8 @@ export type VerifySubmitExecutor = (
 export interface ToolExecutors {
 	/** File reading implementation */
 	readFile?: FileReadExecutor;
+	/** Filename-pattern search implementation */
+	glob?: GlobExecutor;
 	/** Codebase search implementation */
 	search?: SearchExecutor;
 	/** Shell command execution implementation */
@@ -231,6 +247,7 @@ export interface ToolExecutors {
 export type DefaultToolName =
 	| "read_files"
 	| "search_codebase"
+	| "glob"
 	| "run_commands"
 	| "fetch_web_content"
 	| "apply_patch"
@@ -254,6 +271,12 @@ export interface DefaultToolsConfig {
 	 * @default true
 	 */
 	enableSearch?: boolean;
+
+	/**
+	 * Enable the glob tool
+	 * @default true
+	 */
+	enableGlob?: boolean;
 
 	/**
 	 * Enable the run_commands tool

@@ -20,6 +20,7 @@ const LOW_STAKES_TOOLS = new Set([
 	"listFilesRecursive",
 	"listCodeDefinitionNames",
 	"searchFiles",
+	"glob",
 ])
 
 /**
@@ -108,6 +109,26 @@ export function canRestoreWorkspaceFromMessage(messages: ClineMessage[], message
 		return false
 	}
 	return isVisibleCheckpointUserMessage(messages[index]) && !isCheckpointAnswerMessage(messages, index)
+}
+
+/**
+ * The canonical "which task does this transcript belong to" selector.
+ *
+ * Two places need it and they used to disagree:
+ *
+ * - ChatView used `messages.find(m => m.say === "task") ?? messages.at(0)` for the
+ *   Virtuoso key, precisely so that prepending older history would not change the key
+ *   (see the comment there — a changing task.ts remounts the list and bounces the
+ *   scroll).
+ * - useChatState used plain `messages.at(0)` to drive the "clear expanded rows when
+ *   the task changes" effect.
+ *
+ * The mismatch made every scroll-up pagination batch change `task.ts`, wiping
+ * `expandedRows` and collapsing every manually-expanded row. One definition, used by
+ * both, removes the coupling entirely.
+ */
+export function findTaskMessage(messages: ClineMessage[]): ClineMessage | undefined {
+	return messages.find((message) => message.say === "task") ?? messages.at(0)
 }
 
 /**
@@ -342,14 +363,42 @@ export function isTextMessagePendingToolCall(textTs: number, allMessages: ClineM
  * - (Case A) Tools between a previous completed api_req and the current incomplete api_req
  * - (Case B) Tools after the most recent api_req overall (either because it's complete, or no loading state is active yet)
  */
-export function getToolsNotInCurrentActivities(toolGroupMessages: ClineMessage[], allMessages: ClineMessage[]): ClineMessage[] {
-	// Build a Map of timestamp -> index for O(1) lookups instead of O(n) findIndex calls
+/**
+ * The part of `getToolsNotInCurrentActivities` that depends ONLY on `allMessages`,
+ * not on the tool group being filtered.
+ *
+ * This used to be recomputed inside that function, once per rendered tool group. It
+ * builds a ts->index Map over every message and scans backwards for the api_req
+ * window, so a conversation with G tool groups paid O(G*N) per frame on top of the
+ * rest of the render. With `allMessages` reference-keyed (it is memoized by
+ * `useIncrementalMessages`, so the reference is stable across a frame) the window is
+ * computed once.
+ */
+interface CurrentActivityWindow {
+	/** ts -> index in allMessages, for O(1) position lookups. */
+	tsToIndex: Map<number, number>
+	/** "loading": the most recent api_req has no cost yet. "settled": it has one. */
+	mode: "loading" | "settled" | "none"
+	/** Index of the most recent api_req_started. */
+	mostRecentApiReqIndex: number
+	/** Case A only: index of the previous COMPLETED api_req_started. */
+	prevCompletedApiReqIndex: number
+}
+
+let _currentActivityWindowCache: { input: ClineMessage[]; value: CurrentActivityWindow } | null = null
+
+function computeCurrentActivityWindow(allMessages: ClineMessage[]): CurrentActivityWindow {
+	if (_currentActivityWindowCache !== null && _currentActivityWindowCache.input === allMessages) {
+		return _currentActivityWindowCache.value
+	}
+
+	// ts -> index for O(1) lookups instead of O(n) findIndex calls
 	const tsToIndex = new Map<number, number>()
 	for (let i = 0; i < allMessages.length; i++) {
 		tsToIndex.set(allMessages[i].ts, i)
 	}
 
-	// Step 1: Find the MOST RECENT api_req_started overall (search backwards)
+	// Find the MOST RECENT api_req_started overall (search backwards)
 	let mostRecentApiReqIndex = -1
 	let mostRecentApiReq: ClineMessage | null = null
 	for (let i = allMessages.length - 1; i >= 0; i--) {
@@ -360,52 +409,77 @@ export function getToolsNotInCurrentActivities(toolGroupMessages: ClineMessage[]
 		}
 	}
 
-	if (mostRecentApiReqIndex === -1) {
-		// No api_req at all - show all tools
-		return toolGroupMessages
-	}
+	let mode: CurrentActivityWindow["mode"] = "none"
+	let prevCompletedApiReqIndex = -1
 
-	if (!mostRecentApiReq?.text) {
-		return toolGroupMessages
-	}
+	if (mostRecentApiReqIndex !== -1 && mostRecentApiReq?.text) {
+		let mostRecentHasCost = false
+		try {
+			const info = JSON.parse(mostRecentApiReq.text)
+			mostRecentHasCost = info.cost != null
+		} catch {
+			mostRecentHasCost = false
+		}
 
-	// Step 2: Determine if most recent api_req is complete (has cost) or incomplete (no cost)
-	let mostRecentHasCost = false
-	try {
-		const info = JSON.parse(mostRecentApiReq.text)
-		mostRecentHasCost = info.cost != null
-	} catch {
-		return toolGroupMessages
-	}
-
-	// Step 3: Determine which tools are "in current activities"
-	if (!mostRecentHasCost) {
-		// CASE A: Most recent api_req is INCOMPLETE (loading state active)
-		// Tools are in-flight if they're between prev completed api_req and current incomplete one
-
-		// Find the previous COMPLETED api_req
-		let prevCompletedApiReqIndex = -1
-		for (let i = mostRecentApiReqIndex - 1; i >= 0; i--) {
-			const msg = allMessages[i]
-			if (msg.say === "api_req_started" && msg.text) {
-				try {
-					const prevInfo = JSON.parse(msg.text)
-					if (prevInfo.cost != null) {
-						prevCompletedApiReqIndex = i
-						break
+		if (!mostRecentHasCost) {
+			// CASE A: most recent api_req is INCOMPLETE (loading state active).
+			// In-flight tools sit between the previous COMPLETED api_req and this one.
+			mode = "loading"
+			for (let i = mostRecentApiReqIndex - 1; i >= 0; i--) {
+				const msg = allMessages[i]
+				if (msg.say === "api_req_started" && msg.text) {
+					try {
+						const prevInfo = JSON.parse(msg.text)
+						if (prevInfo.cost != null) {
+							prevCompletedApiReqIndex = i
+							break
+						}
+					} catch {
+						/* continue searching */
 					}
-				} catch {
-					/* continue searching */
 				}
 			}
+			// No previous completed api_req => nothing is in the current-activities
+			// range, so every tool in every group is shown.
+			if (prevCompletedApiReqIndex === -1) {
+				mode = "none"
+			}
+		} else {
+			// CASE B: most recent api_req is COMPLETE (has cost). Tools after it are
+			// the in-flight ones.
+			mode = "settled"
 		}
+	}
 
-		if (prevCompletedApiReqIndex === -1) {
-			// No previous completed api_req, so no tools are in the "current activities" range
-			return toolGroupMessages
-		}
+	const value: CurrentActivityWindow = { tsToIndex, mode, mostRecentApiReqIndex, prevCompletedApiReqIndex }
+	_currentActivityWindowCache = { input: allMessages, value }
+	return value
+}
 
-		// Filter out tools in the range (prevCompleted, current)
+/**
+ * Filter a tool group to exclude tools that are in the "current activities" range.
+ * Returns the filtered array of messages (may be empty).
+ *
+ * This is used so ToolGroupRenderer shows PAST tools (what's already in context),
+ * while the loading state shows ACTIVE tools (what's being "read" now).
+ *
+ * "Current activities" includes:
+ * - (Case A) Tools between a previous completed api_req and the current incomplete api_req
+ * - (Case B) Tools after the most recent api_req overall (either because it's complete, or no loading state is active yet)
+ */
+export function getToolsNotInCurrentActivities(toolGroupMessages: ClineMessage[], allMessages: ClineMessage[]): ClineMessage[] {
+	const window = computeCurrentActivityWindow(allMessages)
+	const { tsToIndex, mode, mostRecentApiReqIndex, prevCompletedApiReqIndex } = window
+
+	if (mode === "none") {
+		// No usable api_req window (no api_req at all, unparseable text, or no
+		// previous completed api_req to bound Case A) — show every tool.
+		return toolGroupMessages
+	}
+
+	if (mode === "loading") {
+		// CASE A: most recent api_req is INCOMPLETE (loading state active).
+		// Filter out tools in the range (prevCompleted, current).
 		return toolGroupMessages.filter((msg) => {
 			// Keep non-low-stakes tools
 			if (!isLowStakesTool(msg)) {
@@ -429,10 +503,10 @@ export function getToolsNotInCurrentActivities(toolGroupMessages: ClineMessage[]
 			return true
 		})
 	}
-	// CASE B: Most recent api_req is COMPLETE (has cost)
-	// Tools that appear AFTER this completed api_req are "in flight" (just arrived)
-	// Filter them out so they appear in currentActivities instead
 
+	// CASE B: most recent api_req is COMPLETE (has cost).
+	// Tools that appear AFTER this completed api_req are "in flight" (just arrived).
+	// Filter them out so they appear in currentActivities instead.
 	return toolGroupMessages.filter((msg) => {
 		// Keep non-low-stakes tools
 		if (!isLowStakesTool(msg)) {
@@ -709,6 +783,8 @@ export function getIconByToolName(toolName: string) {
 		case "listFilesRecursive":
 			return FolderOpenDotIcon
 		case "searchFiles":
+			return SearchIcon
+		case "glob":
 			return SearchIcon
 		case "listCodeDefinitionNames":
 			return ShapesIcon

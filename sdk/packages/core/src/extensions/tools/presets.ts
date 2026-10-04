@@ -25,6 +25,7 @@ export const ToolPresets = {
 	act: {
 		enableReadFiles: true,
 		enableSearch: true,
+		enableGlob: true,
 		enableBash: true,
 		enableWebFetch: true,
 		enableApplyPatch: false,
@@ -43,6 +44,7 @@ export const ToolPresets = {
 	plan: {
 		enableReadFiles: true,
 		enableSearch: true,
+		enableGlob: true,
 		enableBash: true,
 		enableWebFetch: true,
 		enableApplyPatch: false,
@@ -55,12 +57,13 @@ export const ToolPresets = {
 	},
 
 	/**
-	 * Search-focused tools (read_files + search_codebase)
+	 * Search-focused tools (read_files + search_codebase + glob)
 	 * Good for code exploration and analysis agents
 	 */
 	search: {
 		enableReadFiles: true,
 		enableSearch: true,
+		enableGlob: true,
 		enableBash: false,
 		enableWebFetch: false,
 		enableApplyPatch: false,
@@ -74,10 +77,14 @@ export const ToolPresets = {
 
 	/**
 	 * Minimal tools for focused tasks
+	 *
+	 * `enableGlob` is explicitly false rather than left to its default so this
+	 * preset keeps meaning what it says: no discovery tools, only a shell.
 	 */
 	minimal: {
 		enableReadFiles: false,
 		enableSearch: false,
+		enableGlob: false,
 		enableBash: true,
 		enableWebFetch: false,
 		enableApplyPatch: false,
@@ -96,6 +103,9 @@ export const ToolPresets = {
 	yolo: {
 		enableReadFiles: true,
 		enableSearch: false,
+		// Follows `enableSearch: false`: glob is a discovery tool, and this preset
+		// deliberately trades discovery for a shell plus edits.
+		enableGlob: false,
 		enableBash: true,
 		enableWebFetch: false,
 		enableApplyPatch: false,

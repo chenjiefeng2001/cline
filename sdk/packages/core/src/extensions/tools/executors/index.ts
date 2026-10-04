@@ -17,6 +17,7 @@ import {
 	createFileReadExecutor,
 	type FileReadExecutorOptions,
 } from "./file-read";
+import { createGlobExecutor, type GlobExecutorOptions } from "./glob";
 import { createSearchExecutor, type SearchExecutorOptions } from "./search";
 import { createWebFetchExecutor, type WebFetchExecutorOptions } from "./web-fetch";
 import { createWebSearchExecutor, type WebSearchExecutorOptions } from "./web-search";
@@ -39,6 +40,7 @@ export {
 	createFileReadExecutor,
 	type FileReadExecutorOptions,
 } from "./file-read";
+export { createGlobExecutor, type GlobExecutorOptions, globToRegExp, resolveGlobScope } from "./glob";
 export { createSearchExecutor, type SearchExecutorOptions } from "./search";
 export { createWebFetchExecutor, type WebFetchExecutorOptions } from "./web-fetch";
 export {
@@ -57,6 +59,7 @@ export type {
  */
 export interface DefaultExecutorsOptions {
 	fileRead?: FileReadExecutorOptions;
+	glob?: GlobExecutorOptions;
 	search?: SearchExecutorOptions;
 	bash?: ShellExecutorOptions;
 	webFetch?: WebFetchExecutorOptions;
@@ -99,6 +102,7 @@ export function createDefaultExecutors(
 ): ToolExecutors {
 	return {
 		readFile: createFileReadExecutor(options.fileRead),
+		glob: createGlobExecutor(options.glob),
 		search: createSearchExecutor(options.search),
 		bash: createDefaultShellExecutor(options.bash),
 		webFetch: createWebFetchExecutor(options.webFetch),

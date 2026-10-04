@@ -245,6 +245,21 @@ describe("parseArgs", () => {
 });
 
 describe("format helpers", () => {
+	it("shows the glob patterns and scope in the approval prompt", () => {
+		// An approval prompt that omits the patterns would ask the user to bless
+		// an invisible filesystem query.
+		const result = formatToolInput("glob", {
+			patterns: ["**/*.test.ts", "*.md"],
+			path: "src/tools",
+		});
+		expect(result).toContain("**/*.test.ts, *.md");
+		expect(result).toContain("src/tools");
+	});
+
+	it("shows glob patterns without inventing a scope", () => {
+		expect(formatToolInput("glob", { patterns: ["*.ts"] })).toBe("*.ts");
+	});
+
 	it("truncates run_commands with commands array", () => {
 		const result = formatToolInput("run_commands", {
 			commands: [

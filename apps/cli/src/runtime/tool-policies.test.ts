@@ -25,6 +25,9 @@ describe("tool policy helpers", () => {
 			ask_followup_question: { autoApprove: true },
 			ask_question: { autoApprove: true },
 			fetch_web_content: { autoApprove: true },
+			// glob is a read-only lookup, so it belongs with the other read tools
+			// rather than being demoted to an approval prompt every call.
+			glob: { autoApprove: true },
 			run_commands: { autoApprove: false, enabled: true },
 			read_files: { autoApprove: true, enabled: true },
 			search_codebase: { autoApprove: true },
@@ -108,5 +111,24 @@ describe("tool policy helpers", () => {
 				enabled: false,
 			}),
 		).toEqual({ autoApprove: true, enabled: true });
+		expect(
+			resolveInteractiveAutoApprovePolicy({
+				toolName: "glob",
+				baselinePolicies: baseline,
+				enabled: false,
+			}),
+		).toEqual({ autoApprove: true });
+	});
+
+	it("still requires approval for MCP catalogue tools when auto-approve is off", () => {
+		// These reach third-party servers, so they must not inherit the read-tool
+		// exemption just because they are read-only.
+		expect(
+			resolveInteractiveAutoApprovePolicy({
+				toolName: "read_mcp_resource",
+				baselinePolicies: { "*": { autoApprove: true } },
+				enabled: false,
+			}),
+		).toEqual({ autoApprove: false });
 	});
 });
