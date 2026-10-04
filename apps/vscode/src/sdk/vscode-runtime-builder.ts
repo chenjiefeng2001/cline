@@ -3,6 +3,7 @@ import { type AgentTool, type AgentToolContext, createTool } from "@cline/shared
 import type { VscodeTerminalManager } from "@/hosts/vscode/terminal/VscodeTerminalManager"
 import type { McpHub } from "@/services/mcp/McpHub"
 import { Logger } from "@/shared/services/Logger"
+import { createMcpResourceToolsSafe } from "./mcp-resource-tools"
 import type { SdkForegroundCommandCoordinator } from "./sdk-foreground-command-coordinator"
 import { createVscodeRunCommandsTool, VSCODE_FOREGROUND_RUN_COMMANDS_TIMEOUT_MS } from "./vscode-run-commands-tool"
 
@@ -149,7 +150,14 @@ export async function createVscodeExtraTools(mcpHub: McpHub, options?: VscodeExt
 		}),
 	)
 
-	const tools: AgentTool[] = [createAttemptCompletionTool({ cwd: options?.cwd }), ...mcpTools.flat()]
+	const tools: AgentTool[] = [
+		createAttemptCompletionTool({ cwd: options?.cwd }),
+		// MCP resources and prompts, not just MCP tools. Without these a server
+		// that publishes resources or prompts was half-connected: the data existed
+		// in McpHub but the model could not reach it.
+		...createMcpResourceToolsSafe(mcpHub),
+		...mcpTools.flat(),
+	]
 
 	// Add the custom run_commands tool when a terminal manager is available.
 	// This replaces the SDK's built-in run_commands, which is suppressed via

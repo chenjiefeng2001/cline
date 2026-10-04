@@ -1410,6 +1410,53 @@ export class McpHub {
 		}
 	}
 
+	/**
+	 * Aggregate every server's resources, templates and prompts for the agent.
+	 *
+	 * The per-server fetchers above are private because they were written for the
+	 * settings UI, which asks one server at a time. An agent asking "what can these
+	 * MCP servers offer me?" has no notion of a single server, so it needs the
+	 * cross-server view — without it the only way to see a resource is to already
+	 * know which server owns it.
+	 *
+	 * A server that is absent, disabled, or slow contributes nothing rather than
+	 * failing the call: one unreachable server must not hide every other server's
+	 * catalogue. That is why the private fetchers already swallow and return [].
+	 */
+	async listAllResources(): Promise<{
+		resources: Array<McpResource & { serverName: string }>
+		templates: Array<McpResourceTemplate & { serverName: string }>
+	}> {
+		const servers = this.connections.filter((conn) => !conn.server.disabled)
+		const [resources, templates] = await Promise.all([
+			Promise.all(
+				servers.map(async (conn) => ({
+					serverName: conn.server.name,
+					items: await this.fetchResourcesList(conn.server.name),
+				})),
+			),
+			Promise.all(
+				servers.map(async (conn) => ({
+					serverName: conn.server.name,
+					items: await this.fetchResourceTemplatesList(conn.server.name),
+				})),
+			),
+		])
+		return {
+			resources: resources.flatMap((entry) => entry.items.map((item) => ({ ...item, serverName: entry.serverName }))),
+			templates: templates.flatMap((entry) => entry.items.map((item) => ({ ...item, serverName: entry.serverName }))),
+		}
+	}
+
+	/** Aggregate every server's prompts for the agent. See {@link listAllResources}. */
+	async listAllPrompts(): Promise<Array<McpPrompt & { serverName: string }>> {
+		const servers = this.connections.filter((conn) => !conn.server.disabled)
+		const listed = await Promise.all(
+			servers.map(async (conn) => ({ serverName: conn.server.name, items: await this.fetchPromptsList(conn.server.name) })),
+		)
+		return listed.flatMap((entry) => entry.items.map((item) => ({ ...item, serverName: entry.serverName })))
+	}
+
 	async readResource(serverName: string, uri: string): Promise<McpResourceResponse> {
 		const connection = this.connections.find((conn) => conn.server.name === serverName)
 		if (!connection) {
