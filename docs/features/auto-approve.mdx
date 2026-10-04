@@ -32,15 +32,19 @@ A few details matter:
 
 | Setting | What It Allows |
 |---------|----------------|
-| Read project files | Read files, list files, search in your workspace |
+| Read project files | Read files, list files, search your workspace, and find files by name pattern (`glob`) |
 | Read all files | Read files outside your workspace (requires base toggle) |
 | Edit project files | Create and edit files in your workspace |
 | Edit all files | Edit files outside your workspace (requires base toggle) |
 | Execute safe commands | Run terminal commands marked safe |
 | Execute all commands | Run commands requiring approval (requires base toggle) |
 | Use the browser | Browser tool for web fetching and searching |
-| Use MCP servers | MCP tools and resources |
+| Use MCP servers | MCP tools, plus the resource and prompt listing tools in the VS Code extension |
 | Enable notifications | Notifies you about long-running commands |
+
+Each toggle covers its whole family of tools, so turning off **Read project
+files** also stops `glob`, and turning off **Use MCP servers** also stops the MCP
+resource and prompt tools.
 
 <Warning>
 "Read all files" and "Edit all files" only matter if their base toggle is enabled. They extend access outside your workspace.

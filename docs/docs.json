@@ -141,6 +141,7 @@
 							"customization/plugins",
 							"mcp/mcp-overview",
 							"customization/hooks",
+							"customization/vscode-settings",
 							"cli/scheduling",
 							"cli/connectors",
 							"customization/clineignore"

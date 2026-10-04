@@ -1,0 +1,57 @@
+---
+title: "VS Code Settings"
+sidebarTitle: "VS Code Settings"
+description: "Every Cline setting in the VS Code extension, and what each one changes."
+---
+
+Cline's VS Code settings live in the settings dialog (**Agent**, **Files**,
+**Memory** and **Web Search** sections) and in `settings.json` under the `cline.`
+prefix. Every setting listed here is editable in the UI and reaches the runtime —
+there are no declared-but-unwired settings.
+
+## Run guardrails
+
+These bound what a single agent run may cost.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `cline.maxIterations` | `0` | Model round-trips per turn. **`0` means no limit.** Reaching a limit ends the turn as `max_iterations`; it does not crash |
+| `cline.runBudgetMaxTotalCost` | `5` | Spend ceiling in USD for one run. **`0` means no ceiling.** Reaching it ends the turn as `budget_exhausted` |
+| `cline.maxConsecutiveMistakes` | `3` | Consecutive mistakes before the run pauses for you (0–10) |
+
+`0` is a decision, not a typo: it removes the ceiling entirely, which is useful
+for long autonomous runs. A value that is not a usable number — negative,
+non-finite, blank — falls back to the default, because a mistyped setting must
+never silently remove a guardrail.
+
+The CLI applies the same two ceilings with the same effective behaviour (50 round-trips and $5, overridable by flag), so a task behaves the same in either host.
+
+## Parallel tool calls
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `cline.maxParallelToolCalls` | `6` | Tool calls that may run concurrently in one turn. `1` forces fully serial execution |
+
+Only tools that declare themselves concurrency-safe batch together. Today that
+is `read_files`, `search_codebase` and `glob`; everything else runs on its own,
+and batching never changes the order results are returned in.
+
+## Files and workspace
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `cline.fileBoundaryEnabled` | `true` | Confine `read_files` and `editor` to the session workspace |
+| `cline.fileBoundaryAdditionalRoots` | `""` | Extra directories the file tools may touch. Accepts a JSON array or a newline/comma separated list |
+
+With the boundary on, the file tools cannot touch paths outside the workspace.
+Widening it is done by adding roots rather than by switching the guard off.
+
+## MCP
+
+**Use MCP servers** in the auto-approve settings gates both MCP tool calls and the
+resource and prompt tools, so turning it off stops all three.
+
+## See also
+
+- [Auto Approve](/features/auto-approve) — what each approval toggle covers
+- [Tools](/tools-reference/all-cline-tools) — the tools these settings affect

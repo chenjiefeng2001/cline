@@ -11,6 +11,14 @@ MCP (Model Context Protocol) lets Cline use external tools and data sources thro
 - Connect Cline to external APIs and services
 - Add custom tools beyond built-in Cline tools
 - Use either local servers or remote hosted servers
+- In the VS Code extension, list and read the **resources** and **prompts** a
+  server publishes, not just call its tools
+
+<Note>
+  Resources and prompts are a VS Code extension capability today. The SDK's own
+  MCP layer speaks tools only, so the CLI, hub and desktop app connect to the same
+  server without being able to read its resources or prompts.
+</Note>
 
 ## Quick start
 
