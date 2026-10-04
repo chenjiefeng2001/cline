@@ -15,6 +15,10 @@ import {
 	getPreferredKanbanInstaller,
 } from "./commands/update";
 import { CLI_DEFAULT_CHECKPOINT_CONFIG } from "./runtime/defaults";
+import {
+	guardOverridesFromArgs,
+	resolveRunGuards,
+} from "./runtime/run-guards";
 import { getCliBuildInfo } from "./utils/common";
 import {
 	buildCliCompactionConfig,
@@ -833,6 +837,30 @@ export async function runCli(): Promise<void> {
 			`${c.dim}[warn] ignoring invalid --retries value "${args.invalidRetries}" (expected integer >= 1)${c.reset}`,
 		);
 	}
+	// Run guardrails. Invalid values are fatal rather than warned, matching
+	// --timeout: a silently-ignored ceiling is the exact failure this whole set of
+	// flags exists to remove.
+	if (args.invalidMaxIterations) {
+		writeErr(
+			`invalid --max-iterations "${args.invalidMaxIterations}" (expected integer >= 1)`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+	if (args.invalidMaxBudgetUsd) {
+		writeErr(
+			`invalid --max-budget-usd "${args.invalidMaxBudgetUsd}" (expected number > 0)`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+	if (args.invalidMaxParallelToolCalls) {
+		writeErr(
+			`invalid --max-parallel-tool-calls "${args.invalidMaxParallelToolCalls}" (expected integer >= 1)`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	if (args.hooksDir?.trim()) {
 		process.env.CLINE_HOOKS_DIR = args.hooksDir.trim();
 	}
@@ -1091,6 +1119,13 @@ export async function runCli(): Promise<void> {
 			execution: {
 				maxConsecutiveMistakes: args.retries ?? 3,
 			},
+			// Run guardrails. The runtime has implemented both for a long time
+			// (max_iterations and budget_exhausted are finish reasons, not crashes)
+			// but this path used to set neither, so a one-shot or interactive run had
+			// no ceiling at all. Resolved through the shared helper so the ACP entry
+			// point cannot drift to a different default.
+			...resolveRunGuards(guardOverridesFromArgs(args)),
+			maxParallelToolCalls: args.maxParallelToolCalls ?? 6,
 			checkpoint: CLI_DEFAULT_CHECKPOINT_CONFIG,
 			compaction: buildCliCompactionConfig(args.compactionMode),
 			timeoutSeconds: args.timeoutSeconds,

@@ -61,6 +61,18 @@ export function addRootOptions(cmd: Command): Command {
 				"Optional timeout in seconds (default: 0 for no timeout)",
 			)
 			.option(
+				"--max-iterations <count>",
+				"Maximum model round-trips per turn (default: 50; exceeding it finishes the turn as max_iterations). ACP sessions have no flags: set CLINE_MAX_ITERATIONS",
+			)
+			.option(
+				"--max-budget-usd <amount>",
+				"Spend ceiling in USD for a single run (default: 5; exceeding it finishes the turn as budget_exhausted). ACP sessions have no flags: set CLINE_MAX_BUDGET_USD",
+			)
+			.option(
+				"--max-parallel-tool-calls <count>",
+				"Tool calls executed concurrently within one turn (default: 6; 1 forces serial). Only tools declared concurrency-safe batch together",
+			)
+			.option(
 				"--acp",
 				"Run in Agent Client Protocol (ACP) mode for editor integration",
 			)
@@ -170,6 +182,40 @@ export function commanderToParsedArgs(program: Command): ParsedArgs {
 			result.timeoutSeconds = parsed;
 		} else if (raw) {
 			result.invalidTimeoutSeconds = raw;
+		}
+	}
+
+	// Run guardrails. The runtime implements iteration, spend and concurrency caps
+	// (max_iterations / budget_exhausted are finish reasons, not crashes) but the CLI
+	// never set any of them, so an interactive or one-shot run had no ceiling at all.
+	// Defaults mirror the extension so the two hosts behave the same.
+	if (opts.maxIterations !== undefined) {
+		const raw = String(opts.maxIterations).trim();
+		const parsed = Number.parseInt(raw, 10);
+		if (raw && Number.isInteger(parsed) && parsed >= 1) {
+			result.maxIterations = parsed;
+		} else if (raw) {
+			result.invalidMaxIterations = raw;
+		}
+	}
+
+	if (opts.maxBudgetUsd !== undefined) {
+		const raw = String(opts.maxBudgetUsd).trim();
+		const parsed = Number.parseFloat(raw);
+		if (raw && Number.isFinite(parsed) && parsed > 0) {
+			result.runBudgetMaxTotalCost = parsed;
+		} else if (raw) {
+			result.invalidMaxBudgetUsd = raw;
+		}
+	}
+
+	if (opts.maxParallelToolCalls !== undefined) {
+		const raw = String(opts.maxParallelToolCalls).trim();
+		const parsed = Number.parseInt(raw, 10);
+		if (raw && Number.isInteger(parsed) && parsed >= 1) {
+			result.maxParallelToolCalls = parsed;
+		} else if (raw) {
+			result.invalidMaxParallelToolCalls = raw;
 		}
 	}
 

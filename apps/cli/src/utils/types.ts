@@ -73,6 +73,17 @@ export interface ParsedArgs {
 	mode: CliAgentMode;
 	timeoutSeconds?: number;
 	invalidTimeoutSeconds?: string;
+	/**
+	 * Run guardrails, all optional so an omitted flag falls back to the default
+	 * applied in main.ts. `invalid*` carries the raw text so main.ts can print a
+	 * precise error rather than silently ignoring a typo'd value.
+	 */
+	maxIterations?: number;
+	invalidMaxIterations?: string;
+	runBudgetMaxTotalCost?: number;
+	invalidMaxBudgetUsd?: string;
+	maxParallelToolCalls?: number;
+	invalidMaxParallelToolCalls?: string;
 	thinking: boolean;
 	/** Whether --thinking was explicitly provided on the command line */
 	thinkingExplicitlySet?: boolean;

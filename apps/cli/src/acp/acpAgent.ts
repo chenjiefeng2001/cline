@@ -31,10 +31,12 @@ import {
 import type { Message } from "@cline/shared";
 import { getPersistedProviderApiKey } from "../commands/auth";
 import { resolveSystemPrompt } from "../runtime/prompt";
+import { readRunGuardEnv, resolveRunGuards } from "../runtime/run-guards";
 import { subscribeToAgentEvents } from "../runtime/session-events";
 import { createCliCore } from "../session/session";
 import { getCliBuildInfo } from "../utils/common";
 import { randomSessionId, resolveWorkspaceRoot } from "../utils/helpers";
+import { withTransientRetry } from "../utils/retry";
 import type { Config } from "../utils/types";
 import {
 	ACP_AUTH_METHODS,
@@ -226,10 +228,14 @@ export class AcpAgent implements Agent {
 			if (!activeSessionId || !sessionManager) {
 				throw new Error("Session manager was not initialized");
 			}
-			const result = await sessionManager.send({
-				sessionId: activeSessionId,
-				prompt: promptText,
-			});
+			const result = await withTransientRetry(
+				() =>
+					sessionManager.send({
+						sessionId: activeSessionId,
+						prompt: promptText,
+					}),
+				{ signal: abortController.signal },
+			);
 
 			if (result) {
 				stopReason = mapFinishReason(result.finishReason);
@@ -535,6 +541,17 @@ export class AcpAgent implements Agent {
 			mode: session.currentMode,
 			defaultToolAutoApprove: false,
 			toolPolicies: { "*": { autoApprove: false } },
+			// Same guardrails as every other CLI-hosted entry point, and the same
+			// existing runtime mechanism (`max_iterations` / `budget_exhausted` are
+			// finish reasons). Without them an ACP session — an IDE-hosted agent a
+			// user leaves running — had no iteration bound and no spend ceiling, which
+			// made ACP the one entry point with unbounded cost exposure.
+			// Defaults come from the shared resolver so this path cannot drift from
+			// the terminal one; `CLINE_MAX_ITERATIONS` / `CLINE_MAX_BUDGET_USD`
+			// override them because ACP has no flag parser.
+			// Deliberately not touching `maxParallelToolCalls`: ACP's serial
+			// execution is its own semantics, decided separately.
+			...resolveRunGuards(readRunGuardEnv()),
 			enableSpawnAgent: true,
 			enableAgentTeams: false,
 			enableTools: true,
@@ -646,7 +663,13 @@ function extractTextFromContentBlocks(blocks: ContentBlock[]): string {
 		.join("\n");
 }
 
-function mapFinishReason(reason: string): StopReason {
+/**
+ * Map a runtime finish reason onto the closest ACP stop reason.
+ *
+ * Exported for tests: the mapping is the only place where a guardrail stop is
+ * translated for an IDE client, so it needs to be pinned.
+ */
+export function mapFinishReason(reason: string): StopReason {
 	switch (reason) {
 		case "completed":
 			return "end_turn";
@@ -654,6 +677,15 @@ function mapFinishReason(reason: string): StopReason {
 			return "cancelled";
 		case "max_iterations":
 			return "max_turn_requests";
+		case "budget_exhausted":
+			// ACP has no spend-specific stop reason. `end_turn` would report a
+			// budget-capped run as a normal completion, which is the one thing the
+			// user must not be misled about. `max_tokens` is the protocol's "stopped
+			// at a configured limit" value and matches the existing precedent of
+			// mapping a non-token limit (max_iterations) to the nearest limit reason.
+			// The exact figure arrives separately as a `status-notice`
+			// ("Run budget exhausted: …"), so no information is lost.
+			return "max_tokens";
 		case "mistake_limit":
 			return "end_turn";
 		default:
