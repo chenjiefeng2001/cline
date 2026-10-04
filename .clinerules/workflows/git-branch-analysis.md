@@ -19,7 +19,7 @@ $B=$null;foreach($c in 'main','master','origin/main','origin/master'){git rev-pa
 - Analyze all git output without providing commentary or narration
 - Read the full diff to understand the scope and nature of changes
 - Identify patterns, architectural modifications, or potential impacts
-- Use `read_file` to examine any related files providing additional context on the changes you have observed
+- Use `read_files` to examine any related files providing additional context on the changes you have observed
 
 ## Step 3: Context Gathering
 - Analyze related code without providing commentary or narration

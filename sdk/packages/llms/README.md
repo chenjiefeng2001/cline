@@ -82,6 +82,30 @@ For generated catalog field semantics and token-limit behavior, see
 - `@cline/llms/models`: model catalog/query entrypoint
 - `@cline/llms/providers`: provider handler/settings entrypoint
 
+## Transient Error Classification
+
+A provider failure is a fact about the provider and the transport, so the
+classification lives here rather than in each host:
+
+```typescript
+import {
+  isTransientProviderError,
+  computeRetryDelayMs,
+  DEFAULT_PROVIDER_RETRY_POLICY,
+} from "@cline/llms"
+```
+
+`isTransientProviderError(error)` is true for the failures a later attempt can
+plausibly fix — 502/503/504, 429, overloaded responses, and dropped TLS or
+connection resets. `401` is **not** transient: the credential is wrong, and
+retrying only spends the caller's tokens to arrive at the same failure. An
+aborted request is not transient either.
+
+`computeRetryDelayMs(attempt, policy)` returns the backoff for an attempt, and
+`DEFAULT_PROVIDER_RETRY_POLICY` is the shared shape. Hosts own their own loop —
+the CLI's `withTransientRetry` is one — so each can decide what to do about
+cancellation.
+
 ## Related Packages
 
 - `@cline/agents`: agent loop and tool execution
@@ -125,7 +149,7 @@ bun -F @cline/llms run test:live
 Optional:
 
 - `LLMS_LIVE_PROVIDER_TIMEOUT_MS=120000` to increase per-provider timeout.
-- `LLMS_LIVE_PROVIDER_RETRIES=2` to retry transient upstream/provider failures per provider (total attempts = retries + 1).
+- `LLMS_LIVE_PROVIDER_RETRIES=2` to retry transient upstream/provider failures per provider (total attempts = retries + 1). This is a knob on this test harness only, not on runtime behaviour.
 - `LLMS_LIVE_PROVIDER_CONCURRENCY=3` to run multiple provider entries in parallel. Defaults to `3`; lower it if you need stricter provider rate-limit behavior.
 - Point `LLMS_LIVE_PROVIDERS_PATH` to a custom file if you want a narrower provider set.
 - Point `LLMS_LIVE_REASONING_PROVIDERS_PATH` to a custom file for reasoning-enabled suites.

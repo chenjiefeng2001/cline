@@ -1,12 +1,12 @@
 # ClineCore Runtime
 
-`ClineCore` is the full-featured runtime from `@cline/core`. It wraps the `Agent` loop with session persistence, built-in tools (bash, editor, file reading, search, web fetch), config discovery, plugin loading, and optional hub-backed multi-process support.
+`ClineCore` is the full-featured runtime from `@cline/core`. It wraps the `Agent` loop with session persistence, built-in tools (read_files, search_codebase, glob, run_commands, editor, fetch_web_content), config discovery, plugin loading, and optional hub-backed multi-process support.
 
 ## When to Use ClineCore
 
 | Use ClineCore when... | Use Agent instead when... |
 |---|---|
-| You need built-in tools (bash, editor, etc.) | You only need custom tools |
+| You need built-in tools (read_files, search_codebase, glob, run_commands, ...) | You only need custom tools |
 | You want session persistence to disk | Stateless is fine |
 | You need config discovery from `.cline/` dirs | You handle config yourself |
 | You want scheduled/automated agents | You don't need scheduling |
@@ -47,12 +47,20 @@ ClineCore provides these tools automatically when `enableTools: true`:
 
 | Tool | Description |
 |------|-------------|
-| `bash` | Execute shell commands |
-| `editor` | Edit files |
 | `read_files` | Read file contents |
+| `search_codebase` | Regex search file contents |
+| `glob` | Find files by name pattern |
+| `run_commands` | Execute shell commands |
+| `editor` | Edit files |
 | `apply_patch` | Apply unified diffs |
-| `search` | Search file contents and structure |
-| `fetch_web` | HTTP requests and web content |
+| `fetch_web_content` | Fetch URL content for analysis |
+| `skills` | Run a configured skill |
+| `ask_question` | Ask the user one question |
+| `submit_and_exit` | Submit a final answer and stop (opt-in) |
+
+MCP server tools are added alongside these. The three MCP catalogue tools
+(`list_mcp_resources`, `read_mcp_resource`, `list_mcp_prompts`) are contributed by
+the VS Code extension only — the SDK's own MCP layer speaks tools only.
 
 ### Config Discovery
 

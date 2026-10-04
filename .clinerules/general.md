@@ -24,7 +24,7 @@ This file is the secret sauce for working effectively in this codebase. It captu
 ## Searching the Codebase — Avoiding Build Output
 
 Several directories contain build output or generated code that produces
-noisy or unusable results with `search_files` / `grep`:
+noisy or unusable results with `search_codebase` / `grep`:
 
 | Directory | What it is | Why it's a problem |
 |-----------|-----------|-------------------|
@@ -37,7 +37,7 @@ noisy or unusable results with `search_files` / `grep`:
 
 ### How to skip build output
 
-**`search_files`** — Point at `src/` (not the project root) and use `file_pattern`:
+**`search_codebase`** — Point at `src/` (not the project root) and use `file_pattern`:
 ```
 search_files(path="src/core", regex="myFunction", file_pattern="*.ts")
 ```
@@ -59,7 +59,7 @@ normal `grep` shows the entire file as context. Use these approaches:
   ```bash
   grep -oP '.{0,40}myFunction.{0,40}' dist/extension.js
   ```
-- **`read_file`** on files in `out/src/` — these have source maps and are
+- **`read_files`** on files in `out/src/` — these have source maps and are
   more readable than `dist/extension.js` (which is the fully bundled output).
 - **Source maps** — `out/src/*.js.map` and `dist/extension.js.map` can be
   used to trace minified output back to original source locations.

@@ -11,6 +11,34 @@ The Cline SDK has three event layers. Which one you use depends on whether you'r
 
 These are different event types with different shapes. Do not mix them up.
 
+## Hook Events (Separate From Event Streams)
+
+Hook events are not part of either subscription above. They are dispatched to
+hook handlers and to hook files named after the event:
+
+| Event | Hook file | Fires when |
+|-------|-----------|-----------|
+| `agent_start` | `TaskStart` | A run begins |
+| `agent_resume` | `TaskResume` | A run resumes |
+| `agent_abort` | `TaskCancel` | A run is cancelled |
+| `agent_end` | `TaskComplete` | A run finishes |
+| `agent_error` | `TaskError` | A run fails |
+| `tool_call` | `PreToolUse` | Before a tool executes |
+| `tool_result` | `PostToolUse` | After a tool returns |
+| `prompt_submit` | `UserPromptSubmit` | A prompt is submitted |
+| `pre_compact` | `PreCompact` | Before a conversation is compacted |
+| `session_shutdown` | `SessionShutdown` | A session shuts down |
+
+`pre_compact` fires for automatic compaction and for the manual compact command,
+so a handler does not need to know which of the two shrank the context. It is
+dispatched separately because compaction happens in the context pipeline rather
+than at one of the runtime's named lifecycle points.
+
+A hook file's exit code is not a control signal — it prints an optional JSON
+object on stdout (`cancel`, `context`, `overrideInput`). Only `tool_call` waits
+for a response, so only `PreToolUse` can block. A hook that fails, times out or
+prints invalid JSON is logged and skipped.
+
 ## Layer 1: AgentRuntimeEvent (Standalone Agent)
 
 Emitted by the `Agent` class via `agent.subscribe()`. This is what you get when using `new Agent(...)` directly. Every event includes a `snapshot` field with the current `AgentRuntimeStateSnapshot`.

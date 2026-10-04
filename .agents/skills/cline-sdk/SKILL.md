@@ -74,7 +74,7 @@ Which API?
 |   +-- agent/ (Agent class from @cline/agents)
 +-- I need session persistence, built-in tools, config discovery
 |   +-- clinecore/ (ClineCore from @cline/core)
-+-- I want built-in file/shell/search/web tools
++-- I want built-in file/shell/search/glob/web tools
 |   +-- clinecore/ (has built-in tools; Agent does not)
 +-- I want scheduled or recurring agents
 |   +-- clinecore/ (automation API)
@@ -89,7 +89,7 @@ Which API?
 ```
 Tools?
 +-- Define a custom tool with schema -> tools/REFERENCE.md
-+-- Use built-in tools (bash, editor, read_files) -> tools/REFERENCE.md (built-in section)
++-- Use built-in tools (read_files, search_codebase, glob, run_commands, editor, ...) -> tools/REFERENCE.md (built-in section)
 +-- Control tool approval/policies -> tools/REFERENCE.md (policies section)
 +-- Tool that ends the agent loop -> tools/REFERENCE.md (completion tools)
 +-- Package tools as a reusable plugin -> plugins/REFERENCE.md

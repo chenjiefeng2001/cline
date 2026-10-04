@@ -203,7 +203,7 @@ const session = await cline.start({
 console.log(session.result?.text)
 ```
 
-`ClineCore` gives the agent built-in tools (`bash`, `editor`, `read_files`, `apply_patch`, `search`, `fetch_web`), persists sessions to SQLite, discovers config from `.cline/` directories, and optionally connects to an RPC sidecar for scheduled agents and cross-process session management.
+`ClineCore` gives the agent built-in tools (`read_files`, `search_codebase`, `glob`, `run_commands`, `editor`, `apply_patch`, `fetch_web_content`, `skills`, `ask_question`, `submit_and_exit`), persists sessions to SQLite, discovers config from `.cline/` directories, and optionally connects to an RPC sidecar for scheduled agents and cross-process session management.
 
 ## Packages
 

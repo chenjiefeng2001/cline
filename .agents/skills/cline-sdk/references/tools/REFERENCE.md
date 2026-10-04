@@ -54,15 +54,24 @@ createTool({
   name: string,                         // snake_case, unique per agent
   description: string,                  // what the tool does (model reads this)
   inputSchema: JSONSchema | ZodSchema,  // input validation
-  execute: async (input, context, onChange?) => output,
+  execute: async (input, context) => output,
+  concurrency?: "safe" | "exclusive",   // default: "exclusive"
   timeoutMs?: number,                   // default: 30000
-  retryable?: boolean,                  // default: true
-  maxRetries?: number,                  // default: 3
+  retryable?: boolean,                  // default: false
+  maxRetries?: number,                  // default: 0
   lifecycle?: {
     completesRun?: boolean              // true = ends agent loop on success
   },
 })
 ```
+
+`concurrency` is the one to reason about before writing a tool. Leave it alone
+and the tool runs alone, which is safe by default. Set `"safe"` only for a tool
+that reads and keeps no shared state; the runtime then batches the safe tools of
+a turn together behind a worker pool while preserving result order.
+
+Retries are **off** by default (`retryable: false`, `maxRetries: 0`). Enabling
+them is an explicit statement that the operation is idempotent.
 
 ### AgentToolContext
 
@@ -73,7 +82,8 @@ interface AgentToolContext {
   agentId: string
   conversationId: string
   iteration: number
-  abortSignal?: AbortSignal
+  signal?: AbortSignal                 // cancelled when the run is aborted
+  globPath?: string                    // per-call scope for name-pattern lookups
   metadata?: Record<string, unknown>
 }
 ```
@@ -142,12 +152,19 @@ When using `ClineCore` with `enableTools: true`, these tools are available autom
 
 | Tool | Name | What It Does |
 |------|------|-------------|
-| Shell | `bash` | Execute shell commands in the session workspace |
+| Read | `read_files` | Read file contents, optionally a line range |
+| Search | `search_codebase` | Regex search file contents |
+| Glob | `glob` | Find files by name pattern, e.g. `**/*.test.ts` |
+| Shell | `run_commands` | Execute shell commands in the session workspace |
 | Editor | `editor` | Create and edit files |
-| Read | `read_files` | Read file contents |
 | Patch | `apply_patch` | Apply unified diffs to files |
-| Search | `search` | Search file contents and directory structure |
-| Web | `fetch_web` | Fetch web content via HTTP |
+| Web | `fetch_web_content` | Fetch URL content for analysis |
+| Skills | `skills` | Run a configured skill in the main conversation |
+| Ask | `ask_question` | Ask the user one multiple-choice question |
+| Submit | `submit_and_exit` | Submit a final answer and stop (opt-in) |
+
+`read_files`, `search_codebase` and `glob` declare `concurrency: "safe"` and are
+the only tools that batch together by default; everything else runs alone.
 
 Built-in tools respect the `cwd` setting in `CoreSessionConfig`.
 
@@ -194,7 +211,7 @@ Respect the abort signal for tools that take a long time:
 execute: async (input, context) => {
   const results = []
   for (const item of input.items) {
-    if (context.abortSignal?.aborted) {
+    if (context.signal?.aborted) {
       return { results, aborted: true, processed: results.length }
     }
     results.push(await processItem(item))
@@ -237,7 +254,7 @@ describe("deploy tool", () => {
 
 ## MCP Tool Integration
 
-ClineCore can connect to MCP (Model Context Protocol) servers for additional tools. Configure in `.cline/mcp-servers.json`:
+ClineCore can connect to MCP (Model Context Protocol) servers for additional tools. The server list is read from `cline_mcp_settings.json` under the Cline data directory (override the directory with `CLINE_DATA_DIR`, or the file itself with `CLINE_MCP_SETTINGS_PATH`):
 
 ```json
 {
@@ -251,6 +268,12 @@ ClineCore can connect to MCP (Model Context Protocol) servers for additional too
 ```
 
 MCP tools appear alongside built-in and custom tools automatically.
+
+The SDK's MCP layer speaks **tools only**. `list_mcp_resources`,
+`read_mcp_resource` and `list_mcp_prompts` are contributed by the VS Code
+extension's own MCP integration, so a headless host connected to the same server
+can call its tools but cannot read its resources or prompts. Prompts are listed,
+never executed.
 
 ## See Also
 

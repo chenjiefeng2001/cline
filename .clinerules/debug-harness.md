@@ -77,7 +77,7 @@ curl localhost:19229/api -d '{"method":"ui.command_palette","params":{"command":
 All via `POST localhost:19229/api` with `{"method":"...", "params":{...}}`:
 
 - **`launch`** / **`shutdown`** — lifecycle
-- **`ui.screenshot`** — screenshot to `/tmp/cline-debug/`; returns `{path}` — **use `read_file` on the path to examine, do NOT `open` the file** (Preview.app covers the VSCode window)
+- **`ui.screenshot`** — screenshot to `/tmp/cline-debug/`; returns `{path}` — **use `read_files` on the path to examine, do NOT `open` the file** (Preview.app covers the VSCode window)
 - **`ui.open_sidebar`** — open the Cline sidebar
 - **`ext.set_breakpoint`** `{file, line, condition?}` — breakpoint by source file (sourcemap-resolved)
 - **`ext.evaluate`** `{expression, callFrameId?}` — eval in extension host
@@ -118,7 +118,7 @@ curl localhost:19229/api -d '{"method":"ui.screenshot"}'
   curl localhost:19229/api -d '{"method": "ui.open_sidebar"}'
   curl localhost:19229/api -d '{"method": "web.evaluate", "params": {"expression": "document.querySelectorAll(\".sr-only\").forEach(el => el.parentElement?.click())"}}'
   ```
-- **Screenshots — don't open the file**: `ui.screenshot` and `ui.sidebar_screenshot` save PNGs to `/tmp/cline-debug/` and return the `{path}`. Use `read_file` on that path to examine screenshots. Running `open <path>` launches Preview.app on macOS which covers the VSCode window.
+- **Screenshots — don't open the file**: `ui.screenshot` and `ui.sidebar_screenshot` save PNGs to `/tmp/cline-debug/` and return the `{path}`. Use `read_files` on that path to examine screenshots. Running `open <path>` launches Preview.app on macOS which covers the VSCode window.
 - **Scripts count = 0 after launch**: CDP connects after extension host starts, so scripts parsed during startup aren't tracked. Breakpoints still work via sourcemap resolution.
 - **Port 9230**: Extension host inspector. If another VSCode instance uses this port, the harness will fail to connect. Kill other debug instances first.
 - **macOS only** for now (Playwright Electron launch behavior).

@@ -110,6 +110,14 @@ source effects before the restored prompt is allowed to run.
 The advanced `EffectLedger`, `SqliteEffectLedger`, key derivation, middleware,
 and recovery helpers are exported from `@cline/core`.
 
+Of the exported middleware, `createApprovalMiddleware` and
+`createRetryMiddleware` are **superseded**: approval happens during the runtime's
+tool preparation and per-tool retry is the runtime's own behaviour, so wiring
+them again would duplicate both. `createBudgetMiddleware` is the exception — it
+has no caller, and enabling it needs a product decision on a default
+`maxToolCalls`. The idempotency and redaction middleware are the ones actually in
+the default chain.
+
 ### Durable Tool Approvals
 
 `LocalRuntimeHost` and hub-backed sessions share a

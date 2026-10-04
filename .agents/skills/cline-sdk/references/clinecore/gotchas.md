@@ -44,7 +44,7 @@ Without this, the agent only has access to custom tools you provide via `config.
 
 ## cwd Matters for Built-in Tools
 
-Built-in tools like `bash`, `editor`, and `read_files` operate relative to `config.cwd`. If not set, they use the process working directory. Always set it explicitly for predictable behavior:
+Built-in tools like `run_commands`, `editor`, and `read_files` operate relative to `config.cwd`. If not set, they use the process working directory. Always set it explicitly for predictable behavior:
 
 ```typescript
 config: {
