@@ -185,21 +185,28 @@ describe("kanban command helpers", () => {
 
 	it("installs kanban before launch when missing", async () => {
 		const dir = createTempDir();
-		// The installer must materialize a `kanban` executable that the launcher
-		// then finds on PATH. The POSIX version uses a heredoc; on Windows a batch
-		// file cannot nest one, so it copies a pre-written stub into place instead.
+		const isWindows = process.platform === "win32";
+		// CreateProcess cannot run an extensionless file, so on Windows the install
+		// target has to be a `.cmd`; POSIX needs a shebang script.
+		const target = join(dir, isWindows ? "kanban.cmd" : "kanban");
+		const stubContents = isWindows ? "exit /b 6" : "#!/bin/sh\nexit 6\n";
 		const stubPath = join(dir, "kanban.cmd.stub");
-		writeFileSync(
-			stubPath,
-			process.platform === "win32" ? "exit /b 6" : "#!/bin/sh\nexit 6\n",
-			"utf8",
-		);
-		const installCommand =
-			process.platform === "win32"
-				? // `copy` is the cmd builtin; `cp` does not exist there, so a POSIX
-					// command here would silently install nothing.
-					`copy /Y "${stubPath}" "${dir}\\kanban.cmd" >NUL`
-				: `cat > "${dir}/kanban" <<'EOF'\n#!/bin/sh\nexit 6\nEOF\nchmod +x "${dir}/kanban"`;
+		writeFileSync(stubPath, stubContents, "utf8");
+
+		const installCommand = isWindows
+			? // `copy` is the cmd builtin; `cp` does not exist there, so a POSIX
+				// command here would silently install nothing.
+				`copy /Y "${stubPath}" "${target}" >NUL`
+			: // This script runs with PATH pointing only at the temp directory, so it
+				// cannot use `cat` or `chmod`: both are PATH lookups that fail, and they
+				// fail silently — the installer exits 0 having installed nothing, and the
+				// test then fails on the launcher's "not found in PATH" branch instead of
+				// on the thing it means to check. Windows never saw this because `copy` is
+				// a cmd builtin. Node is already running this test, so materialise the
+				// file through it and depend on nothing from PATH.
+				`"${process.execPath}" -e ${JSON.stringify(
+					`require("fs").writeFileSync(process.argv[1], ${JSON.stringify(stubContents)}, { mode: 0o755 })`,
+				)} "${target}"`;
 
 		writeExecutableScript(
 			dir,
