@@ -22,6 +22,7 @@ jobs:
         outputs:
             vscode: ${{ steps.force.outputs.run_all == 'true' || steps.filter.outputs.vscode == 'true' }}
             testing_platform: ${{ steps.force.outputs.run_all == 'true' || steps.filter.outputs.testing_platform == 'true' }}
+            cli: ${{ steps.force.outputs.run_all == 'true' || steps.filter.outputs.cli == 'true' }}
         steps:
             - id: force
               if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
@@ -76,6 +77,15 @@ jobs:
                           - 'apps/vscode/.vscodeignore'
                           - 'apps/vscode/scripts/**'
                           - '.github/workflows/ext-vscode-test.yml'
+                      cli:
+                          - 'apps/cli/**'
+                          # Root bun lockfile is authoritative for the whole workspace.
+                          - 'bun.lock'
+                          # @cline/* are local workspace symlinks; the CLI resolves them
+                          # through their dist/ output, so an SDK change can break the CLI
+                          # build even when no CLI file changed.
+                          - 'sdk/packages/**'
+                          - '.github/workflows/ext-vscode-test.yml'
 
     quality-checks:
         needs: detect-changes
@@ -120,6 +130,52 @@ jobs:
 
             - name: Run Quality Checks (Parallel)
               run: bun run ci:check-all
+
+    # CLI unit tests run here, in parallel with the vscode jobs, because
+    # sdk-test.yml — the only other place they ran — is gated on `paths: sdk/**`.
+    # An apps/cli-only push therefore ran no CLI tests at all, which is how a
+    # fixture that only breaks on Linux reached main unnoticed.
+    #
+    # This costs no wall-clock time: it starts immediately, and measured step
+    # times on this runner are ~0.4 min install + ~0.2 min SDK build + ~1.7 min
+    # tests, against a critical path of ~13 min set by the Windows vscode matrix.
+    cli-test:
+        needs: detect-changes
+        if: needs.detect-changes.outputs.cli == 'true'
+        runs-on: ubuntu-latest
+        name: CLI Tests
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            # 1.3.13 rather than this workflow's usual 1.3.14: that is the version
+            # pinned in package.json, and the one every other workflow validates
+            # the CLI suite against (cli-publish, sdk-test, ui-publish).
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: "1.3.13"
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "24.x"
+
+            - name: Install workspace dependencies
+              working-directory: ${{ github.workspace }}
+              run: bun install --frozen-lockfile
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            # The CLI resolves @cline/* through their dist/ output, so a fresh
+            # checkout has nothing for the suite to import until the SDK is built.
+            - name: Build SDK packages
+              working-directory: ${{ github.workspace }}
+              run: bun run build:sdk
+
+            - name: Run CLI tests
+              working-directory: ${{ github.workspace }}
+              run: bun -F @cline/cli test
 
     vscode-test:
         needs: [detect-changes, quality-checks]
