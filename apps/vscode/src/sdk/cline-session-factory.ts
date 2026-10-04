@@ -852,12 +852,35 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	// confused agent could spend an arbitrary amount of the user's tokens; the
 	// runtime reports max_iterations as a finish reason and still runs its
 	// after-run hooks, so the transcript stays valid.
-	const maxIterations = readBoundedInt(stateManager.getGlobalSettingsKey("maxIterationsSetting"), 50)
+	// 0 is the documented "no limit" value, so it must reach the runtime as
+	// `undefined` (the runtime's unbounded sentinel) rather than being rejected by
+	// readBoundedInt's `> 0` check and silently reverting to 50 — the setting would
+	// then read as unlimited while the run was still being cut short.
+	// A malformed value (NaN, negative, Infinity) is NOT unlimited: it falls back
+	// to the safe default, because a typo must never remove a runaway-loop guard.
+	// Only a genuine numeric 0 means unlimited. `Number(null)`, `Number("")` and
+	// `Number(false)` are all 0, so coercing first would let an unset or blank
+	// setting silently disable the guard — which is the opposite of the intent.
+	// null/undefined/"" fall through to the safe default instead.
+	const rawMaxIterations: unknown = stateManager.getGlobalSettingsKey("maxIterationsSetting")
+	const isExplicitlyZero = rawMaxIterations === 0 || (typeof rawMaxIterations === "string" && rawMaxIterations.trim() === "0")
+	const maxIterations = isExplicitlyZero ? undefined : readBoundedInt(rawMaxIterations, 50)
 	// Spend ceiling for a single run. AgentRunBudget is fully implemented in the
 	// SDK and is conformance-tested, but nothing in the extension ever set it.
 	// Only total cost is capped by default: a token cap would fight the user's own
 	// context-window choice, whereas cost is the thing that cannot be undone.
-	const runBudgetMaxTotalCost = readBoundedNumber(stateManager.getGlobalSettingsKey("runBudgetMaxTotalCost"), 5)
+	//
+	// `0` is the documented "no ceiling" value in both package.json and the
+	// settings UI, so it has to reach the runtime as an absent cap. The SDK
+	// validates `maxTotalCost` as a positive finite number, which means 0 is not
+	// even expressible there — passing it through would throw, and clamping it to
+	// the default (the earlier behaviour) produced the worst outcome: the UI said
+	// "no ceiling" while the run was actually cut off at $5.
+	// A malformed value (NaN, negative, Infinity) still falls back to the safe
+	// default, because a typo must never remove a runaway-spend guard.
+	const rawMaxTotalCost: unknown = stateManager.getGlobalSettingsKey("runBudgetMaxTotalCost")
+	const isUnlimitedBudget = rawMaxTotalCost === 0 || (typeof rawMaxTotalCost === "string" && rawMaxTotalCost.trim() === "0")
+	const runBudgetMaxTotalCost = isUnlimitedBudget ? undefined : readBoundedNumber(rawMaxTotalCost, 5)
 
 	// File-tool workspace boundary. read_files previously had no path check at all
 	// and editor's `..` test applied only to relative inputs, so any absolute path
@@ -1022,12 +1045,23 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		// finish reason (max_iterations), not a crash: after-run hooks still run, so
 		// the transcript stays valid.
 		maxIterations,
+		// Concurrent tool execution within one assistant turn. The runtime has
+		// implemented this for a long time (worker pool in @cline/agents) and nothing
+		// in the extension ever set it, so every turn ran strictly serially even when
+		// the model emitted five independent `read_files` calls at once.
+		//
+		// Only tools declaring `concurrency: "safe"` batch together; everything else
+		// runs alone in emission order, so ordering and write-safety are unchanged.
+		// `1` restores the old serial behaviour. The default is 6 rather than higher
+		// because only the two read-only tools are safe today, so a batch can never
+		// exceed "the reads the model asked for" — the ceiling is a guardrail, not the
+		// expected batch size.
+		maxParallelToolCalls: readBoundedInt(stateManager.getGlobalSettingsKey("maxParallelToolCalls"), 6),
 		// Spend guardrail. Exceeding it is likewise a finish reason
 		// (budget_exhausted), and the in-flight turn always completes so every tool
-		// call still receives a result.
-		budget: {
-			maxTotalCost: runBudgetMaxTotalCost,
-		},
+		// call still receives a result. `maxTotalCost: undefined` means no ceiling,
+		// which is what a 0 setting asks for.
+		...(runBudgetMaxTotalCost !== undefined ? { budget: { maxTotalCost: runBudgetMaxTotalCost } } : {}),
 		...(useAutoCondense
 			? {
 					compaction: {

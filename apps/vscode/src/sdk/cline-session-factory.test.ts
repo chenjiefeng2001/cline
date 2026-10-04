@@ -770,6 +770,80 @@ describe("buildSessionConfig", () => {
 		expect(config.providerConfig).not.toHaveProperty("apiKey")
 	})
 
+	it("passes maxIterations through, and treats 0 as no limit", async () => {
+		// The setting is a guardrail, not a correctness requirement, so the default
+		// is unlimited. 0 must survive the trip as `undefined` (the runtime's
+		// unbounded sentinel) — readBoundedInt rejects anything <= 0, so routing 0
+		// through it would silently reinstate a 50-iteration cap while the UI read
+		// as "unlimited".
+		const withSetting = (raw: unknown) => {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "maxIterationsSetting") {
+					return raw
+				}
+				if (key === "subagentsEnabled" || key === "useAutoCondense") {
+					return false
+				}
+				return undefined
+			})
+		}
+
+		withSetting(0)
+		expect((await buildSessionConfig({ cwd: "/tmp/workspace" })).maxIterations).toBeUndefined()
+
+		withSetting(12)
+		expect((await buildSessionConfig({ cwd: "/tmp/workspace" })).maxIterations).toBe(12)
+
+		// A typo must not remove the runaway-loop guard.
+		for (const bogus of [-1, NaN, Infinity, "abc", null]) {
+			withSetting(bogus)
+			expect((await buildSessionConfig({ cwd: "/tmp/workspace" })).maxIterations).toBe(50)
+		}
+	})
+
+	it("defaults maxParallelToolCalls to 6 and honors the override", async () => {
+		// Tool concurrency is opt-in per tool (`concurrency: "safe"`), so this
+		// setting is a ceiling on safe batches, not a switch for all tools.
+		// `1` is the documented escape hatch back to fully serial execution.
+		const withSettings = (maxParallelToolCalls?: unknown) => {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "maxParallelToolCalls") {
+					return maxParallelToolCalls
+				}
+				if (key === "subagentsEnabled" || key === "useAutoCondense") {
+					return false
+				}
+				return undefined
+			})
+		}
+
+		withSettings(undefined)
+		expect((await buildSessionConfig({ cwd: "/tmp/workspace" })).maxParallelToolCalls).toBe(6)
+
+		withSettings(1)
+		expect((await buildSessionConfig({ cwd: "/tmp/workspace" })).maxParallelToolCalls).toBe(1)
+
+		withSettings(12)
+		expect((await buildSessionConfig({ cwd: "/tmp/workspace" })).maxParallelToolCalls).toBe(12)
+	})
+
+	it("falls back to the default when maxParallelToolCalls is not a usable number", async () => {
+		// A corrupt global setting must not reach the runtime and disable or
+		// wedge parallel dispatch.
+		for (const bogus of [0, -3, "abc", null]) {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "maxParallelToolCalls") {
+					return bogus
+				}
+				if (key === "subagentsEnabled" || key === "useAutoCondense") {
+					return false
+				}
+				return undefined
+			})
+			expect((await buildSessionConfig({ cwd: "/tmp/workspace" })).maxParallelToolCalls).toBe(6)
+		}
+	})
+
 	it("enables basic SDK compaction when global useAutoCondense is true", async () => {
 		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
 			if (key === "useAutoCondense") {
@@ -1128,6 +1202,42 @@ describe("buildSessionConfig - execution limits", () => {
 	it("sets a spend guardrail, which nothing in the extension did before", async () => {
 		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
 		expect(config.budget?.maxTotalCost).toBeGreaterThan(0)
+	})
+
+	it('honours 0 as "no ceiling" for the run budget', async () => {
+		// package.json and the settings UI both document 0 as "no ceiling", and the
+		// SDK only accepts a positive finite cap, so 0 has to arrive as an absent
+		// cap. Clamping it to the default instead made the UI promise a budget the
+		// run did not have.
+		for (const zero of [0, "0"]) {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "runBudgetMaxTotalCost") return zero as never
+				return undefined
+			})
+			const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+			expect(config.budget?.maxTotalCost).toBeUndefined()
+		}
+	})
+
+	it("keeps the spend guard for malformed values, unlike an explicit 0", async () => {
+		// The distinction that matters: 0 is a decision, junk is an accident.
+		for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, "abc", null]) {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "runBudgetMaxTotalCost") return bad as never
+				return undefined
+			})
+			const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+			expect(config.budget?.maxTotalCost).toBeGreaterThan(0)
+		}
+	})
+
+	it("applies a configured spend ceiling verbatim", async () => {
+		mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+			if (key === "runBudgetMaxTotalCost") return 12.5
+			return undefined
+		})
+		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
+		expect(config.budget?.maxTotalCost).toBe(12.5)
 	})
 })
 
