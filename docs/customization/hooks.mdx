@@ -1,7 +1,91 @@
 ---
 title: "Hooks"
 sidebarTitle: "Hooks"
-description: "See details under SDK Hooks page."
+description: "Run your own command at ten points in an agent's lifecycle."
 ---
 
-See details under [SDK Plugins](/sdk/plugins).
+Hooks let you run your own command when something happens in a session — to log,
+notify, block the action, or attach extra context.
+
+## Events
+
+A hook is a file named after the event it handles. Extensions (`.sh`, `.py`,
+`.js`, `.ts`, …) are allowed and the file must be executable.
+
+| File name | Event | Fires when |
+|-----------|-------|-----------|
+| `TaskStart` | `agent_start` | An agent run begins |
+| `TaskResume` | `agent_resume` | A run resumes |
+| `TaskCancel` | `agent_abort` | A run is cancelled |
+| `TaskComplete` | `agent_end` | A run finishes |
+| `TaskError` | `agent_error` | A run fails |
+| `PreToolUse` | `tool_call` | Before a tool executes |
+| `PostToolUse` | `tool_result` | After a tool returns |
+| `UserPromptSubmit` | `prompt_submit` | A prompt is submitted |
+| `PreCompact` | `pre_compact` | Before a conversation is compacted |
+| `SessionShutdown` | `session_shutdown` | A session shuts down |
+
+`PreCompact` fires for automatic compaction and for the manual compact command in
+both the CLI and the VS Code extension, so a hook does not have to know which of
+the two shrank the context.
+
+## Where hooks live
+
+Hooks are discovered in this order, and every matching file runs:
+
+1. `<workspace>/.cline/hooks/`
+2. `<workspace>/.clinerules/hooks/` (deprecated location, still read)
+3. `~/.cline/hooks/`
+
+```bash
+mkdir -p .cline/hooks
+cat > .cline/hooks/PreToolUse <<'SH'
+#!/usr/bin/env bash
+# The event arrives as JSON on stdin.
+cat >> .cline/hooks.log
+SH
+chmod +x .cline/hooks/PreToolUse
+```
+
+## Responding to an event
+
+The event is written to the hook's **stddin** as JSON. stdout is parsed for an
+optional control object:
+
+```json
+{ "cancel": true, "context": "why you refused", "overrideInput": { "path": "safe.txt" } }
+```
+
+| Key | Effect |
+|-----|--------|
+| `cancel` | Stop the action |
+| `context` | Add a message for the model |
+| `overrideInput` | Replace the tool's input |
+
+**The exit code is not the control signal.** Printing JSON on stdout is.
+
+### Which events can block
+
+Only `tool_call` waits for a response, so only `PreToolUse` can cancel a tool
+call. `UserPromptSubmit` and `PreCompact` are fired without waiting, and every
+other event is notification-only.
+
+### Hooks fail open
+
+A hook that exits non-zero, times out, prints invalid JSON, or is missing an
+interpreter is logged and skipped: the action continues. That is deliberate for
+compaction in particular, where a broken hook must not be able to strand the
+turn — but it also means a broken guard hook fails quietly, so check the logs
+rather than assuming a refusal you did not get was honoured.
+
+<Warning>
+  The payload crosses a process boundary, so a hook that behaves correctly when
+  you run it by hand can still receive a different shape than you expect. Log the
+  raw stdin in a new hook first if you are unsure.
+</Warning>
+
+## See also
+
+- [Auto Compact](/features/auto-compact) — when compaction happens
+- [Writing Plugins](/sdk/guides/writing-plugins) — hooks from plugin code
+- [SDK Plugins](/sdk/plugins)

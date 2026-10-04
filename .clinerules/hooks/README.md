@@ -3,8 +3,8 @@
 ## Overview
 
 Cline hooks allow you to execute custom scripts at specific points in the agentic workflow. Hooks can be placed in either:
-- **Global hooks directory**: `~/Documents/Cline/Hooks/` (applies to all workspaces)
-- **Workspace hooks directory**: `.clinerules/hooks/` (applies to the workspace the repo is part of)
+- **User hooks directory**: `~/.cline/hooks/` (applies to all workspaces)
+- **Workspace hooks directory**: `.cline/hooks/` (applies to the workspace the repo is part of). `.clinerules/hooks/` is still read for backwards compatibility
 
 Hooks run automatically when enabled.
 
@@ -20,61 +20,63 @@ Hooks run automatically when enabled.
 ### TaskStart Hook
 - **When**: Runs when a NEW task is started (not when resuming)
 - **Purpose**: Initialize task context, validate task requirements, set up environment
-- **Global Location**: `~/Documents/Cline/Hooks/TaskStart`
-- **Workspace Location**: `.clinerules/hooks/TaskStart`
+- **Global Location**: `~/.cline/hooks/TaskStart`
+- **Workspace Location**: `.cline/hooks/TaskStart`
 
 ### TaskResume Hook
 - **When**: Runs when an EXISTING task is resumed (after user clicks resume button)
 - **Purpose**: Validate resumed task state, restore context, check for changes since last run
-- **Global Location**: `~/Documents/Cline/Hooks/TaskResume`
-- **Workspace Location**: `.clinerules/hooks/TaskResume`
+- **Global Location**: `~/.cline/hooks/TaskResume`
+- **Workspace Location**: `.cline/hooks/TaskResume`
 
 ### TaskCancel Hook
 - **When**: Runs when a task is cancelled or a hook is aborted by the user (only if there's actual active work or work was started)
 - **Purpose**: Clean up resources, log cancellation, save state
-- **Global Location**: `~/Documents/Cline/Hooks/TaskCancel`
-- **Workspace Location**: `.clinerules/hooks/TaskCancel`
+- **Global Location**: `~/.cline/hooks/TaskCancel`
+- **Workspace Location**: `.cline/hooks/TaskCancel`
 - **Note**: This hook is NOT cancellable
 
-### TaskComplete Hook (coming soon!)
+### TaskComplete Hook
 - **When**: Runs when a task is marked as complete
 - **Purpose**: Log completion status, perform final cleanup, generate reports
-- **Global Location**: `~/Documents/Cline/Hooks/TaskComplete`
-- **Workspace Location**: `.clinerules/hooks/TaskComplete`
+- **Global Location**: `~/.cline/hooks/TaskComplete`
+- **Workspace Location**: `.cline/hooks/TaskComplete`
 
 ### UserPromptSubmit Hook
 - **When**: Runs when the user submits a prompt/message (initial task, resume, or feedback)
 - **Purpose**: Validate user input, preprocess prompts, add context to user messages
-- **Global Location**: `~/Documents/Cline/Hooks/UserPromptSubmit`
-- **Workspace Location**: `.clinerules/hooks/UserPromptSubmit`
+- **Global Location**: `~/.cline/hooks/UserPromptSubmit`
+- **Workspace Location**: `.cline/hooks/UserPromptSubmit`
 
 ### PreToolUse Hook
 - **When**: Runs BEFORE a tool is executed
 - **Purpose**: Validate parameters, block execution, or add context
-- **Global Location**: `~/Documents/Cline/Hooks/PreToolUse`
-- **Workspace Location**: `.clinerules/hooks/PreToolUse`
+- **Global Location**: `~/.cline/hooks/PreToolUse`
+- **Workspace Location**: `.cline/hooks/PreToolUse`
 
 ### PostToolUse Hook
 - **When**: Runs AFTER a tool completes
 - **Purpose**: Observe results, track patterns, or add context
-- **Global Location**: `~/Documents/Cline/Hooks/PostToolUse`
-- **Workspace Location**: `.clinerules/hooks/PostToolUse`
+- **Global Location**: `~/.cline/hooks/PostToolUse`
+- **Workspace Location**: `.cline/hooks/PostToolUse`
 
-### PreCompact Hook (coming soon!)
+### PreCompact Hook
 - **When**: Runs BEFORE the conversation context is compacted/truncated
 - **Purpose**: Observe compaction events, log context management, track token usage
-- **Global Location**: `~/Documents/Cline/Hooks/PreCompact`
-- **Workspace Location**: `.clinerules/hooks/PreCompact`
+- **Global Location**: `~/.cline/hooks/PreCompact`
+- **Workspace Location**: `.cline/hooks/PreCompact`
 
 ## Cross-Platform Hook Format
 
 Cline uses a git-style approach for hooks that works consistently across all platforms:
 
 ### Hook Files (All Platforms)
-- **No file extensions**: Hooks are named exactly `PreToolUse` or `PostToolUse` (no `.bat`, `.cmd`, `.sh` etc.)
+- **Named after the event**: `PreToolUse`, `PostToolUse`, `PreCompact`, `SessionShutdown`, etc. A `.sh`, `.bash`, `.py`, `.js`, `.ts` (and similar) extension is allowed and resolved alongside the bare name.
 - **Shebang required**: First line must be a shebang (e.g., `#!/usr/bin/env bash` or `#!/usr/bin/env node`)
 - **Executable on Unix**: On Unix/Linux/macOS, hooks must be executable: `chmod +x PreToolUse`
-- **Windows**: Not currently supported.
+- **Windows**: supported. The shebang selects the interpreter, with a real
+  git-bash candidate list and a Python fallback; a hook with no resolvable
+  interpreter is skipped with a log line rather than failing the run.
 
 ### How It Works
 
@@ -91,10 +93,10 @@ This means:
 **On Unix/Linux/macOS:**
 ```bash
 # Create hook file
-nano ~/Documents/Cline/Hooks/PreToolUse
+nano ~/.cline/hooks/PreToolUse
 
 # Make executable
-chmod +x ~/Documents/Cline/Hooks/PreToolUse
+chmod +x ~/.cline/hooks/PreToolUse
 ```
 
 ## Context Injection Timing
@@ -198,23 +200,38 @@ All hooks receive:
 
 ### Output (via stdout as JSON)
 
-All hooks must return:
+The event arrives on stdin. stdout is parsed for an optional control object:
+
 ```json
 {
-  "cancel": boolean,                   // Required: false to continue, true to block execution
-  "contextModification": "string",     // Optional: Context for future AI decisions
-  "errorMessage": "string"             // Optional: Error details if blocking
+  "cancel": true,
+  "context": "why the call was refused",
+  "overrideInput": { "path": "safe.txt" }
 }
 ```
 
-**Note**: The `cancel` field works as follows:
-- `false` (or omitted): Allow execution to continue
-- `true`: Block execution and show error message to user
+- `cancel` — `true` stops the action
+- `context` — also accepted as `contextModification` or `errorMessage`; adds a
+  message for the model
+- `overrideInput` — replaces the tool's input
+
+**The exit code is not the control signal.** Printing JSON on stdout is.
+
+**Only `tool_call` waits for a response**, so only `PreToolUse` can block. Every
+other event is fired without waiting, and its result is ignored.
+
+### Hooks fail open
+
+A hook that exits non-zero, times out, prints invalid JSON, or has no resolvable
+interpreter is logged and skipped — the action continues. This is deliberate for
+compaction, where a broken hook must not strand the turn, but it also means a
+broken guard hook fails quietly. Check the logs rather than assuming a refusal
+you did not get was honoured.
 
 ## Hook Execution Limits
 
-- **Timeout**: Hooks must complete within 30 seconds (configurable via `HOOK_EXECUTION_TIMEOUT_MS`)
-- **Context Size**: Context modifications are limited to 50KB (configurable via `MAX_CONTEXT_MODIFICATION_SIZE`)
+- **Timeout**: Hooks must complete within 120 seconds by default (`DEFAULT_HOOK_COMMAND_TIMEOUT_MS`)
+- **Context Size**: no separate 50KB cap is enforced in code; keep hook-supplied context small
 - **Error Handling**: Expected errors (file not found, permission denied, not a directory) are handled silently; unexpected file system errors are propagated
 
 ## Common Use Cases
@@ -300,13 +317,13 @@ echo '{"cancel": false}'
 Cline supports two levels of hooks:
 
 ### Global Hooks
-- **Location**: `~/Documents/Cline/Hooks/` (macOS/Linux)
+- **Location**: `~/.cline/hooks/` (macOS/Linux)
 - **Scope**: Apply to ALL workspaces and projects
 - **Use Case**: Organization-wide policies, personal preferences, universal validations
 - **Priority**: Order not guaranteed when combined with workspace hooks
 
 ### Workspace Hooks
-- **Location**: `.clinerules/hooks/` in each workspace root
+- **Location**: `.cline/hooks/` in each workspace root
 - **Scope**: Apply only to the specific workspace
 - **Use Case**: Project-specific rules, team conventions, repository requirements
 - **Priority**: Order not guaranteed when combined with global hooks
@@ -327,13 +344,13 @@ When multiple hooks exist (global and/or workspace):
 ### Setting Up Global Hooks
 
 1. The global hooks directory is automatically created at:
-   - macOS/Linux: `~/Documents/Cline/Hooks/`
+   - macOS/Linux: `~/.cline/hooks/`
 
 2. Add your hook script:
    ```bash
    # Unix/Linux/macOS
-   nano ~/Documents/Cline/Hooks/PreToolUse
-   chmod +x ~/Documents/Cline/Hooks/PreToolUse
+   nano ~/.cline/hooks/PreToolUse
+   chmod +x ~/.cline/hooks/PreToolUse
    ```
 
 3. Enable hooks in Cline settings
@@ -343,7 +360,7 @@ When multiple hooks exist (global and/or workspace):
 **Global Hook** (applies to all projects):
 ```bash
 #!/usr/bin/env bash
-# ~/Documents/Cline/Hooks/PreToolUse
+# ~/.cline/hooks/PreToolUse
 # Universal rule: Never delete package.json
 input=$(cat)
 tool_name=$(echo "$input" | jq -r '.preToolUse.toolName')
@@ -360,7 +377,7 @@ echo '{"cancel": false}'
 **Workspace Hook** (applies to specific project):
 ```bash
 #!/usr/bin/env bash
-# .clinerules/hooks/PreToolUse
+# .cline/hooks/PreToolUse
 # Project rule: Only TypeScript files
 input=$(cat)
 tool_name=$(echo "$input" | jq -r '.preToolUse.toolName')
@@ -378,7 +395,7 @@ echo '{"cancel": false}'
 
 ## Multi-Root Workspaces
 
-If you have multiple workspace roots, you can place hooks in each root's `.clinerules/hooks/` directory. All hooks (global and workspace) may execute concurrently. Their results will be combined:
+If you have multiple workspace roots, you can place hooks in each root's `.cline/hooks/` directory. All hooks (global and workspace) may execute concurrently. Their results will be combined:
 
 - **cancel**: If ANY hook returns `true`, execution is blocked
 - **contextModification**: All context modifications are concatenated
