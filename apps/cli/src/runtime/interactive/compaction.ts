@@ -1,5 +1,6 @@
 import {
 	createContextCompactionPrepareTurn,
+	createPreCompactHookEmitter,
 	createSessionCompactionState,
 	type ProviderConfig,
 	type ProviderSettings,
@@ -89,7 +90,18 @@ export async function compactInteractiveMessages(input: {
 			telemetry: input.config.telemetry,
 			sessionId: input.sessionId,
 		},
-		{ mode: "manual" },
+		{
+			mode: "manual",
+			// Auto compaction emits `pre_compact` from the runtime bootstrap, but a
+			// manual `/compact` runs here instead, so it needs its own emitter or
+			// user hooks would silently never fire on manual compactions.
+			onPreCompact: createPreCompactHookEmitter({
+				cwd: input.config.cwd,
+				workspacePath: input.config.cwd,
+				rootSessionId: input.sessionId,
+				logger: input.config.logger,
+			}),
+		},
 	);
 	if (!compact) {
 		return { compacted: false, canonicalMessages: input.messages };

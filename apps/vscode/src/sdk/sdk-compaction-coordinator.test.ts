@@ -5,6 +5,7 @@ import { SdkCompactionCoordinator, type SdkCompactionCoordinatorOptions } from "
 
 vi.mock("@cline/core", () => ({
 	createContextCompactionPrepareTurn: vi.fn(),
+	createPreCompactHookEmitter: vi.fn(() => undefined),
 	createSessionCompactionState: vi.fn((input: { compactedMessages: unknown[] }) => ({
 		version: 1,
 		messages: input.compactedMessages,

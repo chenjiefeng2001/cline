@@ -8,6 +8,7 @@ import type {
 	AgentHooks,
 	AgentRunLifecycleContext,
 	AgentRuntimeEvent,
+	PreCompactData,
 } from "@cline/shared";
 import {
 	augmentNodeCommandForDebug,
@@ -1251,6 +1252,57 @@ export function createHookConfigFileExtension(
 		"core.hook_config_files",
 		createHookConfigFileHooks(options),
 	);
+}
+
+/**
+ * Build an emitter for the `pre_compact` hook event from the same hook files the
+ * rest of the lifecycle uses.
+ *
+ * `pre_compact` is not an `AgentRuntimeHooks` dispatch point — compaction happens
+ * inside the context pipeline's `prepareTurn`, not at one of the runtime's named
+ * lifecycle hooks — so it cannot ride along on `AgentHooks`. This exposes it
+ * separately, and returns `undefined` when no `PreCompact` hook file exists so
+ * callers pay nothing.
+ *
+ * Returns a function that never rejects: a hook that fails must not be able to block
+ * compaction, and with it the turn.
+ */
+export function createPreCompactHookEmitter(
+	options: HookRuntimeOptions,
+): ((data: PreCompactData) => Promise<void>) | undefined {
+	const commandMap = createHookCommandMap(options.workspacePath, (error) => {
+		logHookError(
+			options.logger,
+			`${error.message} This hook was skipped; the other hooks in this workspace are unaffected.`,
+		);
+	});
+	const commands = commandMap.pre_compact ?? [];
+	if (commands.length === 0) {
+		return undefined;
+	}
+	return async (data: PreCompactData) => {
+		try {
+			await runAsyncHookCommands({
+				commands,
+				cwd: options.cwd,
+				logger: options.logger,
+				payload: {
+					...createPayloadBase(
+						{
+							conversationId: data.ulid,
+							agentId: data.ulid,
+							parentAgentId: null,
+						},
+						options,
+					),
+					hookName: "pre_compact",
+					preCompact: data,
+				} as HookEventPayload,
+			});
+		} catch (error) {
+			logHookError(options.logger, "pre_compact hook failed", error);
+		}
+	};
 }
 
 function mergeHookFunction<K extends keyof AgentHooks>(

@@ -6,6 +6,7 @@ import type {
 	AgentTool,
 	ExtensionContext,
 	ITelemetryService,
+	PreCompactData,
 	RuntimeConfigExtensionKind,
 	ToolApprovalRequest,
 	ToolApprovalResult,
@@ -30,6 +31,7 @@ import { createCheckpointHooks } from "../hooks/checkpoint-hooks";
 import {
 	createHookAuditHooks,
 	createHookConfigFileExtension,
+	createPreCompactHookEmitter,
 	mergeAgentHooks,
 } from "../hooks/hook-file-hooks";
 import type { RuntimeCapabilities } from "../runtime/capabilities";
@@ -251,6 +253,11 @@ export interface LocalRuntimeBootstrap {
 	gitState: GitWorkspaceState;
 	extensions: AgentConfig["extensions"];
 	hooks: AgentHooks | undefined;
+	/**
+	 * Emits the `pre_compact` hook event, or undefined when no `PreCompact` hook file
+	 * exists. Consumed by the runtime host when building the compaction prepareTurn.
+	 */
+	preCompactHook?: (data: PreCompactData) => Promise<void>;
 	toolPolicies: AgentConfig["toolPolicies"];
 	requestToolApproval?: (
 		request: ToolApprovalRequest,
@@ -331,6 +338,16 @@ export async function prepareLocalRuntimeBootstrap(
 	});
 
 	const fileHookExtension = createHookConfigFileExtension({
+		cwd: input.config.cwd,
+		workspacePath,
+		rootSessionId: sessionId,
+		logger: localConfig?.logger,
+		workspaceInfo,
+	});
+	// `pre_compact` is emitted from the context pipeline's prepareTurn rather than an
+	// AgentHooks dispatch point, so it is wired separately. Undefined when no
+	// PreCompact hook file exists.
+	const preCompactHook = createPreCompactHookEmitter({
 		cwd: input.config.cwd,
 		workspacePath,
 		rootSessionId: sessionId,
@@ -452,6 +469,7 @@ export async function prepareLocalRuntimeBootstrap(
 		gitState,
 		extensions,
 		hooks,
+		preCompactHook,
 		toolPolicies,
 		requestToolApproval,
 		pluginSandboxShutdown: loadedPlugins?.shutdown,

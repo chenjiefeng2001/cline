@@ -1,3 +1,4 @@
+import type { PreCompactData } from "@cline/shared";
 import { estimateRequestInputTokens } from "@cline/shared";
 import {
 	captureCompactionBudgetEmergency,
@@ -76,6 +77,16 @@ type BuiltinCompactionStrategyRunner = (
 export interface ContextCompactionPrepareTurnOptions {
 	mode?: CoreCompactionMode;
 	manualTargetRatio?: number;
+	/**
+	 * Emits the `pre_compact` hook event before a compaction runs.
+	 *
+	 * The event type, its payload schema and the `PreCompact` hook-file name all
+	 * existed, but nothing ever emitted it and the file-hook table mapped the name to
+	 * `undefined` — so a hook a user could write and see documented simply never fired.
+	 * Optional so a caller that does not wire hooks (unit tests, ad-hoc compaction)
+	 * pays nothing.
+	 */
+	onPreCompact?: (data: PreCompactData) => void | Promise<void>;
 }
 
 const LONG_CONVERSATION_TARGET_RATIO = 0.5;
@@ -390,6 +401,34 @@ export function createContextCompactionPrepareTurn(
 
 		const beforeMessageCount = context.messages.length;
 		const startedAt = Date.now();
+
+		// `pre_compact` fires before any history is dropped, which is the only point
+		// where a hook can still act on the pre-compaction context. Failures are
+		// swallowed: a broken hook must not be able to block compaction and, with it,
+		// the turn.
+		if (options.onPreCompact) {
+			try {
+				await options.onPreCompact({
+					taskId: config.sessionId ?? context.conversationId,
+					ulid: config.sessionId ?? context.conversationId,
+					contextSize: beforeMessageCount,
+					compactionStrategy: telemetryStrategy,
+					mode,
+					iteration: context.iteration,
+					requestInputTokens,
+					maxInputTokens,
+					triggerTokens: requestTriggerTokens,
+					targetTokens: requestTargetTokens,
+				});
+			} catch (error) {
+				config.logger?.error?.(
+					"pre_compact hook failed; continuing with compaction",
+					{
+						error,
+					},
+				);
+			}
+		}
 
 		const result = userCompaction?.compact
 			? await userCompaction.compact(compactionContext)

@@ -2484,7 +2484,11 @@ export class LocalRuntimeHost implements RuntimeHost {
 		const extensions = runtime.extensions ?? bootstrap.extensions;
 		const explicitInitialCompactionState = startInput.initialCompactionState;
 		let activeSessionRef: ActiveSession | undefined;
-		const compact = createContextCompactionPrepareTurn(configWithProvider);
+		const compact = createContextCompactionPrepareTurn(configWithProvider, {
+			// Fires the `pre_compact` hook before any history is dropped. Undefined when
+			// the workspace has no PreCompact hook file.
+			onPreCompact: bootstrap.preCompactHook,
+		});
 		const rawInitialCompactionState =
 			explicitInitialCompactionState ?? resumedCompactionState;
 		const initialCompactionState =

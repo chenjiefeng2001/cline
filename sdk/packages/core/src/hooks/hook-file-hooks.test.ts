@@ -10,9 +10,14 @@ import {
 } from "@cline/shared/storage";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+	HOOK_CONFIG_FILE_EVENT_MAP,
+	HookConfigFileName,
+} from "./hook-file-config";
+import {
 	createHookAuditHooks,
 	createHookConfigFileExtension,
 	createHookConfigFileHooks,
+	createPreCompactHookEmitter,
 	getWindowsPythonFallbackCommand,
 	mergeAgentHooks,
 } from "./hook-file-hooks";
@@ -162,6 +167,130 @@ describe("createHookConfigFileHooks", () => {
 				retryDelay: 250,
 			});
 		}
+	});
+
+	/**
+	 * `pre_compact` had a full payload schema, a `HookConfigFileName` entry and an
+	 * event type — and nothing ever emitted it, while the file-hook table mapped the
+	 * name to `undefined`. So a hook a user could write and read about in the docs
+	 * simply never fired, and the VS Code extension even ships a template for it.
+	 */
+	describe("createPreCompactHookEmitter", () => {
+		const preCompactData = {
+			taskId: "sess_1",
+			ulid: "sess_1",
+			contextSize: 42,
+			compactionStrategy: "basic",
+			mode: "auto",
+			iteration: 3,
+			requestInputTokens: 120_000,
+			maxInputTokens: 128_000,
+			triggerTokens: 115_200,
+			targetTokens: 89_600,
+		};
+
+		it("returns undefined when the workspace has no PreCompact hook", async () => {
+			const workspace = await mkdtemp(join(tmpdir(), "hooks-workspace-"));
+			try {
+				expect(
+					createPreCompactHookEmitter({ cwd: workspace, workspacePath: workspace }),
+				).toBeUndefined();
+			} finally {
+				await rm(workspace, { recursive: true, force: true });
+			}
+		});
+
+		it("maps the PreCompact hook file to the pre_compact event", () => {
+			// The regression in one line: this used to be `undefined`.
+			expect(HOOK_CONFIG_FILE_EVENT_MAP[HookConfigFileName.PreCompact]).toBe(
+				"pre_compact",
+			);
+		});
+
+		it("emits the compaction payload to the hook process", async () => {
+			// The previous version of this test read the hook file back instead of
+			// the payload, so it passed whether or not the hook ever ran.
+			//
+			// Two things make a real assertion possible here:
+			//  1. a `.js` hook is inferred as `node <file>`, so it runs identically
+			//     on Windows without needing a shell (the reason the old `cat`-based
+			//     version had to be skipped on win32);
+			//  2. `runAsyncHookCommands` is fire-and-forget, so `emit()` resolves
+			//     before the child has run — hence polling rather than a direct read.
+			//
+			// The payload arrives on stdin, not as a `CLINE_HOOK_PAYLOAD_FILE` env
+			// var (the old test read that non-existent variable, so it never saw a
+			// payload even when the hook did run).
+			const outputPath = join(tmpdir(), `pre-compact-${Date.now()}.json`);
+			const workspace = await mkdtemp(join(tmpdir(), "hooks-workspace-"));
+			const hooksDir = join(workspace, ".clinerules", "hooks");
+			await mkdir(hooksDir, { recursive: true });
+			await writeFile(
+				join(hooksDir, "precompact.js"),
+				[
+					'const { writeFileSync } = require("node:fs");',
+					'let raw = "";',
+					'process.stdin.setEncoding("utf8");',
+					'process.stdin.on("data", (chunk) => { raw += chunk; });',
+					'process.stdin.on("end", () => writeFileSync(process.env.PRE_COMPACT_OUT, raw));',
+				].join("\n"),
+				"utf8",
+			);
+			process.env.PRE_COMPACT_OUT = outputPath;
+			try {
+				const emit = createPreCompactHookEmitter({
+					cwd: workspace,
+					workspacePath: workspace,
+				});
+				expect(emit).toBeTypeOf("function");
+				await emit?.(preCompactData);
+
+				const payload = JSON.parse(await waitForFile(outputPath, 5000));
+				expect(payload.hookName).toBe("pre_compact");
+				expect(payload.preCompact).toMatchObject(preCompactData);
+			} finally {
+				delete process.env.PRE_COMPACT_OUT;
+				await rm(workspace, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 250,
+				});
+				await rm(outputPath, { force: true });
+			}
+		});
+
+		it("never rejects, so a broken hook cannot block compaction", async () => {
+			// Needs a hook that actually fails. With no hook file the emitter is
+			// `undefined` and the old `if (emit)` guard meant this test could never
+			// fail — so the "hook failure must not block compaction" guarantee was
+			// never actually exercised.
+			const workspace = await mkdtemp(join(tmpdir(), "hooks-workspace-"));
+			const hooksDir = join(workspace, ".clinerules", "hooks");
+			await mkdir(hooksDir, { recursive: true });
+			await writeFile(
+				join(hooksDir, "precompact.js"),
+				'throw new Error("hook exploded");\n',
+				"utf8",
+			);
+			try {
+				const emit = createPreCompactHookEmitter({
+					cwd: workspace,
+					workspacePath: workspace,
+				});
+				expect(emit).toBeTypeOf("function");
+				await expect(emit?.(preCompactData)).resolves.toBeUndefined();
+			} finally {
+				// The hook is spawned detached, so it may still hold the workspace
+				// briefly after emit resolves — retry the removal rather than fail.
+				await rm(workspace, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 250,
+				});
+			}
+		});
 	});
 
 	it.skipIf(process.platform === "win32")(

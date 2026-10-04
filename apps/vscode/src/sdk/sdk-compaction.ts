@@ -13,6 +13,7 @@
 import {
 	type CoreSessionConfig,
 	createContextCompactionPrepareTurn,
+	createPreCompactHookEmitter,
 	createSessionCompactionState,
 	type SessionCompactionState,
 } from "@cline/core"
@@ -34,6 +35,8 @@ export interface CompactSessionMessagesInput {
 	sessionId: string
 	/** The conversation transcript to compact (SDK message shape). */
 	messages: SdkMessage[]
+	/** Workspace root, used to locate workspace `pre_compact` hook files. */
+	cwd: string
 }
 
 export interface CompactSessionMessagesResult {
@@ -82,7 +85,18 @@ export async function compactSessionMessages(input: CompactSessionMessagesInput)
 			telemetry: input.config.telemetry,
 			sessionId: input.sessionId,
 		},
-		{ mode: "manual" },
+		{
+			mode: "manual",
+			// Auto compaction emits `pre_compact` from the runtime bootstrap, but a
+			// manual compaction runs here instead, so it needs its own emitter or
+			// user hooks would silently never fire on manual compactions.
+			onPreCompact: createPreCompactHookEmitter({
+				cwd: input.cwd,
+				workspacePath: input.cwd,
+				rootSessionId: input.sessionId,
+				logger: input.config.logger,
+			}),
+		},
 	)
 	if (!compact) {
 		Logger.warn("[SdkCompaction] Compaction prepareTurn unavailable; skipping manual compaction")

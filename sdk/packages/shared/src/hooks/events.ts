@@ -107,20 +107,40 @@ export interface TaskCompleteData {
 	taskMetadata: Record<string, string>;
 }
 
+/**
+ * Payload for the `pre_compact` hook.
+ *
+ * Only the four fields the runtime genuinely knows are required. The original shape
+ * came from the retired task-based host and demanded fields the SDK cannot produce —
+ * on-disk context paths, a deleted-range index, a cache token split — so nothing could
+ * ever emit it and `PreCompact` was mapped to `undefined` in the file-hook table.
+ * Those fields are kept, optional, so existing hook scripts that read them keep
+ * working; they are simply absent on the SDK path.
+ */
 export interface PreCompactData {
 	taskId: string;
 	ulid: string;
+	/** Message count entering compaction. */
 	contextSize: number;
 	compactionStrategy: string;
-	previousApiReqIndex: number;
-	tokensIn: number;
-	tokensOut: number;
-	tokensInCache: number;
-	tokensOutCache: number;
-	deletedRangeStart: number;
-	deletedRangeEnd: number;
-	contextJsonPath: string;
-	contextRawPath: string;
+	/** `"auto"` when the threshold tripped, `"manual"` when the user asked. */
+	mode?: string;
+	iteration?: number;
+	/** Token figures for the request that triggered compaction. */
+	requestInputTokens?: number;
+	maxInputTokens?: number;
+	triggerTokens?: number;
+	targetTokens?: number;
+	/** Legacy host-only fields, absent on the SDK path. */
+	previousApiReqIndex?: number;
+	tokensIn?: number;
+	tokensOut?: number;
+	tokensInCache?: number;
+	tokensOutCache?: number;
+	deletedRangeStart?: number;
+	deletedRangeEnd?: number;
+	contextJsonPath?: string;
+	contextRawPath?: string;
 }
 
 const PreToolUseDataSchema = z.object({
@@ -154,15 +174,23 @@ const PreCompactDataSchema = z.object({
 	ulid: z.string(),
 	contextSize: z.number(),
 	compactionStrategy: z.string(),
-	previousApiReqIndex: z.number(),
-	tokensIn: z.number(),
-	tokensOut: z.number(),
-	tokensInCache: z.number(),
-	tokensOutCache: z.number(),
-	deletedRangeStart: z.number(),
-	deletedRangeEnd: z.number(),
-	contextJsonPath: z.string(),
-	contextRawPath: z.string(),
+	// Optional: see the PreCompactData doc comment. Only the four fields above are
+	// required; the rest are legacy host-only or host-specific.
+	mode: z.string().optional(),
+	iteration: z.number().optional(),
+	requestInputTokens: z.number().optional(),
+	maxInputTokens: z.number().optional(),
+	triggerTokens: z.number().optional(),
+	targetTokens: z.number().optional(),
+	previousApiReqIndex: z.number().optional(),
+	tokensIn: z.number().optional(),
+	tokensOut: z.number().optional(),
+	tokensInCache: z.number().optional(),
+	tokensOutCache: z.number().optional(),
+	deletedRangeStart: z.number().optional(),
+	deletedRangeEnd: z.number().optional(),
+	contextJsonPath: z.string().optional(),
+	contextRawPath: z.string().optional(),
 });
 
 export interface HookEventPayloadBase {

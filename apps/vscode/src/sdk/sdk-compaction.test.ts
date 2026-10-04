@@ -2,9 +2,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 const createContextCompactionPrepareTurn = vi.fn()
 const createSessionCompactionState = vi.fn((input: unknown) => ({ version: 1, input }))
+const createPreCompactHookEmitter = vi.fn()
 vi.mock("@cline/core", () => ({
 	createContextCompactionPrepareTurn: (...args: unknown[]) => createContextCompactionPrepareTurn(...args),
 	createSessionCompactionState: (input: unknown) => createSessionCompactionState(input),
+	createPreCompactHookEmitter: (...args: unknown[]) => createPreCompactHookEmitter(...args),
 }))
 
 vi.mock("@/shared/services/Logger", () => ({
@@ -32,8 +34,35 @@ describe("compactSessionMessages", () => {
 		vi.clearAllMocks()
 	})
 
+	it("wires a pre_compact emitter, so manual compaction fires user hooks", async () => {
+		// Auto compaction gets this from the runtime bootstrap; manual compaction
+		// builds its own prepareTurn, so without this the hook silently never fires
+		// for a user who pressed "compact" themselves.
+		const onPreCompact = vi.fn()
+		createPreCompactHookEmitter.mockReturnValueOnce(onPreCompact)
+
+		await compactSessionMessages({
+			config: baseConfig,
+			sessionId: "s1",
+			messages: [{ role: "user", content: "long" }],
+			cwd: "/tmp/workspace",
+		})
+
+		expect(createPreCompactHookEmitter).toHaveBeenCalledWith(
+			expect.objectContaining({
+				cwd: "/tmp/workspace",
+				workspacePath: "/tmp/workspace",
+				rootSessionId: "s1",
+			}),
+		)
+		expect(createContextCompactionPrepareTurn).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ onPreCompact }),
+		)
+	})
+
 	it("returns compacted=false without invoking the SDK when there are no messages", async () => {
-		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages: [] })
+		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages: [], cwd: "/tmp/workspace" })
 
 		expect(result).toEqual({ compacted: false, messages: [] })
 		expect(createContextCompactionPrepareTurn).not.toHaveBeenCalled()
@@ -49,7 +78,7 @@ describe("compactSessionMessages", () => {
 			{ role: "user" as const, content: "1" },
 			{ role: "assistant" as const, content: "2" },
 		]
-		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages })
+		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages, cwd: "/tmp/workspace" })
 
 		// Manual mode + enabled compaction + telemetry keying.
 		expect(createContextCompactionPrepareTurn).toHaveBeenCalledWith(
@@ -59,7 +88,7 @@ describe("compactSessionMessages", () => {
 				compaction: expect.objectContaining({ enabled: true }),
 				sessionId: "s1",
 			}),
-			{ mode: "manual" },
+			expect.objectContaining({ mode: "manual" }),
 		)
 		expect(compact).toHaveBeenCalledOnce()
 		expect(createSessionCompactionState).toHaveBeenCalledWith({
@@ -87,6 +116,7 @@ describe("compactSessionMessages", () => {
 			config: contextOnlyConfig,
 			sessionId: "s-context-only",
 			messages: [{ role: "user", content: "long context" }],
+			cwd: "/tmp/workspace",
 		})
 
 		expect(compact).toHaveBeenCalledWith(
@@ -102,7 +132,7 @@ describe("compactSessionMessages", () => {
 		createContextCompactionPrepareTurn.mockReturnValueOnce(undefined)
 
 		const messages = [{ role: "user" as const, content: "1" }]
-		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages })
+		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages, cwd: "/tmp/workspace" })
 
 		expect(result).toEqual({ compacted: false, messages })
 	})
@@ -112,7 +142,7 @@ describe("compactSessionMessages", () => {
 		createContextCompactionPrepareTurn.mockReturnValueOnce(compact)
 
 		const messages = [{ role: "user" as const, content: "1" }]
-		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages })
+		const result = await compactSessionMessages({ config: baseConfig, sessionId: "s1", messages, cwd: "/tmp/workspace" })
 
 		expect(result).toEqual({ compacted: false, messages })
 	})

@@ -113,6 +113,7 @@ export class SdkCompactionCoordinator {
 			},
 			sessionId,
 			messages,
+			cwd,
 		})
 
 		if (!result.compacted) {

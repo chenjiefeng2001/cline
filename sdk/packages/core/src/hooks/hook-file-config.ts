@@ -38,7 +38,7 @@ export const HOOK_CONFIG_FILE_EVENT_MAP: Readonly<
 	[HookConfigFileName.PreToolUse]: "tool_call",
 	[HookConfigFileName.PostToolUse]: "tool_result",
 	[HookConfigFileName.UserPromptSubmit]: "prompt_submit",
-	[HookConfigFileName.PreCompact]: undefined,
+	[HookConfigFileName.PreCompact]: "pre_compact",
 	[HookConfigFileName.SessionShutdown]: "session_shutdown",
 };
 
