@@ -125,6 +125,13 @@ export type AgentRunStatus =
 	| "completed"
 	| "budget_exhausted"
 	/**
+	 * Stopped because the per-run tool-call cap was reached. A first-class outcome for
+	 * the same reason `max_iterations` is: the run did real work, the transcript up to
+	 * the cap is intact, and every tool call that ran kept its result. A host must not
+	 * render this as `failed`.
+	 */
+	| "tool_calls_exhausted"
+	/**
 	 * Hit the iteration cap. A first-class outcome, not a failure: the run did real work
 	 * and the transcript is intact, it simply ran out of room. Kept distinct from
 	 * `failed` because a host showing "failed" for a completed-as-far-as-it-could-go
@@ -506,6 +513,17 @@ export interface AgentRuntimeConfig {
 	telemetry?: ITelemetryService;
 	initialMessages?: readonly AgentMessage[];
 	maxIterations?: number;
+	/**
+	 * Maximum number of tool calls this run may execute. Undefined or `0` means
+	 * unlimited, matching `maxIterations`'s convention.
+	 *
+	 * Bounds an axis `maxIterations` does not: one turn can issue many tool calls, so
+	 * the iteration cap says nothing about them, and the identical-result no-progress
+	 * detector stays silent when the model varies its calls. Kept out of `budget`
+	 * because that is denominated in tokens and cost and rejects unknown keys — a
+	 * typo there must not read as "no limit".
+	 */
+	maxToolCalls?: number;
 	/**
 	 * Cumulative token/cost guardrails for the run. When a cap is reached the
 	 * runtime finishes the in-flight turn and then stops instead of issuing

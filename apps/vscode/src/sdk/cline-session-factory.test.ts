@@ -806,6 +806,52 @@ describe("buildSessionConfig", () => {
 	 * toggle that never reached the session config would have looked complete. These
 	 * assert the whole path: setting -> session config.
 	 */
+	/**
+	 * `maxToolCalls` is the one guard whose "off" value is `0`, and the existing
+	 * `readBoundedInt` replaces `0` with a fallback. Substituted through it, the
+	 * setting would impose the very cap the user turned off — so it is read
+	 * separately, and these pin that.
+	 */
+	describe("maxToolCalls setting", () => {
+		const withMaxToolCalls = (raw: unknown) => {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "maxToolCalls") {
+					return raw
+				}
+				if (key === "subagentsEnabled" || key === "useAutoCondense") {
+					return false
+				}
+				return undefined
+			})
+			return () => buildSessionConfig({ cwd: "/tmp/workspace" })
+		}
+
+		it("treats 0 as no ceiling rather than substituting a default", async () => {
+			const config = await withMaxToolCalls(0)()
+			// Undefined is the runtime's "unlimited"; a number here would silently cap
+			// every run at a value the user never chose.
+			expect(config.maxToolCalls).toBeUndefined()
+		})
+
+		it("passes a positive value through", async () => {
+			expect((await withMaxToolCalls(25)()).maxToolCalls).toBe(25)
+		})
+
+		it("floors a fractional value rather than passing it through", async () => {
+			expect((await withMaxToolCalls(10.9)()).maxToolCalls).toBe(10)
+		})
+
+		it("drops a negative or non-numeric value instead of guessing", async () => {
+			for (const bogus of [-5, NaN, Infinity, "abc", null]) {
+				expect((await withMaxToolCalls(bogus)()).maxToolCalls).toBeUndefined()
+			}
+		})
+
+		it("is unset when the setting is absent entirely", async () => {
+			expect((await withMaxToolCalls(undefined)()).maxToolCalls).toBeUndefined()
+		})
+	})
+
 	describe("sandbox settings", () => {
 		const withSandboxSettings = (settings: Record<string, unknown>): (() => Promise<CoreSessionConfig>) => {
 			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {

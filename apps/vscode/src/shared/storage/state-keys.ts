@@ -342,6 +342,11 @@ const USER_SETTINGS_FIELDS = {
 	// would silently round-trip as a joined string. Accepts either a JSON array or a
 	// newline/comma separated list; see readStringArray in cline-session-factory.
 	fileBoundaryAdditionalRoots: { default: "" as string },
+	// Ceiling on tool calls per run. Off by default (0) because an unexpected cap
+	// truncates real work, and this axis is easy to underestimate: one turn can issue
+	// many tool calls, so maxIterations says nothing about them. Set it where a
+	// runaway agent costs money rather than where it merely wastes tokens.
+	maxToolCalls: { default: 0 as number },
 	// OS-level process isolation for shell commands (macOS Seatbelt / Linux
 	// bubblewrap). Distinct from the file boundary above, which is a path check
 	// inside the file tools; this confines the process, so it also covers what the

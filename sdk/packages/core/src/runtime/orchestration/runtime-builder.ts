@@ -782,6 +782,10 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 			maxTokensPerTurn: config.maxTokensPerTurn,
 			temperature: config.temperature,
 			maxIterations: config.maxIterations,
+			// Forwarded from the session's execution guards. Distinct from
+			// `maxIterations`, which counts model round-trips: one turn can issue many
+			// tool calls, so the iteration cap says nothing about them.
+			maxToolCalls: config.execution?.maxToolCalls,
 			hooks,
 			extensions: runtimeExtensions,
 			logger: logger ?? config.logger,

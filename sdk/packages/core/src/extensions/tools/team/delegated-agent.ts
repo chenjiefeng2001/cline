@@ -43,6 +43,12 @@ export interface DelegatedAgentRuntimeConfig
 	clinePlatform?: string;
 	clineIdeName?: string;
 	maxIterations?: number;
+	/**
+	 * Per-run tool-call cap for delegated agents. A sub-agent spends the parent's
+	 * budget, so without forwarding this the cap would bound the parent while a child
+	 * looped freely inside it.
+	 */
+	maxToolCalls?: number;
 	hooks?: AgentHooks;
 	extensions?: AgentExtension[];
 	logger?: BasicLogger;
@@ -141,6 +147,7 @@ export function buildDelegatedAgentConfig(
 		systemPrompt,
 		tools: options.tools,
 		maxIterations: options.maxIterations ?? runtimeConfig.maxIterations,
+		maxToolCalls: runtimeConfig.maxToolCalls,
 		parentAgentId: options.parentAgentId,
 		...(rootRunId ? { rootRunId } : {}),
 		abortSignal: options.abortSignal,

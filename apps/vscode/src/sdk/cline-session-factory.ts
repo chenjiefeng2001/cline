@@ -832,6 +832,13 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		const n = typeof value === "number" ? value : Number(value)
 		return Number.isFinite(n) && n > 0 ? n : fallback
 	}
+	// For settings where 0 means "unlimited". Unlike readBoundedInt this does not
+	// substitute a fallback, because a fallback would impose the very limit the user
+	// disabled — and a negative or non-numeric value is dropped rather than guessed at.
+	const readOptionalPositiveInt = (value: unknown): number | undefined => {
+		const n = typeof value === "number" ? value : Number(value)
+		return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined
+	}
 	// A list setting may have been stored as a JSON string or as a real array
 	// depending on which writer persisted it, so accept both and drop anything that
 	// is not a non-empty string rather than passing junk to the boundary.
@@ -1087,6 +1094,11 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		// exceed "the reads the model asked for" — the ceiling is a guardrail, not the
 		// expected batch size.
 		maxParallelToolCalls: readBoundedInt(stateManager.getGlobalSettingsKey("maxParallelToolCalls"), 6),
+		// Tool-call ceiling. `readBoundedInt` rejects 0 and falls back, so the
+		// off-by-default value is read separately: here 0 means "no ceiling", so the
+		// setting must survive as 0 rather than being replaced by a fallback that would
+		// impose a cap the user never asked for.
+		maxToolCalls: readOptionalPositiveInt(stateManager.getGlobalSettingsKey("maxToolCalls")),
 		// Spend guardrail. Exceeding it is likewise a finish reason
 		// (budget_exhausted), and the in-flight turn always completes so every tool
 		// call still receives a result. `maxTotalCost: undefined` means no ceiling,

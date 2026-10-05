@@ -90,7 +90,9 @@ export interface ParsedArgs {
 	runBudgetMaxTotalCost?: number;
 	invalidMaxBudgetUsd?: string;
 	maxParallelToolCalls?: number;
+	maxToolCalls?: number;
 	invalidMaxParallelToolCalls?: string;
+	invalidMaxToolCalls?: string;
 	thinking: boolean;
 	/** Whether --thinking was explicitly provided on the command line */
 	thinkingExplicitlySet?: boolean;

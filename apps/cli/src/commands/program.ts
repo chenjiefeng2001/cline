@@ -73,6 +73,10 @@ export function addRootOptions(cmd: Command): Command {
 				"Tool calls executed concurrently within one turn (default: 6; 1 forces serial). Only tools declared concurrency-safe batch together",
 			)
 			.option(
+				"--max-tool-calls <count>",
+				"Maximum tool calls a single run may execute (default: unlimited). Distinct from --max-iterations, which counts model round-trips: one turn can issue many tool calls",
+			)
+			.option(
 				"--acp",
 				"Run in Agent Client Protocol (ACP) mode for editor integration",
 			)
@@ -228,6 +232,19 @@ export function commanderToParsedArgs(program: Command): ParsedArgs {
 			result.maxParallelToolCalls = parsed;
 		} else if (raw) {
 			result.invalidMaxParallelToolCalls = raw;
+		}
+	}
+
+	if (opts.maxToolCalls !== undefined) {
+		const raw = String(opts.maxToolCalls).trim();
+		const parsed = Number.parseInt(raw, 10);
+		// >= 1, not >= 0: unlike the iteration cap there is no UI promising that 0
+		// removes the ceiling, and a typo landing on 0 should not read as "unlimited"
+		// the way it would for a budget the user believes is spent.
+		if (raw && Number.isInteger(parsed) && parsed >= 1) {
+			result.maxToolCalls = parsed;
+		} else if (raw) {
+			result.invalidMaxToolCalls = raw;
 		}
 	}
 

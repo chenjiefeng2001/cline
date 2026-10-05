@@ -343,6 +343,7 @@ export const ExtensionStateContextProvider: React.FC<{
 		maxParallelToolCalls: 6,
 		runBudgetMaxTotalCost: 5,
 		fileBoundaryEnabled: true,
+		maxToolCalls: 0,
 		sandboxEnabled: false,
 		sandboxNetworkAccess: false,
 		sandboxBackend: "",

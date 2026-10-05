@@ -47,6 +47,7 @@ export const SETTINGS_SCHEMA_MAP: Record<string, string> = {
 	// spend control (the budget ceiling) among them.
 	maxIterations: "maxIterationsSetting",
 	maxParallelToolCalls: "maxParallelToolCalls",
+	maxToolCalls: "maxToolCalls",
 	runBudgetMaxTotalCost: "runBudgetMaxTotalCost",
 	fileBoundaryEnabled: "fileBoundaryEnabled",
 	fileBoundaryAdditionalRoots: "fileBoundaryAdditionalRoots",

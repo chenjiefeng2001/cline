@@ -590,6 +590,19 @@ export class AgentRuntime {
 	 * which case the loop is never gated on spend.
 	 */
 	private readonly runBudget: AgentRunBudget | undefined;
+	/**
+	 * Tool calls executed so far in this run. Lives on the runtime rather than in
+	 * `state` because it is a private loop counter with no meaning in a snapshot: a
+	 * resumed run gets a fresh allowance, and exposing it would suggest otherwise.
+	 */
+	private toolCallsExecuted = 0;
+	/**
+	 * Set when a turn asked for tools the cap could not cover. The loop checks it
+	 * after appending the turn's tool results, because a turn that was refused still
+	 * produced an assistant message asking for them — leaving that on the wire
+	 * without a stop would invite another turn that gets refused too.
+	 */
+	private toolCallsExhausted = false;
 
 	constructor(config: AgentRuntimeConfig) {
 		const resolved = resolveRuntimeConfig(config);
@@ -1295,6 +1308,20 @@ export class AgentRuntime {
 				});
 			}
 
+			// Tool-call cap. Checked after the turn's results are appended so the
+			// transcript stays consistent — every tool call the model emitted now has a
+			// result, and the run ends with the reason it actually stopped rather than
+			// looping into another turn whose calls would also be refused.
+			if (this.toolCallsExhausted) {
+				const cap = this.config.maxToolCalls;
+				return await this.finishToolCallsExhausted(
+					typeof cap === "number" && cap > 0
+						? cap
+						: this.toolCallsExecuted,
+					finalAssistantMessage,
+				);
+			}
+
 			// No-progress gate.
 			//
 			// A tool that returns byte-identical output cannot be helped by another turn,
@@ -1906,6 +1933,53 @@ export class AgentRuntime {
 		return result;
 	}
 
+	/**
+	 * Whether the run has spent its tool-call allowance.
+	 *
+	 * Checked before dispatching a prepared batch rather than after it, so the run
+	 * stops *between* tool calls and never starts one it cannot afford. The
+	 * in-flight turn still finishes, so every tool call that did run keeps its
+	 * result — same contract as the budget gate.
+	 *
+	 * Returns undefined while unlimited. `0` is treated as unlimited rather than
+	 * "no calls allowed", matching how the other guards read an unset value.
+	 */
+	private resolveToolCallStop(): number | undefined {
+		const cap = this.config.maxToolCalls;
+		if (cap === undefined || cap <= 0) {
+			return undefined;
+		}
+		return this.toolCallsExecuted >= cap ? cap : undefined;
+	}
+
+	private async finishToolCallsExhausted(
+		cap: number,
+		assistantMessage?: AgentMessage,
+	): Promise<AgentRunResult> {
+		await this.emit({
+			type: "status-notice",
+			snapshot: this.snapshot(),
+			message: `Tool call limit reached: ${this.toolCallsExecuted} of ${cap}`,
+			metadata: {
+				kind: "tool_calls_exhausted",
+				toolCallsExecuted: this.toolCallsExecuted,
+				toolCallCap: cap,
+			},
+		});
+		const result = this.finishRun(
+			"tool_calls_exhausted",
+			assistantMessage,
+			undefined,
+		);
+		await this.callAfterRunHooks(result);
+		await this.emit({
+			type: "run-finished",
+			snapshot: this.snapshot(),
+			result,
+		});
+		return result;
+	}
+
 	private async executeResumeToolCall(
 		prepared: PreparedToolExecution,
 	): Promise<AgentMessage> {
@@ -1935,6 +2009,31 @@ export class AgentRuntime {
 	private async executeToolCalls(
 		toolCalls: AgentToolCallPart[],
 	): Promise<AgentMessage[]> {
+		// Gate before preparing anything. A turn can request many calls at once, and
+		// running the ones that fit while refusing the rest would leave tool calls
+		// without results — which the model reads as a crash. Instead the run stops
+		// here, before any of this turn's calls execute.
+		if (this.resolveToolCallStop() !== undefined) {
+			// Every call in this turn is refused, and the model asked for them. Answer
+			// each with an explicit refusal rather than staying silent: an unanswered
+			// tool call is the shape the model reads as a crash, and it invites another
+			// turn whose calls would be refused too.
+			this.toolCallsExhausted = true;
+			return toolCalls.map((toolCall) =>
+				createMessage("tool", [
+					{
+						type: "tool-result",
+						toolCallId: toolCall.toolCallId,
+						toolName: toolCall.toolName,
+						output: {
+							error: `Tool call refused: this run reached its limit of ${String(this.config.maxToolCalls)} tool calls. The transcript above is complete up to that point.`,
+						},
+						isError: true,
+					},
+				]),
+			);
+		}
+
 		const prepared: PreparedToolExecution[] = [];
 		for (const [callIndex, toolCall] of toolCalls.entries()) {
 			try {
@@ -1964,6 +2063,7 @@ export class AgentRuntime {
 		const results: AgentMessage[] = [];
 		for (const execution of prepared) {
 			results.push(await this.runSinglePreparedTool(execution));
+			this.toolCallsExecuted += 1;
 		}
 		return results;
 	}
@@ -2015,12 +2115,16 @@ export class AgentRuntime {
 				results[batch[0] as number] = await this.runSinglePreparedTool(
 					prepared[batch[0] as number] as PreparedToolExecution,
 				);
+				this.toolCallsExecuted += 1;
 				continue;
 			}
 
 			const settled = await this.executePreparedToolsInParallel(
 				batch.map((index) => prepared[index] as PreparedToolExecution),
 			);
+			// Counted per call, not per batch: the cap is denominated in calls, and a
+			// batch of six safe reads spends six of them.
+			this.toolCallsExecuted += settled.length;
 			this.throwIfAborted();
 			settled.forEach((outcome, offset) => {
 				const index = batch[offset] as number;

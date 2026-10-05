@@ -311,6 +311,7 @@ message Settings {
   optional bool sandbox_enabled = 205;
   optional bool sandbox_network_access = 206;
   optional string sandbox_backend = 207;
+  optional int32 max_tool_calls = 208;
 }
 
 message State {
@@ -476,6 +477,9 @@ message UpdateSettingsRequest {
   // webview had no way to write them: they were settable only by hand-editing
   // global state. Numbers continue from 47.
   optional int32 max_parallel_tool_calls = 48;
+  // Ceiling on tool calls per run. Mirrors the Settings field of the same
+  // name; this message is a hand-maintained duplicate and drifts silently.
+  optional int32 max_tool_calls = 65;
   // Spend ceiling in USD for one agent run (0 = no ceiling).
   optional double run_budget_max_total_cost = 49;
   // Restrict the file tools to the session workspace.

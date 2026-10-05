@@ -228,6 +228,17 @@ export interface AgentExecutionConfig {
 	 */
 	maxConsecutiveMistakes?: number;
 	/**
+	 * Maximum number of tool calls a single run may execute. Undefined or `0` means
+	 * unlimited.
+	 *
+	 * Bounds an axis `maxIterations` does not: one turn can issue many tool calls, so
+	 * the iteration cap says nothing about them, and the identical-result no-progress
+	 * detector stays silent when the model varies its calls. This is the remaining
+	 * backstop for cost, and it is off by default so no existing workflow changes
+	 * shape without being asked to.
+	 */
+	maxToolCalls?: number;
+	/**
 	 * After this many consecutive iterations with tool calls,
 	 * inject a reminder text block asking the agent to answer if it has enough info.
 	 * Set to `0` or omit to disable.
@@ -532,6 +543,12 @@ export type AgentFinishReason =
 	/** Stopped before another model request: run budget reached. */
 	| "budget_exhausted"
 	/**
+	 * Stopped between tool calls: the per-run tool-call cap was reached. A limit, not
+	 * a failure — the transcript up to that point is complete, and every tool call
+	 * that ran kept its result.
+	 */
+	| "tool_calls_exhausted"
+	/**
 	 * Stopped because the same tool returned an identical result repeatedly, so another
 	 * turn could not change the outcome. Not a limit at all - it is the absence of
 	 * progress, and continuing would spend money to arrive at the same place.
@@ -545,6 +562,7 @@ export const AgentFinishReasonSchema = z.enum([
 	"completed",
 	"max_iterations",
 	"budget_exhausted",
+	"tool_calls_exhausted",
 	"no_progress",
 	"aborted",
 	"mistake_limit",
@@ -822,6 +840,16 @@ export interface AgentConfig {
 	 * If undefined, no iteration cap is enforced.
 	 */
 	maxIterations?: number;
+	/**
+	 * Maximum number of tool calls one run may execute. Undefined or `0` means
+	 * unlimited.
+	 *
+	 * Bounds an axis `maxIterations` does not: a single turn can issue many tool
+	 * calls, and the identical-result no-progress detector does not fire when the
+	 * model varies its calls. Not part of `budget` — that is denominated in tokens
+	 * and cost, and rejects unknown keys so a typo cannot read as "no limit".
+	 */
+	maxToolCalls?: number;
 	/**
 	 * Cumulative token/cost guardrails for the run. When a cap is reached the
 	 * runtime finishes the in-flight turn and then stops instead of issuing

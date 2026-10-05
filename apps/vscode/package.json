@@ -451,6 +451,10 @@
 					"minimum": 0,
 					"description": "Spend ceiling in USD for a single agent run (0 = no ceiling). Reaching it finishes the turn as budget_exhausted rather than crashing."
 				},
+				"cline.maxToolCalls": {
+					"type": "number",
+					"description": "Ceiling on tool calls per agent run (0 = no ceiling). Distinct from cline.maxIterationsSetting, which counts model round-trips: one turn can issue many tool calls, so the iteration cap does not bound them. Set this where a runaway agent costs money rather than where it merely wastes tokens."
+				},
 				"cline.fileBoundaryEnabled": {
 					"type": "boolean",
 					"description": "Restrict file tools (read_files, editor) to the session workspace. Turning this off lets the agent reach any path on disk — prefer adding directories to cline.fileBoundaryAdditionalRoots instead."

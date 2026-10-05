@@ -3670,6 +3670,9 @@ export class LocalRuntimeHost implements RuntimeHost {
 			case "aborted":
 			case "max_iterations":
 			case "budget_exhausted":
+			// A cap, like the others: the run did real work and the transcript up to the
+			// limit is intact, so it is a cancelled turn rather than a failure.
+			case "tool_calls_exhausted":
 			case "no_progress":
 			case "mistake_limit":
 				return "cancelled";

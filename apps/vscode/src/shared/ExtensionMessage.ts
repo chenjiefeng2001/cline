@@ -103,6 +103,8 @@ export interface ExtensionState {
 	 * with the running session.
 	 */
 	maxParallelToolCalls: number
+	/** Ceiling on tool calls per run; `0` means unlimited. */
+	maxToolCalls: number
 	runBudgetMaxTotalCost: number
 	fileBoundaryEnabled: boolean
 	fileBoundaryAdditionalRoots: string

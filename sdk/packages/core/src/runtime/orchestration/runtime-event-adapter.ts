@@ -122,7 +122,14 @@ function textFromMessage(message: AgentMessage | undefined): string {
 }
 
 function statusToLegacyFinishReason(
-	status: "completed" | "budget_exhausted" | "max_iterations" | "no_progress" | "aborted" | "failed",
+	status:
+		| "completed"
+		| "budget_exhausted"
+		| "tool_calls_exhausted"
+		| "max_iterations"
+		| "no_progress"
+		| "aborted"
+		| "failed",
 ): AgentFinishReason {
 	switch (status) {
 		case "completed":
@@ -136,6 +143,8 @@ function statusToLegacyFinishReason(
 		// "Not an error" is a property of all three; "which one" is what the user needs.
 		case "max_iterations":
 			return "max_iterations";
+		case "tool_calls_exhausted":
+			return "tool_calls_exhausted";
 		case "no_progress":
 			return "no_progress";
 		case "aborted":
@@ -381,7 +390,14 @@ export class RuntimeEventAdapter {
 	}
 
 	private translateRunFinished(result: {
-		status: "completed" | "budget_exhausted" | "max_iterations" | "no_progress" | "aborted" | "failed";
+		status:
+			| "completed"
+			| "budget_exhausted"
+			| "tool_calls_exhausted"
+			| "max_iterations"
+			| "no_progress"
+			| "aborted"
+			| "failed";
 		outputText: string;
 		iterations: number;
 		usage: AgentUsage;

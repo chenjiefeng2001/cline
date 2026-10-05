@@ -1959,6 +1959,144 @@ describe("AgentRuntime", () => {
 		});
 	});
 
+	describe("maxToolCalls", () => {
+		const tool = {
+			name: "noop",
+			description: "does nothing",
+			inputSchema: { type: "object" as const },
+			execute: async () => "ok",
+		};
+		// Keeps asking for another tool call, with distinct results each time so the
+		// identical-output no-progress detector stays silent — which is exactly the
+		// loop this cap exists to bound.
+		const loopingModel = () =>
+			new ScriptedModel(
+				Array.from({ length: 40 }, (_, i) => () => [
+					{ type: "text-delta" as const, text: `thinking ${i}` },
+					{
+						type: "tool-call-delta" as const,
+						toolCallId: `call-${i}`,
+						toolName: "noop",
+						inputText: "{}",
+					},
+					{ type: "finish" as const, reason: "tool-calls" as const },
+				]),
+			);
+
+		it("stops the run with its own finish reason rather than an error", async () => {
+			const model = loopingModel();
+			const runtime = new AgentRuntime({
+				model,
+				tools: [tool],
+				maxToolCalls: 3,
+			});
+
+			const result = await runtime.run("go");
+
+			expect(result.status).toBe("tool_calls_exhausted");
+			expect(result.error).toBeUndefined();
+			// Three calls execute, then the fourth request is refused: the model has to
+			// ask before we can know it wants more, so the refusal costs one request.
+			expect(model.requests).toHaveLength(4);
+		});
+
+		it("is unlimited when unset or zero", async () => {
+			for (const maxToolCalls of [undefined, 0]) {
+				// A model that finishes cleanly, to prove the cap is not what ended it.
+				const model = new ScriptedModel([
+					() => [
+						{ type: "text-delta", text: "done" },
+						{ type: "finish", reason: "stop" },
+					],
+				]);
+				const runtime = new AgentRuntime({ model, tools: [tool], maxToolCalls });
+				expect((await runtime.run("go")).status).toBe("completed");
+			}
+		});
+
+		it("leaves every emitted tool call with a result", async () => {
+			// The refusal happens before the turn's calls run, so the assistant message
+			// asking for tools must not be left on the wire unmatched — the model reads
+			// that as a crash rather than as a limit it reached.
+			const model = loopingModel();
+			const runtime = new AgentRuntime({
+				model,
+				tools: [tool],
+				maxToolCalls: 2,
+			});
+
+			const result = await runtime.run("go");
+
+			const calls = result.messages.filter((m) =>
+				m.content.some((p) => p.type === "tool-call"),
+			);
+			for (const call of calls) {
+				const ids = call.content
+					.filter((p) => p.type === "tool-call")
+					.map((p) => (p as { toolCallId: string }).toolCallId);
+				const answered = result.messages.some((m) =>
+					m.content.some((p) => p.type === "tool-result" && ids.includes((p as { toolCallId: string }).toolCallId)),
+				);
+				expect(answered).toBe(true);
+			}
+		});
+
+		it("counts calls, not iterations", async () => {
+			// One turn issuing several calls spends several of the allowance. A cap
+			// counted per iteration would let a single wide turn through.
+			const model = new ScriptedModel([
+				// Turn one spends the whole allowance in a single turn.
+				() => [
+					{
+						type: "tool-call-delta" as const,
+						toolCallId: "a",
+						toolName: "noop",
+						inputText: "{}",
+					},
+					{
+						type: "tool-call-delta" as const,
+						toolCallId: "b",
+						toolName: "noop",
+						inputText: "{}",
+					},
+					{
+						type: "tool-call-delta" as const,
+						toolCallId: "c",
+						toolName: "noop",
+						inputText: "{}",
+					},
+					{ type: "finish" as const, reason: "tool-calls" as const },
+				],
+				// Turn two asks for more, which the cap refuses.
+				() => [
+					{ type: "text-delta" as const, text: "one more" },
+					{
+						type: "tool-call-delta" as const,
+						toolCallId: "d",
+						toolName: "noop",
+						inputText: "{}",
+					},
+					{ type: "finish" as const, reason: "tool-calls" as const },
+				],
+			]);
+			const runtime = new AgentRuntime({
+				model,
+				tools: [tool],
+				maxToolCalls: 3,
+				maxIterations: 50,
+			});
+
+			const result = await runtime.run("go");
+
+			// The three calls of turn one fit exactly, so the run is only stopped on the
+			// next turn — which proves the allowance was spent per call and that the
+			// iteration count stayed far below the iteration cap.
+			expect(result.status).toBe("tool_calls_exhausted");
+			expect(result.error).toBeUndefined();
+			expect(result.iterations).toBe(2);
+		});
+	});
+
 	it("stops a run from beforeModel hooks and returns an aborted result", async () => {
 		const model = new ScriptedModel([
 			() => [

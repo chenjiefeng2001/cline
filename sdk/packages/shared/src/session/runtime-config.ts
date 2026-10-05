@@ -72,6 +72,20 @@ export interface SessionExecutionConfig {
 	missionLogIntervalSteps?: number;
 	missionLogIntervalMs?: number;
 	maxConsecutiveMistakes?: number;
+	/**
+	 * Ceiling on tool calls per run. Omitted or `0` means unlimited.
+	 *
+	 * Bounds an axis `maxIterations` does not: one turn can issue many tool calls, so
+	 * the iteration cap says nothing about them, and the identical-result no-progress
+	 * detector stays silent when the model varies its calls. This is the remaining
+	 * backstop for cost, and it is off by default so no existing workflow changes
+	 * shape without being asked to.
+	 *
+	 * Deliberately not a field on `AgentRunBudget`: that schema rejects unknown keys
+	 * so a typo cannot silently read as "no limit", and it is denominated in tokens
+	 * and cost rather than call counts. This counts calls.
+	 */
+	maxToolCalls?: number;
 	toolPolicies?: Record<string, ToolPolicy>;
 	/**
 	 * Maximum number of tool calls executed concurrently within one assistant

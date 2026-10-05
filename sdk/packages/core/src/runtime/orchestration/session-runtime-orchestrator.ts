@@ -1475,6 +1475,8 @@ function deriveFinishReason(
 		// host that cannot tell them apart cannot tell the user which knob to turn.
 		case "max_iterations":
 			return "max_iterations";
+		case "tool_calls_exhausted":
+			return "tool_calls_exhausted";
 		case "no_progress":
 			return "no_progress";
 		case "aborted":

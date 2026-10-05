@@ -861,6 +861,13 @@ export async function runCli(): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
+	if (args.invalidMaxToolCalls) {
+		writeErr(
+			`invalid --max-tool-calls "${args.invalidMaxToolCalls}" (expected integer >= 1)`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	if (args.hooksDir?.trim()) {
 		process.env.CLINE_HOOKS_DIR = args.hooksDir.trim();
 	}
@@ -1118,6 +1125,12 @@ export async function runCli(): Promise<void> {
 			}),
 			execution: {
 				maxConsecutiveMistakes: args.retries ?? 3,
+				// Omitted rather than defaulted: an unexpected tool-call cap would
+				// truncate legitimate work, so leaving it unset keeps this path exactly
+				// as permissive as before unless the flag asks otherwise.
+				...(args.maxToolCalls !== undefined
+					? { maxToolCalls: args.maxToolCalls }
+					: {}),
 			},
 			// Run guardrails. The runtime has implemented both for a long time
 			// (max_iterations and budget_exhausted are finish reasons, not crashes)
