@@ -133,6 +133,20 @@ export interface CoreModelConfig {
 export interface CoreRuntimeFeatures {
 	enableTools: boolean;
 	enableSpawnAgent: boolean;
+	/**
+	 * How many levels of `spawn_agent` nesting are allowed. The root session is
+	 * depth 0, so the default of 1 lets the root delegate but stops a delegate
+	 * from delegating again.
+	 *
+	 * This was previously unbounded: a sub-agent's tool set re-included
+	 * `spawn_agent`, so an arbitrarily deep chain could form. Codex defaults
+	 * `agents.max_depth` to 1 for the same reason — broad delegation instructions
+	 * plus deep recursion turn into fan-out, multiplying tokens, latency and local
+	 * load. Claude Code allows three layers. At the limit the spawn tool is withheld
+	 * rather than erroring, so the delegate does its own work instead of spending a
+	 * turn on a call that cannot succeed.
+	 */
+	maxSubAgentDepth?: number;
 	enableAgentTeams: boolean;
 	disableMcpSettingsTools?: boolean;
 	yolo?: boolean;

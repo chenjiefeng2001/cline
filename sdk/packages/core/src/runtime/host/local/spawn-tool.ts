@@ -119,11 +119,40 @@ export function createSessionSubAgentLifecycleCallbacks(
 	};
 }
 
+/**
+ * Depth of a session in the `spawn_agent` chain. The root session is 0.
+ * Kept local rather than derived from config so the limit is enforced at the one
+ * place that decides whether a nested spawn tool exists.
+ */
+const DEFAULT_MAX_SUB_AGENT_DEPTH = 1;
+
+/**
+ * Whether a session at `depth` in the `spawn_agent` chain may itself delegate.
+ * The root session is depth 0. Exported so the limit is testable directly: the
+ * sub-agent tool list is assembled in a closure, so there is no other way to
+ * assert where the chain stops without standing up a full sub-agent runtime.
+ */
+export function isSubAgentDepthAllowed(
+	config: Pick<CoreSessionConfig, "enableSpawnAgent" | "maxSubAgentDepth">,
+	depth: number,
+): boolean {
+	if (!config.enableSpawnAgent) {
+		return false;
+	}
+	const maxDepth = Math.max(
+		0,
+		config.maxSubAgentDepth ?? DEFAULT_MAX_SUB_AGENT_DEPTH,
+	);
+	return depth < maxDepth;
+}
+
 export function createSessionSpawnTool(
 	deps: SpawnToolDeps,
 	config: CoreSessionConfig,
 	rootSessionId: string,
 	toolExecutors?: Partial<ToolExecutors>,
+	/** Current nesting level; the root session passes 0 (the default). */
+	depth = 0,
 ): AgentTool {
 	const lifecycle = createSessionSubAgentLifecycleCallbacks(
 		deps,
@@ -138,9 +167,17 @@ export function createSessionSpawnTool(
 					executors: toolExecutors,
 				})
 			: [];
-		if (config.enableSpawnAgent) {
+		// Withhold the spawn tool once the chain is deep enough. Offering a tool
+		// that must fail wastes a turn and invites the model to retry it.
+		if (isSubAgentDepthAllowed(config, depth)) {
 			tools.push(
-				createSessionSpawnTool(deps, config, rootSessionId, toolExecutors),
+				createSessionSpawnTool(
+					deps,
+					config,
+					rootSessionId,
+					toolExecutors,
+					depth + 1,
+				),
 			);
 		}
 		return filterDisabledTools(tools);
