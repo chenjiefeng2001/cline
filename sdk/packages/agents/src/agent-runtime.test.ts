@@ -2041,6 +2041,27 @@ describe("AgentRuntime", () => {
 			}
 		});
 
+		it("gives each run its own allowance when one instance is reused", async () => {
+			// `maxIterations` resets per run; a tool-call cap that accumulated across
+			// `run()`/`continue()` on the same instance would silently stop a long-lived
+			// SDK consumer long before the value it configured.
+			const model = loopingModel();
+			const runtime = new AgentRuntime({
+				model,
+				tools: [tool],
+				maxToolCalls: 2,
+			});
+
+			const first = await runtime.run("go");
+			expect(first.status).toBe("tool_calls_exhausted");
+
+			// A second run on the same instance starts from a fresh allowance rather
+			// than inheriting an exhausted one.
+			const second = await runtime.run("go again");
+			expect(second.status).toBe("tool_calls_exhausted");
+			expect(second.iterations).toBeLessThanOrEqual(first.iterations + 1);
+		});
+
 		it("counts calls, not iterations", async () => {
 			// One turn issuing several calls spends several of the allowance. A cap
 			// counted per iteration would let a single wide turn through.

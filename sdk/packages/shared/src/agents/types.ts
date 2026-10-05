@@ -1041,154 +1041,21 @@ export interface AgentConfig {
 	abortSignal?: AbortSignal;
 }
 
-export const AgentConfigSchema = z.object({
-	sessionId: z.string().optional(),
-	// Provider Settings
-	providerId: z.string(),
-	modelId: z.string(),
-	apiKey: z.string().optional(),
-	baseUrl: z.string().url().optional(),
-	headers: z.record(z.string(), z.string()).optional(),
-	knownModels: z.record(z.string(), ModelInfoSchema).optional(),
-	providerConfig: z.unknown().optional(),
-	initialMessages: z.array(z.custom<Message>()).optional(),
-
-	// Agent Behavior
-	systemPrompt: z.string(),
-	tools: z.array(z.custom<AgentTool>()),
-	maxIterations: z.number().positive().optional(),
-	budget: AgentRunBudgetSchema.optional(),
-	maxParallelToolCalls: z.number().int().positive().default(8),
-	maxTokensPerTurn: z.number().positive().optional(),
-	temperature: z.number().nonnegative().optional(),
-	apiTimeoutMs: z.number().positive().default(180000),
-	userFileContentLoader: z
-		.function()
-		.input([z.string()])
-		.output(z.promise(z.string()))
-		.optional(),
-	toolContextMetadata: z.record(z.string(), z.unknown()).optional(),
-	execution: z
-		.object({
-			maxConsecutiveMistakes: z.number().int().positive().optional(),
-			reminderAfterIterations: z.number().nonnegative().optional(),
-			reminderText: z.string().optional(),
-			loopDetection: z
-				.union([
-					z.literal(false),
-					z.object({
-						softThreshold: z.number().int().positive().optional(),
-						hardThreshold: z.number().int().positive().optional(),
-					}),
-				])
-				.optional(),
-		})
-		.optional(),
-	// Reasoning Settings
-	reasoningEffort: ReasoningEffortSchema.optional(),
-	thinkingBudgetTokens: z.number().positive().optional(),
-	thinking: z.boolean().optional(),
-
-	// Callbacks
-	onEvent: z
-		.function()
-		.input([z.custom<AgentEvent>()])
-		.output(z.void())
-		.optional(),
-	hooks: z.custom<AgentHooks>().optional(),
-	parentAgentId: z.string().optional(),
-	rootRunId: z.string().optional(),
-	extensions: z.array(z.custom<AgentExtension>()).optional(),
-	hookErrorMode: z.enum(["ignore", "throw"]).default("ignore"),
-	toolPolicies: z
-		.record(
-			z.string(),
-			z.object({
-				enabled: z.boolean().optional(),
-				autoApprove: z.boolean().optional(),
-			}),
-		)
-		.optional(),
-	requestToolApproval: z
-		.function()
-		.input([
-			z.object({
-				sessionId: z.string(),
-				agentId: z.string(),
-				conversationId: z.string(),
-				iteration: z.number(),
-				toolCallId: z.string(),
-				toolName: z.string(),
-				input: z.unknown(),
-				policy: z
-					.object({
-						enabled: z.boolean().optional(),
-						autoApprove: z.boolean().optional(),
-					})
-					.default({}),
-			}),
-		])
-		.output(
-			z.union([
-				z.object({
-					approved: z.boolean(),
-					reason: z.string().optional(),
-				}),
-				z.promise(
-					z.object({
-						approved: z.boolean(),
-						reason: z.string().optional(),
-					}),
-				),
-			]),
-		)
-		.optional(),
-	onConsecutiveMistakeLimitReached: z
-		.function()
-		.input([
-			z.object({
-				iteration: z.number().int().positive(),
-				consecutiveMistakes: z.number().int().positive(),
-				maxConsecutiveMistakes: z.number().int().positive(),
-				reason: z.enum([
-					"api_error",
-					"invalid_tool_call",
-					"tool_execution_failed",
-				]),
-				details: z.string().optional(),
-			}),
-		])
-		.output(
-			z.union([
-				z.object({
-					action: z.literal("continue"),
-					guidance: z.string().optional(),
-				}),
-				z.object({
-					action: z.literal("stop"),
-					reason: z.string().optional(),
-				}),
-				z.promise(
-					z.union([
-						z.object({
-							action: z.literal("continue"),
-							guidance: z.string().optional(),
-						}),
-						z.object({
-							action: z.literal("stop"),
-							reason: z.string().optional(),
-						}),
-					]),
-				),
-			]),
-		)
-		.optional(),
-	logger: z.custom<BasicLogger>().optional(),
-	extensionContext: z.custom<ExtensionContext>().optional(),
-
-	// Cancellation
-	abortSignal: z.custom<AbortSignal>().optional(),
-});
+/**
+ * Intentionally absent: a zod schema for `AgentConfig`.
+ *
+ * One existed and was never referenced by anything, which is worse than not
+ * having it. It declared `maxParallelToolCalls: .default(8)` and
+ * `apiTimeoutMs: .default(180000)` — values the runtime never applied, because the
+ * runtime reads the typed config object directly and the schema was inert. Anyone
+ * reading it would reasonably conclude a default of 8 existed. The actual defaults
+ * are applied where the values are consumed (`agent-runtime.ts` resolves
+ * `toolExecution`, hosts supply their own concurrency), and `maxParallelToolCalls`
+ * defaults to 6 in VS Code and CLI.
+ *
+ * `AgentRunBudgetSchema` below is different: it is used, and its rejection of
+ * unknown keys is deliberate so a typo cannot read as "no limit".
+ */
 
 // =============================================================================
 // Internal Types

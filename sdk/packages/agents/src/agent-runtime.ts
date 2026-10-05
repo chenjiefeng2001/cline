@@ -1067,6 +1067,16 @@ export class AgentRuntime {
 		this.state.iteration = isResume ? resumeIteration : 0;
 		this.state.pendingToolCalls = [];
 		this.state.lastError = undefined;
+		// Reset with the rest of the per-run state. Without this the tool-call
+		// allowance would accumulate across `run()`/`continue()` calls on one
+		// instance while `maxIterations` reset, so two guards documented as
+		// per-run would have different lifetimes — and a long-lived SDK consumer
+		// reusing an instance would hit the tool-call ceiling earlier than asked.
+		// Resume keeps its count: those calls already happened and were paid for.
+		if (!isResume) {
+			this.toolCallsExecuted = 0;
+		}
+		this.toolCallsExhausted = false;
 		if (!isResume) {
 			this.state.usage = cloneUsage(DEFAULT_USAGE);
 		}
