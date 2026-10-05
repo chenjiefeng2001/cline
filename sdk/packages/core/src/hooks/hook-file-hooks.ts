@@ -8,6 +8,7 @@ import type {
 	AgentHooks,
 	AgentRunLifecycleContext,
 	AgentRuntimeEvent,
+	PostCompactData,
 	PreCompactData,
 } from "@cline/shared";
 import {
@@ -1301,6 +1302,49 @@ export function createPreCompactHookEmitter(
 			});
 		} catch (error) {
 			logHookError(options.logger, "pre_compact hook failed", error);
+		}
+	};
+}
+
+/**
+ * Emitter for the `post_compact` file hook. Mirrors the pre-compact emitter:
+ * returns undefined when the workspace declares no `PostCompact` entry, so wiring
+ * it costs nothing for sessions that do not use it.
+ */
+export function createPostCompactHookEmitter(
+	options: HookRuntimeOptions,
+): ((data: PostCompactData) => Promise<void>) | undefined {
+	const commandMap = createHookCommandMap(options.workspacePath, (error) => {
+		logHookError(
+			options.logger,
+			`${error.message} This hook was skipped; the other hooks in this workspace are unaffected.`,
+		);
+	});
+	const commands = commandMap.post_compact ?? [];
+	if (commands.length === 0) {
+		return undefined;
+	}
+	return async (data: PostCompactData) => {
+		try {
+			await runAsyncHookCommands({
+				commands,
+				cwd: options.cwd,
+				logger: options.logger,
+				payload: {
+					...createPayloadBase(
+						{
+							conversationId: data.ulid,
+							agentId: data.ulid,
+							parentAgentId: null,
+						},
+						options,
+					),
+					hookName: "post_compact",
+					postCompact: data,
+				} as HookEventPayload,
+			});
+		} catch (error) {
+			logHookError(options.logger, "post_compact hook failed", error);
 		}
 	};
 }

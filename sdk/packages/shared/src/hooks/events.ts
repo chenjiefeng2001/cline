@@ -65,6 +65,7 @@ export const HookEventNameSchema = z.enum([
 	"tool_result",
 	"prompt_submit",
 	"pre_compact",
+	"post_compact",
 	"session_shutdown",
 ]);
 
@@ -143,6 +144,39 @@ export interface PreCompactData {
 	contextRawPath?: string;
 }
 
+/**
+ * Payload for the `post_compact` hook.
+ *
+ * Carries the outcome rather than the intent: `pre_compact` reports the context
+ * about to be dropped, this reports what the compaction actually produced. The
+ * before/after token and message counts are the point — a hook can now react to a
+ * compaction that removed far more than expected, or barely helped, which was
+ * invisible before.
+ *
+ * Only fires when a compaction actually replaced history. A skipped compaction
+ * (`compaction-skipped`) is not a compaction and does not emit this.
+ */
+export interface PostCompactData {
+	taskId: string;
+	ulid: string;
+	/** Message count entering compaction. */
+	contextSize: number;
+	/** Message count after compaction. */
+	contextSizeAfter: number;
+	/** `contextSize - contextSizeAfter`. */
+	messagesRemoved: number;
+	compactionStrategy: string;
+	/** `"auto"` when the threshold tripped, `"manual"` when the user asked. */
+	mode?: string;
+	iteration?: number;
+	tokensBefore?: number;
+	tokensAfter?: number;
+	tokensSaved?: number;
+	maxInputTokens?: number;
+	/** Wall-clock duration of the compaction itself. */
+	durationMs?: number;
+}
+
 const PreToolUseDataSchema = z.object({
 	toolName: z.string(),
 	parameters: StringMapSchema,
@@ -191,6 +225,22 @@ const PreCompactDataSchema = z.object({
 	deletedRangeEnd: z.number().optional(),
 	contextJsonPath: z.string().optional(),
 	contextRawPath: z.string().optional(),
+});
+
+const PostCompactDataSchema = z.object({
+	taskId: z.string(),
+	ulid: z.string(),
+	contextSize: z.number(),
+	contextSizeAfter: z.number(),
+	messagesRemoved: z.number(),
+	compactionStrategy: z.string(),
+	mode: z.string().optional(),
+	iteration: z.number().optional(),
+	tokensBefore: z.number().optional(),
+	tokensAfter: z.number().optional(),
+	tokensSaved: z.number().optional(),
+	maxInputTokens: z.number().optional(),
+	durationMs: z.number().optional(),
 });
 
 export interface HookEventPayloadBase {
@@ -279,6 +329,11 @@ export interface PreCompactHookPayload extends HookEventPayloadBase {
 	preCompact: PreCompactData;
 }
 
+export interface PostCompactHookPayload extends HookEventPayloadBase {
+	hookName: "post_compact";
+	postCompact: PostCompactData;
+}
+
 export interface SessionShutdownHookPayload extends HookEventPayloadBase {
 	hookName: "session_shutdown";
 	reason?: string;
@@ -292,6 +347,7 @@ export type HookEventPayload =
 	| AgentAbortHookPayload
 	| PromptSubmitHookPayload
 	| PreCompactHookPayload
+	| PostCompactHookPayload
 	| AgentEndHookPayload
 	| AgentErrorHookPayload
 	| SessionShutdownHookPayload;
@@ -339,6 +395,7 @@ export const HookEventPayloadSchema: z.ZodType<unknown> = z
 		taskCancel: TaskCancelDataSchema.optional(),
 		taskComplete: TaskCompleteDataSchema.optional(),
 		preCompact: PreCompactDataSchema.optional(),
+		postCompact: PostCompactDataSchema.optional(),
 	})
 	.passthrough();
 

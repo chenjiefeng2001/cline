@@ -24,6 +24,7 @@ export enum HookConfigFileName {
 	PostToolUse = "PostToolUse",
 	UserPromptSubmit = "UserPromptSubmit",
 	PreCompact = "PreCompact",
+	PostCompact = "PostCompact",
 	SessionShutdown = "SessionShutdown",
 }
 
@@ -39,6 +40,7 @@ export const HOOK_CONFIG_FILE_EVENT_MAP: Readonly<
 	[HookConfigFileName.PostToolUse]: "tool_result",
 	[HookConfigFileName.UserPromptSubmit]: "prompt_submit",
 	[HookConfigFileName.PreCompact]: "pre_compact",
+	[HookConfigFileName.PostCompact]: "post_compact",
 	[HookConfigFileName.SessionShutdown]: "session_shutdown",
 };
 

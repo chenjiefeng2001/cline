@@ -9,6 +9,7 @@ import type {
 	AgentTool,
 	ExtensionContext,
 	ITelemetryService,
+	PostCompactData,
 	PreCompactData,
 	RuntimeConfigExtensionKind,
 	ToolApprovalRequest,
@@ -34,6 +35,7 @@ import { createCheckpointHooks } from "../hooks/checkpoint-hooks";
 import {
 	createHookAuditHooks,
 	createHookConfigFileExtension,
+	createPostCompactHookEmitter,
 	createPreCompactHookEmitter,
 	mergeAgentHooks,
 } from "../hooks/hook-file-hooks";
@@ -264,6 +266,7 @@ export interface LocalRuntimeBootstrap {
 	 * exists. Consumed by the runtime host when building the compaction prepareTurn.
 	 */
 	preCompactHook?: (data: PreCompactData) => Promise<void>;
+	postCompactHook?: (data: PostCompactData) => Promise<void>;
 	toolPolicies: AgentConfig["toolPolicies"];
 	requestToolApproval?: (
 		request: ToolApprovalRequest,
@@ -354,6 +357,15 @@ export async function prepareLocalRuntimeBootstrap(
 	// AgentHooks dispatch point, so it is wired separately. Undefined when no
 	// PreCompact hook file exists.
 	const preCompactHook = createPreCompactHookEmitter({
+		cwd: input.config.cwd,
+		workspacePath,
+		rootSessionId: sessionId,
+		logger: localConfig?.logger,
+		workspaceInfo,
+	});
+	// Same wiring rationale as `pre_compact`: emitted from the context pipeline, not
+	// an AgentHooks dispatch point. Undefined when no PostCompact hook file exists.
+	const postCompactHook = createPostCompactHookEmitter({
 		cwd: input.config.cwd,
 		workspacePath,
 		rootSessionId: sessionId,
@@ -476,6 +488,7 @@ export async function prepareLocalRuntimeBootstrap(
 		extensions,
 		hooks,
 		preCompactHook,
+		postCompactHook,
 		toolPolicies,
 		requestToolApproval,
 		pluginSandboxShutdown: loadedPlugins?.shutdown,

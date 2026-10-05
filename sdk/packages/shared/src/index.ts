@@ -110,6 +110,7 @@ export type {
 	HookEventPayload,
 	HookEventPayloadBase,
 	PostToolUseData,
+	PostCompactData,
 	PreCompactData,
 	PreCompactHookPayload,
 	PreToolUseData,

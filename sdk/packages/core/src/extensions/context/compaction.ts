@@ -1,4 +1,4 @@
-import type { PreCompactData } from "@cline/shared";
+import type { PostCompactData, PreCompactData } from "@cline/shared";
 import { estimateRequestInputTokens } from "@cline/shared";
 import {
 	captureCompactionBudgetEmergency,
@@ -87,6 +87,21 @@ export interface ContextCompactionPrepareTurnOptions {
 	 * pays nothing.
 	 */
 	onPreCompact?: (data: PreCompactData) => void | Promise<void>;
+	/**
+	 * Emits the `post_compact` hook event once a compaction has actually replaced
+	 * history.
+	 *
+	 * The counterpart to `onPreCompact`: `pre_compact` reports the context about to
+	 * be dropped, this reports what the compaction produced. Without it the result
+	 * of a compaction was observable only through a runtime status notice and
+	 * telemetry — never through the hook surface a user writes against.
+	 *
+	 * Fires only when messages were replaced. A skipped compaction did not compact
+	 * anything and does not emit. Failures are swallowed for the same reason
+	 * `onPreCompact` swallows them: a broken hook must not be able to fail a turn
+	 * whose compaction already succeeded.
+	 */
+	onPostCompact?: (data: PostCompactData) => void | Promise<void>;
 }
 
 const LONG_CONVERSATION_TARGET_RATIO = 0.5;
@@ -513,6 +528,33 @@ export function createContextCompactionPrepareTurn(
 				modelId: config.modelId,
 				...telemetryIdentity,
 			});
+			// `post_compact` fires only here, inside `if (result?.messages)`, so it
+			// means "history was actually replaced". Firing it on the skipped path would
+			// make the event ambiguous between "compacted" and "decided not to".
+			if (options.onPostCompact) {
+				try {
+					await options.onPostCompact({
+						taskId: telemetryUlid,
+						ulid: telemetryUlid,
+						contextSize: beforeMessageCount,
+						contextSizeAfter: result.messages.length,
+						messagesRemoved: beforeMessageCount - result.messages.length,
+						compactionStrategy: telemetryStrategy,
+						mode,
+						iteration: context.iteration,
+						tokensBefore: requestInputTokens,
+						tokensAfter: afterRequestTokens,
+						tokensSaved: requestInputTokens - afterRequestTokens,
+						maxInputTokens,
+						durationMs,
+					});
+				} catch (error) {
+					config.logger?.error?.(
+						"post_compact hook failed; compaction already completed",
+						{ error },
+					);
+				}
+			}
 			if (
 				result.budget &&
 				(result.budget.actionCount > 0 || result.budget.warningCount > 0)
@@ -527,9 +569,9 @@ export function createContextCompactionPrepareTurn(
 					liveTailHandling: result.budget.liveTailHandling,
 					provider: config.providerId,
 					modelId: config.modelId,
-					...telemetryIdentity,
-				});
-				context.emitStatusNotice?.("compaction-budget-adjusted", {
+...telemetryIdentity,
+			});
+			context.emitStatusNotice?.("compaction-budget-adjusted", {
 					kind: "compaction_budget_emergency",
 					reason: "compaction_budget_emergency",
 					iteration: context.iteration,

@@ -13,6 +13,7 @@
 import {
 	type CoreSessionConfig,
 	createContextCompactionPrepareTurn,
+	createPostCompactHookEmitter,
 	createPreCompactHookEmitter,
 	createSessionCompactionState,
 	type SessionCompactionState,
@@ -87,10 +88,16 @@ export async function compactSessionMessages(input: CompactSessionMessagesInput)
 		},
 		{
 			mode: "manual",
-			// Auto compaction emits `pre_compact` from the runtime bootstrap, but a
-			// manual compaction runs here instead, so it needs its own emitter or
-			// user hooks would silently never fire on manual compactions.
+			// Auto compaction emits `pre_compact` / `post_compact` from the runtime
+			// bootstrap, but a manual compaction runs here instead, so it needs its own
+			// emitters or user hooks would silently never fire on manual compactions.
 			onPreCompact: createPreCompactHookEmitter({
+				cwd: input.cwd,
+				workspacePath: input.cwd,
+				rootSessionId: input.sessionId,
+				logger: input.config.logger,
+			}),
+			onPostCompact: createPostCompactHookEmitter({
 				cwd: input.cwd,
 				workspacePath: input.cwd,
 				rootSessionId: input.sessionId,

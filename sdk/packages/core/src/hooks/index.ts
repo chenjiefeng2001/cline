@@ -12,6 +12,7 @@ export {
 	createHookAuditHooks,
 	createHookConfigFileExtension,
 	createHookConfigFileHooks,
+	createPostCompactHookEmitter,
 	createPreCompactHookEmitter,
 	mergeAgentHooks,
 } from "./hook-file-hooks";

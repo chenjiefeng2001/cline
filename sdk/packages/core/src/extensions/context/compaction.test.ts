@@ -2,6 +2,7 @@ import type * as LlmsProviders from "@cline/llms";
 import {
 	estimateRequestInputTokens,
 	type MessageWithMetadata,
+	type PostCompactData,
 } from "@cline/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSessionCompactionState } from "../../session/models/session-compaction";
@@ -515,6 +516,109 @@ describe("createContextCompactionPrepareTurn", () => {
 		const compacted = runForcedBasicCompaction(messages, 1);
 
 		expect(compacted).toBe(messages);
+	});
+
+	/**
+	 * `pre_compact` shipped in exactly this broken state: the event name, the
+	 * payload schema and the documented hook file all existed, and nothing ever
+	 * emitted it. So `post_compact` is asserted end to end — emitted, carrying the
+	 * outcome, and quiet when nothing was compacted.
+	 */
+describe("post_compact hook", () => {
+			const buildPrepareTurn = (
+				onPostCompact: (data: PostCompactData) => void,
+				mode: "auto" | "manual" = "manual",
+			) =>
+				createContextCompactionPrepareTurn(
+					{
+						providerId: "openrouter",
+						modelId: "test-model",
+						providerConfig: {
+							providerId: "openrouter",
+							modelId: "test-model",
+						} as LlmsProviders.ProviderConfig,
+						compaction: { enabled: true, strategy: "basic" },
+						logger: undefined,
+					},
+					{ mode, onPostCompact },
+				);
+
+		const runWith = async (
+			prepareTurn: ReturnType<typeof createContextCompactionPrepareTurn>,
+			messages: LlmsProviders.Message[],
+		) =>
+			prepareTurn?.({
+				agentId: "agent-1",
+				conversationId: "conv-1",
+				parentAgentId: null,
+				iteration: 2,
+				abortSignal: new AbortController().signal,
+				systemPrompt: "You are helpful.",
+				tools: [],
+				messages,
+				apiMessages: messages,
+				model: {
+					id: "test-model",
+					provider: "openrouter",
+					info: {
+						id: "test-model",
+						maxInputTokens: 1_000,
+						maxTokens: 500,
+					},
+				},
+			});
+
+		const chattyHistory = (): LlmsProviders.Message[] => [
+			{ role: "user", content: "first task" },
+			{ role: "assistant", content: "old answer " + "x".repeat(8_000) },
+			{ role: "user", content: "second task" },
+			{ role: "assistant", content: "another old answer " + "y".repeat(8_000) },
+			{ role: "user", content: "keep me" },
+		];
+
+		it("fires with the compaction outcome", async () => {
+			const seen: PostCompactData[] = [];
+			const result = await runWith(
+				buildPrepareTurn((data) => seen.push(data)),
+				chattyHistory(),
+			);
+
+			expect(seen).toHaveLength(1);
+			expect(seen[0]).toMatchObject({
+				contextSize: 5,
+				mode: "manual",
+				iteration: 2,
+			});
+			// The point of the event: what compaction actually did.
+			expect(seen[0].contextSizeAfter).toBeLessThan(seen[0].contextSize);
+			expect(seen[0].messagesRemoved).toBe(
+				seen[0].contextSize - seen[0].contextSizeAfter,
+			);
+			expect(seen[0].tokensSaved).toBeGreaterThan(0);
+			expect(typeof seen[0].durationMs).toBe("number");
+		});
+
+		it("stays quiet when compaction was skipped", async () => {
+			const seen: PostCompactData[] = [];
+			// A single short message: nothing to compact, so nothing happened.
+			await runWith(buildPrepareTurn((data) => seen.push(data)), [
+				{ role: "user", content: "short" },
+			]);
+
+			expect(seen).toHaveLength(0);
+		});
+
+		it("does not fail the turn when the hook throws", async () => {
+			const result = await runWith(
+				buildPrepareTurn(() => {
+					throw new Error("hook exploded");
+				}),
+				chattyHistory(),
+			);
+
+			// Compaction already succeeded; a broken observer must not undo it.
+			expect(result).toBeDefined();
+		});
 	});
 
 	it("does not truncate a shallow first task prompt below the trigger for high-output models", async () => {

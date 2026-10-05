@@ -3,10 +3,12 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 const createContextCompactionPrepareTurn = vi.fn()
 const createSessionCompactionState = vi.fn((input: unknown) => ({ version: 1, input }))
 const createPreCompactHookEmitter = vi.fn()
+const createPostCompactHookEmitter = vi.fn()
 vi.mock("@cline/core", () => ({
 	createContextCompactionPrepareTurn: (...args: unknown[]) => createContextCompactionPrepareTurn(...args),
 	createSessionCompactionState: (input: unknown) => createSessionCompactionState(input),
 	createPreCompactHookEmitter: (...args: unknown[]) => createPreCompactHookEmitter(...args),
+	createPostCompactHookEmitter: (...args: unknown[]) => createPostCompactHookEmitter(...args),
 }))
 
 vi.mock("@/shared/services/Logger", () => ({
@@ -58,6 +60,33 @@ describe("compactSessionMessages", () => {
 		expect(createContextCompactionPrepareTurn).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.objectContaining({ onPreCompact }),
+		)
+	})
+
+	it("wires a post_compact emitter, so manual compaction reports its outcome", async () => {
+		// Same reason as the pre-compact emitter above: a manual compaction builds its
+		// own prepareTurn here, so without this the outcome hook would silently never
+		// fire for a user who pressed "compact" themselves.
+		const onPostCompact = vi.fn()
+		createPostCompactHookEmitter.mockReturnValueOnce(onPostCompact)
+
+		await compactSessionMessages({
+			config: baseConfig,
+			sessionId: "s1",
+			messages: [{ role: "user", content: "long" }],
+			cwd: "/tmp/workspace",
+		})
+
+		expect(createPostCompactHookEmitter).toHaveBeenCalledWith(
+			expect.objectContaining({
+				cwd: "/tmp/workspace",
+				workspacePath: "/tmp/workspace",
+				rootSessionId: "s1",
+			}),
+		)
+		expect(createContextCompactionPrepareTurn).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ onPostCompact }),
 		)
 	})
 

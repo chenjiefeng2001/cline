@@ -2488,6 +2488,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 			// Fires the `pre_compact` hook before any history is dropped. Undefined when
 			// the workspace has no PreCompact hook file.
 			onPreCompact: bootstrap.preCompactHook,
+		onPostCompact: bootstrap.postCompactHook,
 		});
 		const rawInitialCompactionState =
 			explicitInitialCompactionState ?? resumedCompactionState;
