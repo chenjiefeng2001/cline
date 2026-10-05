@@ -10,6 +10,17 @@ on:
             - main
     workflow_call:
 
+# Absent here until 2026-10-05, and the only workflow in this repo without it.
+# The cost was an orphaned run: a superseded push left the previous run's jobs
+# queued, they were cancelled with no step ever executed and no log artifact, and
+# because every downstream job was `skipped` the run had no failing job to point
+# at. The aggregate `test` gate then reported that as a red build hours later, and
+# it read as a test failure rather than as a workflow that never ran. Keyed per PR
+# so a new push to the PR supersedes cleanly, matching ext-vscode-test-e2e.yml.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
 # Set default permissions for all jobs
 permissions:
     contents: read # Needed to check out code
@@ -19,6 +30,15 @@ jobs:
     detect-changes:
         runs-on: ubuntu-latest
         name: Detect Changes
+        # Measured on the healthy runs: 3s on a push (a single `echo`, since `force`
+        # short-circuits checkout and paths-filter) and ~1 min on a pull request.
+        #
+        # Without a bound, the 2026-10-05 runs sat on this job for 15 minutes twice
+        # and were cancelled with `steps: []` and no log artifact at all - which is
+        # the worst possible failure shape: the job that gates everything else left
+        # no evidence of what it was doing. Failing fast instead leaves a log, and
+        # `concurrency` above is what actually stops the next push orphaning this one.
+        timeout-minutes: 5
         outputs:
             vscode: ${{ steps.force.outputs.run_all == 'true' || steps.filter.outputs.vscode == 'true' }}
             testing_platform: ${{ steps.force.outputs.run_all == 'true' || steps.filter.outputs.testing_platform == 'true' }}
@@ -399,6 +419,27 @@ jobs:
                   VSCODE_TEST_RESULT: ${{ needs.vscode-test.result }}
                   TEST_PLATFORM_RESULT: ${{ needs.test-platform-integration.result }}
               run: |
+                  # A cancelled job and a failed job are different claims, and this run is
+                  # the last place that can still tell them apart: by the time it reports,
+                  # a cancelled dependency has taken every downstream job with it and left
+                  # no failing job to point at. Without this, "did not succeed: cancelled"
+                  # exits 1 like any other failure - which is how a workflow that never ran
+                  # went on reading as a red build.
+                  #
+                  # Exit code stays non-zero on purpose. A cancelled run must not be green,
+                  # because green is the claim someone downstream will act on; the warning
+                  # annotation is what distinguishes it in the run list.
+                  note_cancelled() {
+                    if [ "$2" = "cancelled" ]; then
+                      echo "::warning::$1 was cancelled before it finished - not a test failure. Re-run the workflow."
+                    fi
+                  }
+
+                  note_cancelled detect-changes "$DETECT_CHANGES_RESULT"
+                  note_cancelled quality-checks "$QUALITY_CHECKS_RESULT"
+                  note_cancelled vscode-test "$VSCODE_TEST_RESULT"
+                  note_cancelled test-platform-integration "$TEST_PLATFORM_RESULT"
+
                   if [ "$DETECT_CHANGES_RESULT" != "success" ]; then
                     echo "detect-changes did not succeed: $DETECT_CHANGES_RESULT"
                     exit 1
