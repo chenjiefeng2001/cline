@@ -807,9 +807,7 @@ describe("buildSessionConfig", () => {
 	 * assert the whole path: setting -> session config.
 	 */
 	describe("sandbox settings", () => {
-		const withSandboxSettings = (
-			settings: Record<string, unknown>,
-		): (() => Promise<ReturnType<typeof buildSessionConfig>>) => {
+		const withSandboxSettings = (settings: Record<string, unknown>): (() => Promise<CoreSessionConfig>) => {
 			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
 				if (key in settings) {
 					return settings[key]
