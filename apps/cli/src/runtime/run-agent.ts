@@ -172,7 +172,7 @@ export async function runAgent(
 			toolExecutors,
 			requestToolApproval,
 		},
-		forceLocalBackend: isYoloMode || config.sandbox === true,
+		forceLocalBackend: isYoloMode || config.isolatedState === true,
 		logger: config.logger,
 		cwd: config.cwd,
 		workspaceRoot: config.workspaceRoot,

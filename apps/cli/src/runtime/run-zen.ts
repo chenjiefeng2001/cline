@@ -30,7 +30,7 @@ export async function runZen(
 	config: Config,
 	userInstructionService?: UserInstructionConfigService,
 ): Promise<void> {
-	if (config.sandbox) {
+	if (config.isolatedState) {
 		writeErr(
 			"--zen cannot be combined with --data-dir (sandbox requires a local backend).",
 		);

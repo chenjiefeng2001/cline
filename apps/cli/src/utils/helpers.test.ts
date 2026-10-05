@@ -46,7 +46,7 @@ describe("parseArgs", () => {
 			interactive: false,
 			outputMode: "text",
 			mode: "act",
-			sandbox: false,
+			isolatedState: false,
 			acpMode: false,
 			thinking: false,
 			reasoningEffort: undefined,
@@ -90,7 +90,7 @@ describe("parseArgs", () => {
 		expect(parsed.provider).toBe("openai");
 		expect(parsed.model).toBe("gpt-5");
 		expect(parsed.key).toBe("abc123");
-		expect(parsed.sandbox).toBe(false);
+		expect(parsed.isolatedState).toBe(false);
 	});
 
 	it("parses provider via -P shorthand", () => {
@@ -100,13 +100,13 @@ describe("parseArgs", () => {
 
 	it("enables sandbox automatically when --data-dir is set", () => {
 		const parsed = parseArgs(["--data-dir", "./.tmp-cline"]);
-		expect(parsed.sandbox).toBe(true);
+		expect(parsed.isolatedState).toBe(true);
 		expect(parsed.dataDir).toBe("./.tmp-cline");
 	});
 
 	it("does not enable sandbox when --data-dir is omitted", () => {
 		const parsed = parseArgs([]);
-		expect(parsed.sandbox).toBe(false);
+		expect(parsed.isolatedState).toBe(false);
 		expect(parsed.dataDir).toBeUndefined();
 	});
 

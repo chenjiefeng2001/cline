@@ -10,6 +10,7 @@
  * never silently downgrades to unsandboxed execution.
  */
 
+import { getDefaultShell, getShellArgs } from "@cline/shared"
 import type { ShellExecutor } from "../../extensions/tools/types";
 import type {
 	SandboxExecutionRequest,
@@ -21,7 +22,9 @@ export interface SandboxShellExecutorOptions {
 	/**
 	 * Shell for plain string commands under the sandbox (they carry shell
 	 * syntax; the sandbox wraps them as `<shell> -c <command>`).
-	 * Defaults to "sh".
+	 * Defaults to the platform shell, matching the unsandboxed executor — a
+	 * sandbox that quietly ran commands under `sh` would change semantics on any
+	 * machine whose shell is zsh or fish.
 	 */
 	shell?: string;
 }
@@ -29,11 +32,11 @@ export interface SandboxShellExecutorOptions {
 export function createSandboxShellExecutor(
 	options: SandboxShellExecutorOptions,
 ): ShellExecutor {
-	const shell = options.shell ?? "sh";
+	const shell = options.shell ?? getDefaultShell(process.platform);
 	return async (command, cwd) => {
 		const request: SandboxExecutionRequest =
 			typeof command === "string"
-				? { command: shell, args: ["-c", command], cwd }
+				? { command: shell, args: getShellArgs(shell, command), cwd }
 				: {
 						command: command.command,
 						args: command.args ?? [],

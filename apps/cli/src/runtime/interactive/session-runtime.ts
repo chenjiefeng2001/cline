@@ -153,7 +153,7 @@ export function createInteractiveSessionRuntime(input: {
 			// the shared daemon hub.
 			backendMode: "auto",
 			forceLocalBackend:
-				input.config.mode === "yolo" || input.config.sandbox === true,
+				input.config.mode === "yolo" || input.config.isolatedState === true,
 			capabilities: {
 				toolExecutors: {
 					askQuestion: (question, options) => {

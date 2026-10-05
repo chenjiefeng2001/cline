@@ -85,6 +85,14 @@ export function addRootOptions(cmd: Command): Command {
 				"Use isolated local state at this directory path (default: ~/.cline)",
 			)
 			.option(
+				"--sandbox",
+				"Run shell commands inside an OS process sandbox (macOS Seatbelt / Linux bubblewrap): writes confined to the workspace and network denied. Fails closed when no backend is available, and is unsupported on Windows",
+			)
+			.option(
+				"--sandbox-network",
+				"Let sandboxed shell commands reach the network (implies --sandbox; denied by default)",
+			)
+			.option(
 				"--hooks-dir <path>",
 				"Directory path to additional hooks for runtime hook injection (default: ~/.cline/hooks)",
 			)
@@ -148,7 +156,11 @@ export function commanderToParsedArgs(program: Command): ParsedArgs {
 		interactive: !!opts.tui,
 		outputMode: opts.json ? "json" : "text",
 		mode: opts.plan ? "plan" : opts.yolo ? "yolo" : opts.zen ? "zen" : "act",
-		sandbox: !!opts.dataDir,
+		isolatedState: !!opts.dataDir,
+		sandbox:
+			!!opts.sandbox || !!opts.sandboxNetwork
+				? { enabled: true, networkAccess: !!opts.sandboxNetwork }
+				: undefined,
 		acpMode: !!opts.acp,
 		thinking: false,
 		reasoningEffort: undefined,

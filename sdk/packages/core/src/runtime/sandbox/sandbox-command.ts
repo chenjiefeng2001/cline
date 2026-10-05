@@ -32,6 +32,16 @@ export interface ProcessSandboxCommandInput {
 	/** Workspace root that stays writable inside the sandbox. */
 	workspaceRoot: string;
 	backend: ProcessSandboxBackend;
+	/**
+	 * Whether sandboxed commands may reach the network. Defaults to `false`.
+	 *
+	 * This module draws a filesystem-write boundary, not an egress one, so leaving
+	 * this unset handed every sandboxed `curl` a working socket — a sandbox that
+	 * reads as isolation while quietly permitting exfiltration. Denying by default
+	 * matches Codex, where `workspace-write` keeps network off unless
+	 * `sandbox_workspace_write.network_access` is set.
+	 */
+	networkAccess?: boolean;
 	/** Platform override (tests); defaults to `process.platform`. */
 	platform?: NodeJS.Platform;
 }
@@ -41,12 +51,16 @@ export interface ProcessSandboxCommandInput {
  * file writes confined to the workspace root. The profile text is passed as
  * an argv element (never through a shell), so only the subpath needs quotes.
  */
-export function buildSeatbeltProfile(workspaceRoot: string): string {
+export function buildSeatbeltProfile(
+	workspaceRoot: string,
+	networkAccess = false,
+): string {
 	return [
 		"(version 1)",
 		"(allow default)",
 		"(deny file-write*)",
 		`(allow file-write* (subpath "${workspaceRoot}"))`,
+		...(networkAccess ? [] : ["(deny network*)"]),
 	].join(" ");
 }
 
@@ -62,12 +76,13 @@ export function buildProcessSandboxCommand(
 	if (platform === "win32") {
 		return undefined;
 	}
+	const networkAccess = input.networkAccess === true;
 	if (input.backend === "seatbelt") {
 		return {
 			command: "sandbox-exec",
 			args: [
 				"-p",
-				buildSeatbeltProfile(input.workspaceRoot),
+				buildSeatbeltProfile(input.workspaceRoot, networkAccess),
 				input.command,
 				...input.args,
 			],
@@ -90,6 +105,9 @@ export function buildProcessSandboxCommand(
 				"/dev",
 				"--proc",
 				"/proc",
+				// A fresh network namespace leaves only loopback, so egress has to be
+				// opted into rather than denied one socket at a time.
+				...(networkAccess ? [] : ["--unshare-net"]),
 				"--die-with-parent",
 				"--",
 				input.command,

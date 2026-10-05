@@ -535,7 +535,7 @@ export class AcpAgent implements Agent {
 			systemPrompt,
 			execution: undefined,
 			verbose: false,
-			sandbox: false,
+			isolatedState: false,
 			thinking: false,
 			outputMode: "text",
 			mode: session.currentMode,

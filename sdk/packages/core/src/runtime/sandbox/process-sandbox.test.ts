@@ -58,11 +58,46 @@ describe("buildProcessSandboxCommand", () => {
 			"/dev",
 			"--proc",
 			"/proc",
+			"--unshare-net",
 			"--die-with-parent",
 			"--",
 			"npm",
 			"install",
 		]);
+	});
+
+	it("unshares the network namespace by default on bubblewrap", () => {
+		// A sandbox that isolates writes but leaves a working socket is not an
+		// isolation boundary: `curl` inside it exfiltrates whatever the agent reads.
+		const wrapped = buildProcessSandboxCommand({
+			...base,
+			backend: "bubblewrap",
+			platform: "linux",
+		});
+		expect(wrapped?.args).toContain("--unshare-net");
+	});
+
+	it("omits --unshare-net when network access is explicitly enabled", () => {
+		const wrapped = buildProcessSandboxCommand({
+			...base,
+			backend: "bubblewrap",
+			platform: "linux",
+			networkAccess: true,
+		});
+		expect(wrapped?.args).not.toContain("--unshare-net");
+	});
+
+	it("denies network on seatbelt by default", () => {
+		const profile = buildSeatbeltProfile("/repo/a");
+		// Later rules win in Seatbelt, so the deny must follow `(allow default)`.
+		expect(profile).toContain("(deny network*)");
+		expect(profile.indexOf("(deny network*)")).toBeGreaterThan(
+			profile.indexOf("(allow default)"),
+		);
+	});
+
+	it("omits the seatbelt network deny when network access is enabled", () => {
+		expect(buildSeatbeltProfile("/repo/a", true)).not.toContain("(deny network*)");
 	});
 
 	it("returns undefined on win32 (fail-closed, no silent downgrade)", () => {

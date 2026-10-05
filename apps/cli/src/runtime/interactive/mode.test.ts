@@ -24,7 +24,7 @@ function makeConfig(): Config {
 		providerId: "cline",
 		modelId: "openai/gpt-5.3-codex",
 		verbose: false,
-		sandbox: false,
+		isolatedState: false,
 		thinking: false,
 		outputMode: "text",
 		mode: "act",

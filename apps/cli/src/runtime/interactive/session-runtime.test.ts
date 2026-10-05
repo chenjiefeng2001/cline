@@ -75,7 +75,7 @@ function createConfig(): Config {
 		verbose: false,
 		thinking: false,
 		outputMode: "text",
-		sandbox: false,
+		isolatedState: false,
 		defaultToolAutoApprove: true,
 		toolPolicies: {
 			"*": { autoApprove: true },

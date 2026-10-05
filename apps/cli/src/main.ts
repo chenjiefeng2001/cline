@@ -1129,8 +1129,12 @@ export async function runCli(): Promise<void> {
 			checkpoint: CLI_DEFAULT_CHECKPOINT_CONFIG,
 			compaction: buildCliCompactionConfig(args.compactionMode),
 			timeoutSeconds: args.timeoutSeconds,
-			sandbox: sandboxEnabled,
+			isolatedState: sandboxEnabled,
 			sandboxDataDir,
+			// Hand the parsed sandbox through to the session. Omitting this is the
+			// failure mode where a flag is declared, parsed, and then dropped before
+			// it reaches the thing it configures.
+			...(args.sandbox ? { sandbox: args.sandbox } : {}),
 			verbose: args.verbose,
 			thinking: resolvedReasoning.thinking,
 			reasoningEffort: resolvedReasoning.reasoningEffort,

@@ -50,7 +50,13 @@ import {
 	resolveDisabledToolNames,
 } from "../../services/global-settings";
 import { createLocalTeamStore } from "../../services/storage/team-store";
-import type { CoreAgentMode, CoreSessionConfig } from "../../types/config";
+import { ProcessSandboxRuntime } from "../sandbox/process-sandbox-runtime";
+import { createSandboxShellExecutor } from "../sandbox/sandbox-shell-executor";
+import type {
+	CoreAgentMode,
+	CoreSandboxConfig,
+	CoreSessionConfig,
+} from "../../types/config";
 import type {
 	RuntimeBuilder,
 	RuntimeBuilderInput,
@@ -164,6 +170,7 @@ function createBuiltinToolsList(
 	skillsExecutor?: SkillsExecutorWithMetadata,
 	executorOverrides?: Partial<ToolExecutors>,
 	fileBoundary?: FileBoundary,
+	sandbox?: CoreSandboxConfig,
 ): AgentTool[] {
 	const preset = ToolPresets[resolveToolPresetName({ mode })];
 	const toolRoutingConfig = resolveToolRoutingConfig(
@@ -172,6 +179,20 @@ function createBuiltinToolsList(
 		mode,
 		toolRoutingRules ?? DEFAULT_MODEL_TOOL_ROUTING_RULES,
 	);
+	// The sandbox replaces the shell executor wholesale rather than adding an
+	// option to it: the isolation has to wrap the process, which is the only
+	// layer that also covers what the command spawns. Applied last so it wins
+	// over any host-supplied bash override — a host that asked for sandboxing
+	// must not silently get an unsandboxed shell back from an override.
+	const sandboxExecutor = sandbox?.enabled
+		? createSandboxShellExecutor({
+				sandbox: new ProcessSandboxRuntime({
+					workspaceRoot: sandbox.workspaceRoot ?? cwd,
+					networkAccess: sandbox.networkAccess,
+					backend: sandbox.backend,
+				}),
+			})
+		: undefined;
 
 	return filterAvailableTools(
 		createBuiltinTools({
@@ -204,6 +225,7 @@ function createBuiltinToolsList(
 						}
 					: {}),
 				...(executorOverrides ?? {}),
+				...(sandboxExecutor ? { bash: sandboxExecutor } : {}),
 			},
 		}),
 		toolPolicies,
@@ -706,6 +728,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 					undefined,
 					toolExecutors,
 					fileBoundary,
+					config.sandbox,
 				),
 			);
 			if (!normalized.disableMcpSettingsTools) {
@@ -791,6 +814,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 													: undefined,
 												toolExecutors,
 												fileBoundary,
+												config.sandbox,
 											),
 											agent,
 										)
@@ -898,6 +922,7 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 									undefined,
 									toolExecutors,
 									fileBoundary,
+									config.sandbox,
 								)
 						: undefined,
 					teammateConfigProvider: delegatedAgentConfigProvider,

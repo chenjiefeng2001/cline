@@ -154,6 +154,36 @@ export interface CoreRuntimeFeatures {
 
 export type CoreCompactionMode = "auto" | "manual";
 
+/**
+ * OS-level process isolation for shell commands [P1-2].
+ *
+ * Distinct from `fileBoundary`, which is a path check inside the file tools.
+ * This wraps the command in a platform sandbox (macOS Seatbelt / Linux
+ * bubblewrap) so the *process* is confined, which also covers whatever the
+ * command does indirectly — a `curl` in a script, a subprocess, a tool the
+ * agent did not know about.
+ *
+ * Defaults to disabled. The runtime is fail-closed, so enabling this without a
+ * backend present fails every shell command rather than degrading quietly;
+ * that makes opt-in the only responsible default, and it keeps Windows (no
+ * backend) working.
+ */
+export interface CoreSandboxConfig {
+	/** Turn on process isolation for shell commands. Default `false`. */
+	enabled?: boolean;
+	/** Writable root inside the sandbox. Defaults to the session cwd. */
+	workspaceRoot?: string;
+	/**
+	 * Allow sandboxed commands to reach the network. Default `false`.
+	 *
+	 * Seatbelt denies `network*` and bubblewrap unshares the network namespace.
+	 * Note this also removes loopback reachability for the sandboxed process.
+	 */
+	networkAccess?: boolean;
+	/** Explicit backend; defaults to the platform default. */
+	backend?: "seatbelt" | "bubblewrap";
+}
+
 export interface CoreCompactionBudget {
 	request: {
 		/** Estimated tokens for the full provider request. */
@@ -368,6 +398,13 @@ export interface CoreSessionConfig
 	 * multi-root workspace legitimately spans several directories.
 	 */
 	fileBoundary?: FileBoundaryConfig;
+	/**
+	 * OS-level process isolation for shell commands. See {@link CoreSandboxConfig}.
+	 *
+	 * Omitted or disabled means shell commands run unsandboxed, which is the
+	 * historical behaviour for every host.
+	 */
+	sandbox?: CoreSandboxConfig;
 	memory?: MemoryConfig;
 	webSearch?: WebSearchConfig;
 

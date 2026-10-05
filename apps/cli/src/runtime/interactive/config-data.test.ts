@@ -31,7 +31,7 @@ function createConfig(cwd: string): Config {
 		providerId: "test-provider",
 		mode: "act",
 		verbose: false,
-		sandbox: false,
+		isolatedState: false,
 		thinking: false,
 		outputMode: "text",
 		defaultToolAutoApprove: false,

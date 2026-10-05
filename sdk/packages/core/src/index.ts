@@ -1092,6 +1092,7 @@ export type {
 	CoreCompactionSummarizerConfig,
 	CoreModelConfig,
 	CoreRuntimeFeatures,
+	CoreSandboxConfig,
 	CoreSessionConfig,
 } from "./types/config";
 export type {

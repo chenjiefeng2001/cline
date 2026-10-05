@@ -1,5 +1,6 @@
 import type {
 	AgentMode,
+	CoreSandboxConfig,
 	CoreSessionConfig,
 	Llms,
 	ProviderSettings,
@@ -23,7 +24,13 @@ export interface Config extends Omit<CoreSessionConfig, "apiKey" | "mode"> {
 	loggerConfig?: RuntimeLoggerConfig;
 	verbose: boolean;
 	timeoutSeconds?: number;
-	sandbox: boolean;
+	/**
+	 * --data-dir state isolation: keep this run's files in a separate data
+	 * directory. Named for what it does rather than sandbox, which now means
+	 * OS-level process isolation and is a different mechanism entirely. The old
+	 * name is why the two were once mistaken for each other.
+	 */
+	isolatedState: boolean;
 	sandboxDataDir?: string;
 	thinking?: boolean;
 	outputMode: CliOutputMode;
@@ -92,8 +99,10 @@ export interface ParsedArgs {
 	compactionMode?: CliCompactionMode;
 	invalidCompactionMode?: string;
 	invalidAutoApprove?: string;
-	sandbox: boolean;
+	isolatedState: boolean;
 	dataDir?: string;
+	/** OS process isolation for shell commands; unset means unsandboxed. */
+	sandbox?: CoreSandboxConfig;
 	configDir?: string;
 	hooksDir?: string;
 	worktree?: boolean;

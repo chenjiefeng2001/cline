@@ -31,6 +31,12 @@ export interface ProcessSandboxRuntimeOptions {
 	backend?: ProcessSandboxBackend;
 	/** Workspace root that stays writable inside the sandbox. */
 	workspaceRoot: string;
+	/**
+	 * Whether sandboxed commands may reach the network. Defaults to `false`.
+	 * Forwarded to the command builder, which denies `network*` on Seatbelt and
+	 * unshares the network namespace on bubblewrap.
+	 */
+	networkAccess?: boolean;
 	/** PATH override for detection (tests). */
 	pathEnv?: string;
 	/** Platform override for detection (tests). */
@@ -47,6 +53,7 @@ function appendCapped(target: string, chunk: string): string {
 export class ProcessSandboxRuntime implements SandboxRuntime {
 	readonly backend: ProcessSandboxBackend;
 	private readonly workspaceRoot: string;
+	private readonly networkAccess?: boolean;
 	private readonly pathEnv?: string;
 	private readonly platformOverride?: NodeJS.Platform;
 
@@ -55,6 +62,7 @@ export class ProcessSandboxRuntime implements SandboxRuntime {
 		this.backend =
 			options.backend ?? defaultProcessSandboxBackend(platform) ?? "seatbelt";
 		this.workspaceRoot = options.workspaceRoot;
+		this.networkAccess = options.networkAccess;
 		this.pathEnv = options.pathEnv;
 		this.platformOverride = options.platform;
 	}
@@ -85,6 +93,7 @@ export class ProcessSandboxRuntime implements SandboxRuntime {
 			command: request.command,
 			args: request.args,
 			workspaceRoot: this.workspaceRoot,
+			networkAccess: this.networkAccess,
 			backend: this.backend,
 		});
 		if (!sandboxed) {
