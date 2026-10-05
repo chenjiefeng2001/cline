@@ -24,6 +24,7 @@ import { PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import {
 	type AgentEvent,
 	type ClineCore,
+	detectProcessSandbox,
 	Llms,
 	ProviderSettingsManager,
 	SessionSource,
@@ -63,6 +64,14 @@ interface SessionState {
 	currentProviderId: string;
 	/** Current model id for the session. */
 	currentModelId: string;
+	/**
+	 * Whether shell commands run inside an OS process sandbox. Off by default,
+	 * matching every other host: the runtime is fail-closed, so enabling this where
+	 * no backend exists fails shell commands rather than degrading quietly.
+	 */
+	sandboxEnabled: boolean;
+	/** Whether sandboxed commands may reach the network. */
+	sandboxNetworkAccess: boolean;
 	/** Active session manager for the running agent, if any. */
 	sessionManager?: ClineCore;
 	/** Internal session id within the session manager. */
@@ -73,6 +82,17 @@ interface SessionState {
 	unsubscribe?: () => void;
 	/** Messages to inject into the next session manager for conversation continuity. */
 	pendingInitialMessages?: Message[];
+}
+
+/**
+ * Whether a session starts sandboxed when the client does not say otherwise.
+ *
+ * Env-only, mirroring how ACP takes `CLINE_PROVIDER` / `CLINE_MODEL`: there is no
+ * flag parser in this entry point, so an editor-launched agent cannot be given one.
+ */
+function isAcpSandboxEnabledFromEnv(): boolean {
+	const raw = process.env.CLINE_SANDBOX?.trim().toLowerCase();
+	return raw === "1" || raw === "true";
 }
 
 export class AcpAgent implements Agent {
@@ -141,6 +161,11 @@ export class AcpAgent implements Agent {
 			currentMode: defaultMode,
 			currentProviderId: providerId,
 			currentModelId: defaultModelId,
+			// Env-only initial value, mirroring how ACP handles provider and model:
+			// there is no flag parser here, so an editor-launched agent cannot be given
+			// a flag. The session can still turn it on through the config option below.
+			sandboxEnabled: isAcpSandboxEnabledFromEnv(),
+			sandboxNetworkAccess: process.env.CLINE_SANDBOX_NETWORK === "1",
 		});
 
 		const providerModels = await Llms.getModelsForProvider(providerId);
@@ -178,6 +203,9 @@ export class AcpAgent implements Agent {
 				await buildProviderConfigOption(providerId),
 				buildModelConfigOption(defaultModelId, providerModels),
 				buildModeConfigOption(defaultMode),
+				// Advertised on creation, not only after a change: an IDE client needs to
+				// know the sandbox is reachable before the user goes looking for it.
+				buildSandboxConfigOption(this.sessions.get(sessionId) as SessionState),
 			],
 		};
 	}
@@ -368,6 +396,23 @@ export class AcpAgent implements Agent {
 				break;
 			}
 
+			case "sandbox": {
+				// One select covering both dimensions, rather than two toggles: the
+				// network question is meaningless without the sandbox, and an editor
+				// client offering the pair separately invites "allow network" with no
+				// sandbox to allow it in.
+				session.sandboxEnabled = value === "on";
+				session.sandboxNetworkAccess = value === "on-with-network";
+				if (!session.sandboxEnabled) {
+					session.sandboxNetworkAccess = false;
+				}
+				// The running session holds its own sandbox configuration, so a change
+				// only reaches the agent on the next session. Tearing the manager down
+				// would discard the conversation, which is worse than the staleness —
+				// so this is surfaced in the option's description instead.
+				break;
+			}
+
 			default:
 				throw RequestError.invalidParams(
 					undefined,
@@ -552,6 +597,18 @@ export class AcpAgent implements Agent {
 			// Deliberately not touching `maxParallelToolCalls`: ACP's serial
 			// execution is its own semantics, decided separately.
 			...resolveRunGuards(readRunGuardEnv()),
+			// The sandbox reaches ACP through the session config option, which an editor
+			// client can set; this env var only seeds the initial value. Previously ACP
+			// hardcoded `sandbox: false` with no way to change it, so it was the one
+			// entry point that could not be isolated at all.
+			...(session.sandboxEnabled
+				? {
+						sandbox: {
+							enabled: true,
+							networkAccess: session.sandboxNetworkAccess,
+						},
+					}
+				: {}),
 			enableSpawnAgent: true,
 			enableAgentTeams: false,
 			enableTools: true,
@@ -653,7 +710,57 @@ async function buildAllConfigOptions(
 		providerOption,
 		buildModelConfigOption(session.currentModelId, providerModels),
 		buildModeConfigOption(session.currentMode),
+		buildSandboxConfigOption(session),
 	];
+}
+
+/**
+ * The sandbox's availability, reported rather than assumed.
+ *
+ * Advertised in the option's description because enabling the sandbox on a platform
+ * without a backend fails every shell command: the runtime is fail-closed by design,
+ * so an IDE client needs to be able to say why the option will not work rather than
+ * discovering it by watching commands fail.
+ */
+function sandboxAvailabilityNote(): string {
+	const detection = detectProcessSandbox();
+	return detection.available
+		? ""
+		: ` Not available here: ${detection.reason ?? "no process sandbox"}. Commands will fail rather than run unsandboxed.`;
+}
+
+function buildSandboxConfigOption(session: SessionState): SessionConfigOption {
+	const current = session.sandboxEnabled
+		? session.sandboxNetworkAccess
+			? "on-with-network"
+			: "on"
+		: "off";
+	return {
+		type: "select",
+		id: "sandbox",
+		name: "Shell Sandbox",
+		description: `Run shell commands inside an OS process sandbox (macOS Seatbelt / Linux bubblewrap): writes confined to the workspace, network denied.${sandboxAvailabilityNote()} Takes effect on the next session.`,
+		category: "mode",
+		currentValue: current,
+		options: [
+			{
+				value: "off",
+				name: "Off",
+				description: "Shell commands run unsandboxed",
+			},
+			{
+				value: "on",
+				name: "On",
+				description: "Confine writes to the workspace and deny network",
+			},
+			{
+				value: "on-with-network",
+				name: "On (allow network)",
+				description:
+					"Confine writes to the workspace but let commands reach the network",
+			},
+		],
+	};
 }
 
 function extractTextFromContentBlocks(blocks: ContentBlock[]): string {
@@ -685,6 +792,11 @@ export function mapFinishReason(reason: string): StopReason {
 			// mapping a non-token limit (max_iterations) to the nearest limit reason.
 			// The exact figure arrives separately as a `status-notice`
 			// ("Run budget exhausted: …"), so no information is lost.
+			return "max_tokens";
+		case "tool_calls_exhausted":
+			// Same reasoning as budget_exhausted: the protocol has no tool-call stop
+			// reason, and reporting a capped run as `end_turn` would present a
+			// truncated transcript as a completed one.
 			return "max_tokens";
 		case "mistake_limit":
 			return "end_turn";
