@@ -239,3 +239,50 @@ Claude Code 侧为 **27 个事件** `[竞品-逆向]`，含 `PostCompact`、`Sub
 ---
 
 *生成于 2026-10-05，基线 `60e5adf1e`。§1、§2、§3、§5 中所有 `[实测]` 结论可按 `file:line` 直接复核。*
+---
+
+## 7. 落地状态（2026-10-05 收尾）
+
+§4 的 P0/P1/P2 逐项交代去向。判定标准沿用 §5.3：做不到的写做不到，不写成"已完成"。
+
+### 已落地
+
+| # | 事项 | 提交 | 落点 |
+|---|---|---|---|
+| S1 | OS 沙箱接线 | `54989e3eb` / `73e42ef64` / `55b0a0377` | `sandbox` 进入 `CoreSessionConfig`，runtime builder 替换 shell 执行器；CLI `--sandbox`、VS Code 三项设置、ACP 会话配置项 |
+| S2 | 网络隔离 | `54989e3eb` | Seatbelt 追加 `(deny network*)`，bubblewrap 追加 `--unshare-net`，默认拒绝、`networkAccess` 可放开 |
+| S3 | 嵌套深度限制 | `4c824274b` | `maxSubAgentDepth` 默认 1，与 Codex `agents.max_depth` 一致；到限时收回工具而非报错 |
+| S7 | `post_compact` 钩子 | `27a520f75` | 携带前后消息数/token 数/耗时；只在历史真被替换时触发 |
+| S8 | 工具调用数上限 | `a23e82d7a` | `maxToolCalls`，按调用计数（并行批次逐个计），拒绝时显式返回错误结果 |
+
+S2 原本被记为独立项，实际藏在 S1 里：既有 profile 只画了文件系统写入边界，
+Seatbelt 是 `(allow default)` + 拒写入，bubblewrap 分支没有 `--unshare-net`，
+即"允许外泄的沙箱不是隔离边界"。
+
+### 未做，及具体原因
+
+| # | 事项 | 原因 |
+|---|---|---|
+| S4 | 延迟工具加载 | `beforeModel` 能覆盖 `tools` 只是**接口就绪**，不是机制。真正实现需要工具描述索引、检索、以及模型误选时的退化路径；半套只会让模型看不见工具 |
+| S5 | `spawn_agent` 后台化 | teammate 有 `startTeammateRun` + `team_await_runs` 作为回传通道，**sub-agent 没有**。无通道的"后台化"是 fire-and-forget：结果无人可读、token 隐形泄漏，比阻塞更糟 |
+| S6 | LSP 工具 | 依赖外部 language server，工作量与"加一个工具"不同量级，且降级路径必须先想清楚 |
+| S9 | AI 审批复核 | 需要复核 agent + 策略文件 + 熔断，是对权限体系的扩展而非新增一项 |
+| S10 | teams 默认策略 | 产品决策：18 个工具默认开/关的两头不讨好，取舍应由用户定 |
+| S11 | worktree 隔离 | 中等工作量，且与 checkpoint 语义有交互，需单独设计 |
+| S12 | 可复现裸模式 | `--bare` 需要在 shared 里给 7 处搜索路径解析器（skills/rules/workflows/hooks/agents/plugins/MCP）各加"裸模式"变体。只加 flag 不改行为 = 本报告 §5.3 批评的"声明了但是死的" |
+| — | Codex 目的地规则（`network_proxy` 级） | S2 做的是 OS 级全开全关。细粒度目的地控制需要代理层或每后端钩子，与 S2 不同量级 |
+
+### 本轮新增的实测发现
+
+- **`UpdateSettingsRequest` 是 `Settings` 的手工维护副本**，两者会**静默漂移**：
+  在 `Settings` 加字段而不加到前者，编译期无警告，只有 webview 写该设置时才报错。
+  已在字段旁留注释。
+- **`ExtensionState`（`ExtensionMessage.ts`）是手写的**，不是生成的；
+  settings proto 更新不会自动带上它。
+- **VS Code 的 vitest 把 `@cline/core` 别名到手工桩**（`src/test/cline-core-vitest-stub.ts`），
+  新增导出必须同步加进桩，否则测试报 `is not a function`。
+- **`resolveWithSingleFlight` 会把强制刷新降级**（已修）：去重键只看 provider，
+  401 触发的强制刷新可能复用飞行中的非强制解析，拿回刚被拒绝的凭据。
+- **`spawn_agent` 的工具集递归包含自身**，全仓无 `maxDepth` 守卫（已修）。
+- **网关在构造时固化 apiKey**，每回合只构造一次 model，因此
+  `updateConnection({apiKey})` 与"同一 runtime 上重跑"都用不到刷新后的凭据（已修）。
