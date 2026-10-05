@@ -459,6 +459,23 @@
 					"type": "string",
 					"description": "Extra directories the file tools may touch, in addition to the workspace. Accepts a JSON array or a newline/comma separated list."
 				},
+				"cline.sandboxEnabled": {
+					"type": "boolean",
+					"description": "Run shell commands inside an OS process sandbox (macOS Seatbelt / Linux bubblewrap): writes are confined to the workspace and network access is denied. Different from the file-tool boundary above, which only checks paths inside the file tools. Requires macOS or Linux; on Windows, or where the sandbox binary is missing, shell commands will fail rather than run unsandboxed."
+				},
+				"cline.sandboxNetworkAccess": {
+					"type": "boolean",
+					"description": "Let sandboxed shell commands reach the network. Off by default. Note this also removes loopback access for sandboxed processes."
+				},
+				"cline.sandboxBackend": {
+					"type": "string",
+					"enum": [
+						"",
+						"seatbelt",
+						"bubblewrap"
+					],
+					"description": "Force a specific process sandbox instead of the platform default (Seatbelt on macOS, bubblewrap on Linux)."
+				},
 				"cline.agentTeamsEnabled": {
 					"type": "boolean",
 					"description": "Enable the multi-agent team tool surface. This changes the model's tool set substantially, so it is separate from cline.subagentsEnabled."

@@ -345,6 +345,35 @@ export class ProviderSettingsManager {
 
 const WORKOS_TOKEN_PREFIX = "workos:"
 
+export type ProcessSandboxDetectOptions = {
+	backend?: "seatbelt" | "bubblewrap"
+	platform?: NodeJS.Platform
+	pathEnv?: string
+}
+
+/**
+ * Stand-in for the SDK's real detection. Reports availability from the injected
+ * options rather than touching the filesystem, so a test never depends on whether
+ * the machine running it happens to have `bwrap` or `sandbox-exec` installed —
+ * which would make sandbox tests pass or fail by environment.
+ */
+export function detectProcessSandbox(options: ProcessSandboxDetectOptions = {}): {
+	available: boolean
+	backend?: "seatbelt" | "bubblewrap"
+	binaryPath?: string
+	reason?: string
+} {
+	const platform = options.platform ?? process.platform
+	const backend = options.backend ?? (platform === "darwin" ? "seatbelt" : platform === "linux" ? "bubblewrap" : undefined)
+	if (!backend) {
+		return {
+			available: false,
+			reason: `process sandbox requires macOS (Seatbelt) or Linux (bubblewrap); ${platform} is unsupported`,
+		}
+	}
+	return { available: true, backend, binaryPath: `/stub/${backend}` }
+}
+
 export function getProviderAuthStorageId(providerId: string): string | undefined {
 	const normalized = providerId.trim().toLowerCase()
 	if (normalized === "cline" || normalized === "cline-pass") {

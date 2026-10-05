@@ -10,7 +10,9 @@
 
 import {
 	type ClineCoreStartInput,
+	type CoreSandboxConfig,
 	type CoreSessionConfig,
+	detectProcessSandbox,
 	getProviderAuthHandler,
 	type ProviderSettings,
 	readCompactionStrategyGlobally,
@@ -892,6 +894,33 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	const fileBoundaryAdditionalRoots = readStringArray(stateManager.getGlobalSettingsKey("fileBoundaryAdditionalRoots"))
 	const fileBoundary = fileBoundaryEnabled ? { additionalRoots: fileBoundaryAdditionalRoots } : undefined
 
+	// OS process sandbox for shell commands. Independent of the file boundary above:
+	// the boundary guards the file tools, this confines the whole process, so it also
+	// covers what a command spawns. Left undefined unless enabled, which is what
+	// keeps every shell command unsandboxed exactly as before.
+	//
+	// The backend is resolved eagerly so a platform with no sandbox (Windows) or a
+	// machine without the binary is reported as unavailable instead of failing every
+	// command later. `detectProcessSandbox` reads PATH, so this is cheap and local.
+	const sandboxRequested = stateManager.getGlobalSettingsKey("sandboxEnabled") ?? false
+	let sandbox: CoreSandboxConfig | undefined
+	if (sandboxRequested) {
+		const backendOverride = stateManager.getGlobalSettingsKey("sandboxBackend")?.trim()
+		const detection = detectProcessSandbox({
+			backend: backendOverride === "seatbelt" || backendOverride === "bubblewrap" ? backendOverride : undefined,
+		})
+		if (!detection.available) {
+			Logger.warn(
+				`[SessionFactory] Sandbox requested but unavailable: ${detection.reason ?? "unknown reason"}. Shell commands will fail rather than run unsandboxed.`,
+			)
+		}
+		sandbox = {
+			enabled: true,
+			networkAccess: stateManager.getGlobalSettingsKey("sandboxNetworkAccess") ?? false,
+			...(backendOverride === "seatbelt" || backendOverride === "bubblewrap" ? { backend: backendOverride } : {}),
+		}
+	}
+
 	// Cross-session memory. Three switches, because the two write paths carry
 	// different risk: recall only reads, while `remember` and automatic capture both
 	// retain data past the conversation. All default off, so nothing is persisted
@@ -1027,6 +1056,7 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		// Resolved by the SDK to workspaceRoot ?? cwd, with these as the extra
 		// permitted roots. Undefined leaves the tools unconstrained.
 		...(fileBoundary ? { fileBoundary } : {}),
+		...(sandbox ? { sandbox } : {}),
 		...(memory ? { memory } : {}),
 		...(webSearch ? { webSearch } : {}),
 		checkpoint: {

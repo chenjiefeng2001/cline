@@ -250,6 +250,8 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		runBudgetMaxTotalCost,
 		fileBoundaryEnabled,
 		fileBoundaryAdditionalRoots,
+		sandboxEnabled,
+		sandboxNetworkAccess,
 		agentTeamsEnabled,
 		memoryEnabled,
 		memoryRecallEnabled,
@@ -408,6 +410,34 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 										placeholder="/path/to/one, /path/to/two"
 									/>
 								</div>
+							</div>
+						</div>
+					</div>
+
+					{/* OS process sandbox */}
+					<div>
+						<div className="text-xs font-medium text-foreground/80 uppercase tracking-wider mb-3">Shell</div>
+						<div
+							className="relative p-3 pt-0 my-3 rounded-md border border-editor-widget-border/50"
+							id="process-sandbox">
+							<div className="space-y-2 py-3">
+								<FeatureRow
+									checked={sandboxEnabled ?? false}
+									description="Runs shell commands inside an OS process sandbox (macOS Seatbelt / Linux bubblewrap), confining writes to the workspace. Complements the file boundary above, which only checks paths inside the file tools. Requires macOS or Linux — on Windows, or where the sandbox binary is missing, shell commands will fail rather than run unsandboxed."
+									label="Sandbox Shell Commands"
+									onChange={(checked) => updateSetting("sandboxEnabled", checked)}
+								/>
+								{/* Nested: meaningless without the sandbox itself. */}
+								{sandboxEnabled && (
+									<div className="pl-6 space-y-2">
+										<FeatureRow
+											checked={sandboxNetworkAccess ?? false}
+											description="Lets sandboxed shell commands reach the network. Off by default. This also removes loopback access for sandboxed processes."
+											label="Allow Network In Sandbox"
+											onChange={(checked) => updateSetting("sandboxNetworkAccess", checked)}
+										/>
+									</div>
+								)}
 							</div>
 						</div>
 					</div>

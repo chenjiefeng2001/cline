@@ -50,6 +50,12 @@ export const SETTINGS_SCHEMA_MAP: Record<string, string> = {
 	runBudgetMaxTotalCost: "runBudgetMaxTotalCost",
 	fileBoundaryEnabled: "fileBoundaryEnabled",
 	fileBoundaryAdditionalRoots: "fileBoundaryAdditionalRoots",
+	// OS process isolation. Mapped here so the VS Code settings UI can write it; the
+	// parity test below is what stops it from being a declared-but-dead setting,
+	// which is how the sandbox was unreachable from this host in the first place.
+	sandboxEnabled: "sandboxEnabled",
+	sandboxNetworkAccess: "sandboxNetworkAccess",
+	sandboxBackend: "sandboxBackend",
 	agentTeamsEnabled: "agentTeamsEnabled",
 	// Memory is split into switches because the write paths retain data outside
 	// the conversation and should be opted into deliberately.

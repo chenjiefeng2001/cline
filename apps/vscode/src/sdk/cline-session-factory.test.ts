@@ -801,6 +801,74 @@ describe("buildSessionConfig", () => {
 		}
 	})
 
+	/**
+	 * The OS sandbox existed in the SDK with no caller in this host, so a settings
+	 * toggle that never reached the session config would have looked complete. These
+	 * assert the whole path: setting -> session config.
+	 */
+	describe("sandbox settings", () => {
+		const withSandboxSettings = (
+			settings: Record<string, unknown>,
+		): (() => Promise<ReturnType<typeof buildSessionConfig>>) => {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key in settings) {
+					return settings[key]
+				}
+				if (key === "subagentsEnabled" || key === "useAutoCondense") {
+					return false
+				}
+				return undefined
+			})
+			return () => buildSessionConfig({ cwd: "/tmp/workspace" })
+		}
+
+		it("leaves the sandbox unset by default", async () => {
+			const build = withSandboxSettings({})
+			expect((await build()).sandbox).toBeUndefined()
+		})
+
+		it("passes the sandbox through with network denied by default", async () => {
+			const build = withSandboxSettings({ sandboxEnabled: true })
+			expect((await build()).sandbox).toMatchObject({
+				enabled: true,
+				networkAccess: false,
+			})
+		})
+
+		it("forwards the network opt-in", async () => {
+			const build = withSandboxSettings({
+				sandboxEnabled: true,
+				sandboxNetworkAccess: true,
+			})
+			expect((await build()).sandbox).toMatchObject({ networkAccess: true })
+		})
+
+		it("forwards a recognised backend and ignores a bogus one", async () => {
+			const good = withSandboxSettings({
+				sandboxEnabled: true,
+				sandboxBackend: "bubblewrap",
+			})
+			expect((await good()).sandbox).toMatchObject({
+				backend: "bubblewrap",
+			})
+
+			const bogus = withSandboxSettings({
+				sandboxEnabled: true,
+				sandboxBackend: "not-a-backend",
+			})
+			// Platform default rather than passing junk through to the runtime.
+			expect((await bogus()).sandbox?.backend).toBeUndefined()
+		})
+
+		it("stays unset when the toggle is explicitly off", async () => {
+			const build = withSandboxSettings({
+				sandboxEnabled: false,
+				sandboxNetworkAccess: true,
+			})
+			expect((await build()).sandbox).toBeUndefined()
+		})
+	})
+
 	it("defaults maxParallelToolCalls to 6 and honors the override", async () => {
 		// Tool concurrency is opt-in per tool (`concurrency: "safe"`), so this
 		// setting is a ceiling on safe batches, not a switch for all tools.

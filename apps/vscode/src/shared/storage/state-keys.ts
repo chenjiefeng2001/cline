@@ -342,6 +342,24 @@ const USER_SETTINGS_FIELDS = {
 	// would silently round-trip as a joined string. Accepts either a JSON array or a
 	// newline/comma separated list; see readStringArray in cline-session-factory.
 	fileBoundaryAdditionalRoots: { default: "" as string },
+	// OS-level process isolation for shell commands (macOS Seatbelt / Linux
+	// bubblewrap). Distinct from the file boundary above, which is a path check
+	// inside the file tools; this confines the process, so it also covers what the
+	// command spawns.
+	//
+	// Default off, and not a judgement about safety: the runtime is fail-closed, so
+	// turning this on where no backend is present fails every shell command instead
+	// of degrading quietly. Windows has no backend at all. Opt-in keeps a default
+	// install working everywhere, and the session factory logs the reason when a
+	// requested sandbox cannot be honoured.
+	sandboxEnabled: { default: false as boolean },
+	// Whether sandboxed commands may reach the network. Off by default: the sandbox
+	// draws a filesystem-write boundary, so leaving egress open would hand every
+	// sandboxed `curl` a working socket.
+	sandboxNetworkAccess: { default: false as boolean },
+	// Explicit backend override. Empty means "platform default" (Seatbelt on macOS,
+	// bubblewrap on Linux).
+	sandboxBackend: { default: "" as string },
 	// Cross-session project memory. The store and the recall tool existed but no host
 	// instantiated them and nothing called append(), so the layer could only ever come
 	// back empty. Split into switches rather than one flag because the write paths
