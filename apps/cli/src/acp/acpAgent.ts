@@ -89,9 +89,15 @@ interface SessionState {
  *
  * Env-only, mirroring how ACP takes `CLINE_PROVIDER` / `CLINE_MODEL`: there is no
  * flag parser in this entry point, so an editor-launched agent cannot be given one.
+ *
+ * Deliberately NOT `CLINE_SANDBOX`. That variable means "isolated local state" and
+ * is read in several places for `--data-dir`; `--data-dir` also sets it
+ * programmatically. Reusing it here would mean `--data-dir` silently turned on OS
+ * process isolation — the same conflation that made `--data-dir` look like a
+ * sandbox in the first place.
  */
 function isAcpSandboxEnabledFromEnv(): boolean {
-	const raw = process.env.CLINE_SANDBOX?.trim().toLowerCase();
+	const raw = process.env.CLINE_PROCESS_SANDBOX?.trim().toLowerCase();
 	return raw === "1" || raw === "true";
 }
 
@@ -165,7 +171,7 @@ export class AcpAgent implements Agent {
 			// there is no flag parser here, so an editor-launched agent cannot be given
 			// a flag. The session can still turn it on through the config option below.
 			sandboxEnabled: isAcpSandboxEnabledFromEnv(),
-			sandboxNetworkAccess: process.env.CLINE_SANDBOX_NETWORK === "1",
+			sandboxNetworkAccess: process.env.CLINE_PROCESS_SANDBOX_NETWORK === "1",
 		});
 
 		const providerModels = await Llms.getModelsForProvider(providerId);

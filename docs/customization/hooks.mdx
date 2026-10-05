@@ -23,11 +23,23 @@ A hook is a file named after the event it handles. Extensions (`.sh`, `.py`,
 | `PostToolUse` | `tool_result` | After a tool returns |
 | `UserPromptSubmit` | `prompt_submit` | A prompt is submitted |
 | `PreCompact` | `pre_compact` | Before a conversation is compacted |
+| `PostCompact` | `post_compact` | After a compaction has replaced history |
 | `SessionShutdown` | `session_shutdown` | A session shuts down |
 
 `PreCompact` fires for automatic compaction and for the manual compact command in
 both the CLI and the VS Code extension, so a hook does not have to know which of
-the two shrank the context.
+the two shrank the context. `PostCompact` fires on both paths too.
+
+The pair brackets the operation: `pre_compact` reports the context about to be
+dropped, `post_compact` reports what the compaction produced. The `postCompact`
+payload carries the outcome — `contextSize` / `contextSizeAfter`,
+`messagesRemoved`, `tokensBefore` / `tokensAfter` / `tokensSaved`, the strategy,
+`mode` and `durationMs` — which is what lets a hook react to a compaction that
+removed far more than expected, or one that barely helped.
+
+`post_compact` fires only when history was actually replaced. A skipped compaction
+did not compact anything and does not emit it, so the event is never ambiguous
+between "compacted" and "decided not to".
 
 ## Where hooks live
 
@@ -67,8 +79,8 @@ optional control object:
 ### Which events can block
 
 Only `tool_call` waits for a response, so only `PreToolUse` can cancel a tool
-call. `UserPromptSubmit` and `PreCompact` are fired without waiting, and every
-other event is notification-only.
+call. `UserPromptSubmit`, `PreCompact` and `PostCompact` are fired without
+waiting, and every other event is notification-only.
 
 ### Hooks fail open
 

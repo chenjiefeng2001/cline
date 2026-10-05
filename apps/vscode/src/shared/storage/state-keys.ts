@@ -347,6 +347,10 @@ const USER_SETTINGS_FIELDS = {
 	// many tool calls, so maxIterations says nothing about them. Set it where a
 	// runaway agent costs money rather than where it merely wastes tokens.
 	maxToolCalls: { default: 0 as number },
+	// Levels of `spawn_agent` nesting allowed; the root session is 0. Default 0 here
+	// means "unset", so the SDK's default of 1 applies — restating it in the host
+	// would let the two drift apart.
+	maxSubAgentDepth: { default: 0 as number },
 	// OS-level process isolation for shell commands (macOS Seatbelt / Linux
 	// bubblewrap). Distinct from the file boundary above, which is a path check
 	// inside the file tools; this confines the process, so it also covers what the

@@ -18,13 +18,31 @@ These bound what a single agent run may cost.
 | `cline.maxIterations` | `0` | Model round-trips per turn. **`0` means no limit.** Reaching a limit ends the turn as `max_iterations`; it does not crash |
 | `cline.runBudgetMaxTotalCost` | `5` | Spend ceiling in USD for one run. **`0` means no ceiling.** Reaching it ends the turn as `budget_exhausted` |
 | `cline.maxConsecutiveMistakes` | `3` | Consecutive mistakes before the run pauses for you (0–10) |
+| `cline.maxToolCalls` | `0` | Tool calls per run. **`0` means no limit.** Reaching it ends the run as `tool_calls_exhausted` |
+| `cline.maxSubAgentDepth` | `0` | Levels of `spawn_agent` delegation. **`0` means "unset", so the SDK default of 1 applies** — see below |
 
 `0` is a decision, not a typo: it removes the ceiling entirely, which is useful
 for long autonomous runs. A value that is not a usable number — negative,
 non-finite, blank — falls back to the default, because a mistyped setting must
 never silently remove a guardrail.
 
-The CLI applies the same two ceilings with the same effective behaviour (50 round-trips and $5, overridable by flag), so a task behaves the same in either host.
+`maxToolCalls` bounds an axis `maxIterations` does not. One turn can issue many
+tool calls while still counting as a single iteration, and the repeated-identical-
+result detector stays silent when the model varies its calls, so without a ceiling
+of its own a run can spend real money with nothing to stop it. It is off by
+default because an unexpected cap truncates legitimate work; set it where a runaway
+agent costs money rather than where it merely wastes tokens. Tool calls refused by
+the cap each return an explicit error result, so the transcript stays consistent.
+
+`maxSubAgentDepth` counts nesting levels with the root session as `0`. The effective
+default of `1` means the root session can delegate but a delegate cannot delegate
+again; the `spawn_agent` tool is withheld at the limit rather than erroring, so a
+delegate does not spend a turn on a call that cannot succeed. Raise it only for
+genuinely recursive delegation — every extra level opens another context, spends
+its own tokens and runs its own tools.
+
+The CLI applies the same ceilings with the same effective behaviour (50 round-trips
+and $5, overridable by flag), so a task behaves the same in either host.
 
 ## Parallel tool calls
 
@@ -45,6 +63,37 @@ and batching never changes the order results are returned in.
 
 With the boundary on, the file tools cannot touch paths outside the workspace.
 Widening it is done by adding roots rather than by switching the guard off.
+
+## Shell sandbox
+
+Separate from the file boundary above, which checks paths inside the file tools.
+This confines the **process**, so it also covers whatever a command spawns — a
+`curl` inside a script, a subprocess, a tool the agent did not know about.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `cline.sandboxEnabled` | `false` | Run shell commands inside an OS process sandbox: writes confined to the workspace, network denied |
+| `cline.sandboxNetworkAccess` | `false` | Let sandboxed commands reach the network. Also removes loopback access for them |
+| `cline.sandboxBackend` | `""` | Force a backend (`seatbelt`, `bubblewrap`). Empty means the platform default |
+
+macOS uses Seatbelt (`sandbox-exec`) and Linux uses bubblewrap. **There is no
+Windows backend.**
+
+Two things to know before turning it on:
+
+- **It is fail-closed.** Where no backend is available — Windows, or a machine
+  without `bwrap` installed — shell commands **fail** rather than running
+  unsandboxed. That is deliberate: a sandbox that silently does nothing is worse
+  than one that is visibly absent. The session factory logs the reason when it
+  cannot honour the request.
+- **Network is denied by default.** The sandbox draws a filesystem-write boundary;
+  leaving egress open would hand every sandboxed `curl` a working socket, which is
+  not an isolation boundary. Both mainstream alternatives gate the network at this
+  layer too.
+
+The same switch is available in the CLI as `--sandbox` / `--sandbox-network`, and
+in ACP sessions as a session config option (an editor client can set it, seeded by
+`CLINE_PROCESS_SANDBOX`).
 
 ## MCP
 

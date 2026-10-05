@@ -111,8 +111,10 @@ cline dev log
 | `CLINE_DATA_DIR` | Custom data directory (replaces `~/.cline/data/`) |
 | `CLINE_HUB_ADDRESS` | Override hub address (default: `127.0.0.1:25463`) |
 | `CLINE_SESSION_BACKEND_MODE` | Force backend mode (`local`, `hub`, `remote`, `auto`) |
-| `CLINE_SANDBOX` | Enable sandbox mode |
-| `CLINE_SANDBOX_DATA_DIR` | Sandbox session storage directory |
+| `CLINE_SANDBOX` | Set to `1` to enable isolated local state, as `--data-dir` does. **Not** OS process isolation — see `CLINE_PROCESS_SANDBOX` |
+| `CLINE_SANDBOX_DATA_DIR` | Directory for isolated local state (set by `--data-dir`) |
+| `CLINE_PROCESS_SANDBOX` | ACP sessions only: start with OS process isolation on (`1`/`true`) |
+| `CLINE_PROCESS_SANDBOX_NETWORK` | ACP sessions only: allow sandboxed commands to reach the network |
 | `CLINE_HOOKS_DIR` | Additional hooks directory |
 | `CLINE_COMMAND_PERMISSIONS` | JSON policy restricting shell commands |
 | `CLINE_MAX_ITERATIONS` | Iteration ceiling for ACP sessions, which have no flags (default: `50`) |

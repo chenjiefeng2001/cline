@@ -455,6 +455,10 @@
 					"type": "number",
 					"description": "Ceiling on tool calls per agent run (0 = no ceiling). Distinct from cline.maxIterationsSetting, which counts model round-trips: one turn can issue many tool calls, so the iteration cap does not bound them. Set this where a runaway agent costs money rather than where it merely wastes tokens."
 				},
+				"cline.maxSubAgentDepth": {
+					"type": "number",
+					"description": "Levels of sub-agent delegation allowed (the root session is 0). Default 1: the root can delegate, a delegate cannot delegate again. Raise it only for recursive delegation - deep nesting multiplies tokens, latency and local load."
+				},
 				"cline.fileBoundaryEnabled": {
 					"type": "boolean",
 					"description": "Restrict file tools (read_files, editor) to the session workspace. Turning this off lets the agent reach any path on disk — prefer adding directories to cline.fileBoundaryAdditionalRoots instead."

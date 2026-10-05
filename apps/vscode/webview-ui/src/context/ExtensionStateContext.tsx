@@ -344,6 +344,7 @@ export const ExtensionStateContextProvider: React.FC<{
 		runBudgetMaxTotalCost: 5,
 		fileBoundaryEnabled: true,
 		maxToolCalls: 0,
+		maxSubAgentDepth: 0,
 		sandboxEnabled: false,
 		sandboxNetworkAccess: false,
 		sandboxBackend: "",

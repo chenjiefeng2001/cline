@@ -48,6 +48,10 @@ Options:
   --max-iterations <count>     Maximum model round-trips per turn (default: 50; exceeding it finishes the turn as max_iterations)
   --max-budget-usd <amount>    Spend ceiling in USD for a single run (default: 5; exceeding it finishes the turn as budget_exhausted)
   --max-parallel-tool-calls <count>  Tool calls executed concurrently within one turn (default: 6; 1 forces serial)
+  --max-tool-calls <count>      Maximum tool calls a single run may execute (default: unlimited)
+  --max-subagent-depth <count>  Levels of sub-agent delegation allowed (default: 1)
+  --sandbox                    Run shell commands inside an OS process sandbox
+  --sandbox-network            Let sandboxed shell commands reach the network
   -h, --help                   display help for command
 
 Commands:
@@ -86,6 +90,10 @@ Commands:
 | `--max-iterations <count>` | Maximum model round-trips per turn (default: `50`). Reaching it ends the turn as `max_iterations` rather than crashing |
 | `--max-budget-usd <amount>` | Spend ceiling in USD for a single run (default: `5`). Reaching it ends the turn as `budget_exhausted` |
 | `--max-parallel-tool-calls <count>` | Tool calls executed concurrently within one turn (default: `6`; `1` forces serial). Only tools declared concurrency-safe batch together |
+| `--max-tool-calls <count>` | Ceiling on tool calls per run (default: unlimited). Distinct from `--max-iterations`, which counts model round-trips: one turn can issue many tool calls, so the iteration cap does not bound them. Reaching it ends the run as `tool_calls_exhausted` |
+| `--max-subagent-depth <count>` | Levels of `spawn_agent` nesting allowed (default: `1`; the root session is `0`, so `1` lets the root delegate but not a delegate). `0` forbids delegation entirely. Raise it only for recursive delegation — deep nesting multiplies tokens, latency and local load |
+| `--sandbox` | Run shell commands inside an OS process sandbox (macOS Seatbelt / Linux bubblewrap): writes confined to the workspace, network denied. Requires macOS or Linux; where no backend is available, shell commands **fail** rather than run unsandboxed |
+| `--sandbox-network` | Let sandboxed shell commands reach the network (implies `--sandbox`). Also removes loopback access for sandboxed processes |
 | `--hooks-dir <path>` | Directory path to additional hooks for runtime hook injection (default: `~/.cline/hooks`) |
 | `--acp` | Run in Agent Client Protocol (ACP) mode for editor integration |
 | `-i, --tui` | Open the terminal user interface (TUI) for interactive sessions |
@@ -246,8 +254,10 @@ cline kanban
 | `CLINE_DATA_DIR` | Custom configuration directory (replaces `~/.cline/data/`) |
 | `CLINE_HUB_ADDRESS` | Override hub address (default: `127.0.0.1:25463`) |
 | `CLINE_SESSION_BACKEND_MODE` | Force backend mode (`local`, `hub`, `remote`, `auto`) |
-| `CLINE_SANDBOX_DATA_DIR` | Sandbox session storage directory |
-| `CLINE_SANDBOX` | Enable sandbox mode |
+| `CLINE_SANDBOX_DATA_DIR` | Directory for isolated local state (set by `--data-dir`) |
+| `CLINE_SANDBOX` | Set to `1` to enable isolated local state, as `--data-dir` does. **Not** OS process isolation — see `CLINE_PROCESS_SANDBOX` |
+| `CLINE_PROCESS_SANDBOX` | ACP sessions only: start with OS process isolation on (`1`/`true`) |
+| `CLINE_PROCESS_SANDBOX_NETWORK` | ACP sessions only: allow sandboxed commands to reach the network |
 | `CLINE_HOOKS_DIR` | Additional hooks directory |
 | `CLINE_BUILD_ENV` | Set to `development` for debug features |
 | `CLINE_DEBUG_PORT_BASE` | Base port for Node.js inspector |
@@ -262,14 +272,38 @@ cline kanban
 
 ### Run guardrails
 
-`--max-iterations`, `--max-budget-usd` and `--max-parallel-tool-calls` apply to
-one-shot and interactive runs. ACP mode has no flags, so it reads the two
-guardrail values from `CLINE_MAX_ITERATIONS` and `CLINE_MAX_BUDGET_USD`, which
-default to the same 50 and 5.
+`--max-iterations`, `--max-budget-usd`, `--max-parallel-tool-calls`,
+`--max-tool-calls` and `--max-subagent-depth` apply to one-shot and interactive
+runs. ACP mode has no flags, so it reads the two spend/iteration values from
+`CLINE_MAX_ITERATIONS` and `CLINE_MAX_BUDGET_USD`, which default to the same 50
+and 5. It has no env equivalent for the tool-call or nesting ceilings: those are
+set through the session's config options, which an editor client can change, or by
+`CLINE_PROCESS_SANDBOX` for isolation.
 
 A value that is not a usable positive number — zero, negative, `NaN`, or blank —
 falls back to the default rather than removing the ceiling, so a typo in an
-environment variable cannot turn a guardrail off.
+environment variable cannot quietly remove a limit. Two deliberate exceptions:
+`--max-tool-calls` requires `>= 1` (there is no `0 = unlimited` on the CLI, so a
+typo landing on `0` is rejected instead of read as "no ceiling"), and
+`--max-subagent-depth` accepts `0` because it is meaningful there — `0` forbids
+delegation entirely, whereas omitting the flag leaves the default of `1`.
+
+### OS process sandbox
+
+`--sandbox` wraps every shell command in the platform's process sandbox — Seatbelt
+on macOS, bubblewrap on Linux — confining writes to the workspace and denying
+network. `--sandbox-network` re-permits network; note this also removes loopback
+access for sandboxed processes.
+
+The sandbox is **fail-closed**: where no backend is available, commands fail rather
+than running unsandboxed. It therefore has no Windows support, and enabling it on a
+machine without `bwrap` installed breaks shell commands instead of degrading
+quietly. That is deliberate — a sandbox that silently does nothing is worse than
+one that is visibly absent — but it is why the default is off.
+
+This is unrelated to `--data-dir`, which only relocates local state. The two were
+once both called "sandbox mode", which is why the CLI's internal field is now
+`isolatedState`.
 
 ### CLINE_COMMAND_PERMISSIONS
 

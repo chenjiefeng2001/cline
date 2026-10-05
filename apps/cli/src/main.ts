@@ -868,6 +868,13 @@ export async function runCli(): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
+	if (args.invalidMaxSubagentDepth) {
+		writeErr(
+			`invalid --max-subagent-depth "${args.invalidMaxSubagentDepth}" (expected integer >= 0)`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	if (args.hooksDir?.trim()) {
 		process.env.CLINE_HOOKS_DIR = args.hooksDir.trim();
 	}
@@ -1159,6 +1166,10 @@ export async function runCli(): Promise<void> {
 			defaultToolAutoApprove,
 			toolPolicies,
 			enableSpawnAgent: !isYoloMode,
+			// Omitted when the flag is absent so the SDK default of 1 applies.
+			...(args.maxSubagentDepth !== undefined
+				? { maxSubAgentDepth: args.maxSubagentDepth }
+				: {}),
 			enableAgentTeams: !isYoloMode,
 			enableTools: true,
 			cwd,

@@ -91,8 +91,10 @@ export interface ParsedArgs {
 	invalidMaxBudgetUsd?: string;
 	maxParallelToolCalls?: number;
 	maxToolCalls?: number;
+	maxSubagentDepth?: number;
 	invalidMaxParallelToolCalls?: string;
 	invalidMaxToolCalls?: string;
+	invalidMaxSubagentDepth?: string;
 	thinking: boolean;
 	/** Whether --thinking was explicitly provided on the command line */
 	thinkingExplicitlySet?: boolean;

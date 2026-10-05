@@ -39,7 +39,7 @@ Core/host-facing agent events are emitted through `AgentConfig.onEvent` and core
 ```typescript
 interface AgentDoneEvent {
   type: "done"
-  reason: "completed" | "max_iterations" | "budget_exhausted" | "mistake_limit" | "aborted" | "error"
+  reason: "completed" | "max_iterations" | "budget_exhausted" | "tool_calls_exhausted" | "mistake_limit" | "no_progress" | "aborted" | "error"
   text: string
   iterations: number
   usage?: LegacyAgentUsage

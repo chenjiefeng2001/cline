@@ -48,6 +48,7 @@ export const SETTINGS_SCHEMA_MAP: Record<string, string> = {
 	maxIterations: "maxIterationsSetting",
 	maxParallelToolCalls: "maxParallelToolCalls",
 	maxToolCalls: "maxToolCalls",
+	maxSubAgentDepth: "maxSubAgentDepth",
 	runBudgetMaxTotalCost: "runBudgetMaxTotalCost",
 	fileBoundaryEnabled: "fileBoundaryEnabled",
 	fileBoundaryAdditionalRoots: "fileBoundaryAdditionalRoots",

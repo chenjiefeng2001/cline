@@ -77,6 +77,10 @@ export function addRootOptions(cmd: Command): Command {
 				"Maximum tool calls a single run may execute (default: unlimited). Distinct from --max-iterations, which counts model round-trips: one turn can issue many tool calls",
 			)
 			.option(
+				"--max-subagent-depth <count>",
+				"Levels of sub-agent delegation allowed (default: 1; the root session is 0, so 1 lets the root delegate but not a delegate). Raise only for recursive delegation - deep nesting multiplies tokens, latency and local load",
+			)
+			.option(
 				"--acp",
 				"Run in Agent Client Protocol (ACP) mode for editor integration",
 			)
@@ -245,6 +249,19 @@ export function commanderToParsedArgs(program: Command): ParsedArgs {
 			result.maxToolCalls = parsed;
 		} else if (raw) {
 			result.invalidMaxToolCalls = raw;
+		}
+	}
+
+	if (opts.maxSubagentDepth !== undefined) {
+		const raw = String(opts.maxSubagentDepth).trim();
+		const parsed = Number.parseInt(raw, 10);
+		// 0 is meaningful and distinct from "unset": it forbids delegation entirely,
+		// whereas omitting the flag leaves the SDK default of 1 in place. So this one
+		// accepts 0 where --max-tool-calls does not.
+		if (raw && Number.isInteger(parsed) && parsed >= 0) {
+			result.maxSubagentDepth = parsed;
+		} else if (raw) {
+			result.invalidMaxSubagentDepth = raw;
 		}
 	}
 

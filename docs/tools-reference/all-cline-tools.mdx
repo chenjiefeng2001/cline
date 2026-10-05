@@ -22,6 +22,8 @@ When running through `ClineCore`, these built-ins are available:
 | `skills` | Run a configured skill inside the main conversation |
 | `ask_question` | Ask the user one multiple-choice question |
 | `submit_and_exit` | Submit a final answer and stop (opt-in, off by default) |
+| `spawn_agent` | Delegate a task to a subagent with a custom system prompt |
+| `teams` | Expand into the 18 `team_*` tools (opt-in, off by default) |
 
 Hosts may add their own. The VS Code extension contributes `attempt_completion`,
 and any tool an MCP server publishes is registered alongside the built-ins.
@@ -30,6 +32,24 @@ and any tool an MCP server publishes is registered alongside the built-ins.
   `Agent` from `@cline/agents` does not include built-ins by default. You provide tools explicitly.
 </Note>
 
+### Delegation depth
+
+`spawn_agent` is available to the root session and, by default, to the first level
+of delegates beneath it. At the depth limit the tool is **withheld from the
+delegate** rather than failing when called, so a delegate does not spend a turn on a
+call that cannot succeed — it does the work itself and returns one summary.
+
+Nesting is bounded because every extra level opens another context window, spends
+its own tokens and runs its own tools: a model given a broad delegation instruction
+can otherwise fan out until the machine is saturated. Raise the bound with
+`cline.maxSubAgentDepth` (VS Code) or `--max-subagent-depth` (CLI); `0` forbids
+delegation entirely.
+
+`team_*` tools are a separate surface with their own concurrency ceiling
+(`maxConcurrentRuns`, default 2) and their own roles, and teammate-style
+asynchronous delegation is available there — `spawn_agent` itself is synchronous
+and waits for the subagent to finish.
+
 ## Tool Categories
 
 - **Reading and finding files**: `read_files`, `search_codebase`, `glob`
@@ -37,6 +57,7 @@ and any tool an MCP server publishes is registered alongside the built-ins.
 - **Execution**: `run_commands`
 - **External retrieval**: `fetch_web_content`
 - **Capabilities and dialogue**: `skills`, `ask_question`, `submit_and_exit`
+- **Delegation**: `spawn_agent`, `teams` (the `team_*` family)
 
 ## Concurrency
 

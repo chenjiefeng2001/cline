@@ -980,6 +980,11 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	const agentTeamsEnabled = stateManager.getGlobalSettingsKey("agentTeamsEnabled") ?? false
 	const enableSpawnAgent = subagentsEnabled
 	const enableAgentTeams = agentTeamsEnabled && subagentsEnabled
+	// How many levels of `spawn_agent` nesting are allowed; the root session is 0.
+	// Defaults to 1 in the SDK (root delegates, a delegate does not delegate again),
+	// matching Codex's `agents.max_depth`. Omitted when the setting is absent so the
+	// SDK default stands, rather than restating it here where it could drift.
+	const maxSubAgentDepth = readOptionalPositiveInt(stateManager.getGlobalSettingsKey("maxSubAgentDepth"))
 
 	// V16 §2 — prompt-caching wiring: the final prompt is now complete (base +
 	// rules + preferred language). Track it so successive builds (and Plan ⇄ Act
@@ -1070,6 +1075,7 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 			enabled: enableCheckpoints,
 		},
 		enableSpawnAgent,
+		...(maxSubAgentDepth !== undefined ? { maxSubAgentDepth } : {}),
 		enableAgentTeams,
 		// Mistake escalation cap. Previously absent, so the SDK used its hard-coded 6
 		// while the UI advertised the user's configured value - the setting looked live
