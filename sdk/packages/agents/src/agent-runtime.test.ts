@@ -1875,6 +1875,90 @@ describe("AgentRuntime", () => {
 		);
 	});
 
+	/**
+	 * Regression: a gateway captures its apiKey when the model is constructed, so a
+	 * credential that expires mid-turn cannot be recovered by mutating config — the
+	 * request would still go out with the stale one. This is what surfaced as an
+	 * unexplainable "Unauthorized ... re-authenticate" partway through long runs.
+	 * The hook returns a model rebuilt from the renewed credential, and that model
+	 * must actually serve the next request.
+	 */
+	it("serves the next request with a model a beforeModel hook swapped in", async () => {
+		const original = new ScriptedModel([
+			() => [
+				{ type: "text-delta", text: "stale" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const renewed = new ScriptedModel([
+			() => [
+				{ type: "text-delta", text: "renewed" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const beforeModel = vi.fn(() => ({ model: renewed }));
+
+		const runtime = new AgentRuntime({
+			model: original,
+			hooks: { beforeModel },
+		});
+
+		const result = await runtime.run("go");
+
+		expect(beforeModel).toHaveBeenCalledTimes(1);
+		expect(original.requests).toHaveLength(0);
+		expect(renewed.requests).toHaveLength(1);
+		expect(result.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "renewed" }],
+		});
+	});
+
+	it("keeps a hook-swapped model for later iterations of the same turn", async () => {
+		// The stale model must never be asked for anything, so it holds a single
+		// step: a second call on it would throw rather than quietly pass.
+		const original = new ScriptedModel([
+			() => [{ type: "finish", reason: "stop" }],
+		]);
+		const renewed = new ScriptedModel([
+			() => [
+				{ type: "text-delta", text: "working" },
+				{
+					type: "tool-call-delta" as const,
+					toolCallId: "call-1",
+					toolName: "noop",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "renewed" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+
+		const runtime = new AgentRuntime({
+			model: original,
+			tools: [
+				{
+					name: "noop",
+					description: "does nothing",
+					inputSchema: { type: "object", properties: {} },
+					execute: async () => "ok",
+				},
+			],
+			hooks: { beforeModel: () => ({ model: renewed }) },
+		});
+
+		const result = await runtime.run("go");
+
+		expect(renewed.requests).toHaveLength(2);
+		expect(result.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "renewed" }],
+		});
+	});
+
 	it("stops a run from beforeModel hooks and returns an aborted result", async () => {
 		const model = new ScriptedModel([
 			() => [

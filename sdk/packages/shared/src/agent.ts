@@ -340,6 +340,17 @@ export interface AgentBeforeModelResult {
 	messages?: readonly AgentMessage[];
 	tools?: readonly AgentToolDefinition[];
 	options?: Record<string, unknown>;
+	/**
+	 * Replaces the model used for the request that follows this hook.
+	 *
+	 * The runtime binds `config.model` once when the turn's runtime is built, and
+	 * a gateway captures the credential it was constructed with. A credential that
+	 * expires *during* a long turn therefore cannot be renewed by mutating the
+	 * config: the swap has to happen at the last moment before the request, which
+	 * is what this hook is. Hosts renew OAuth here and return a model rebuilt from
+	 * the refreshed config.
+	 */
+	model?: AgentModel;
 }
 
 export interface AgentAfterModelContext {

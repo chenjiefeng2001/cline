@@ -1470,6 +1470,12 @@ export class AgentRuntime {
 					options: mergeModelOptions(request.options, result.options),
 				};
 			}
+			// A hook may hand back a model built from a credential it just renewed.
+			// Only the last non-undefined one wins, so several hooks can each offer
+			// one and the closest to the request has the final say.
+			if (result?.model) {
+				this.config.model = result.model;
+			}
 		}
 
 		this.config.logger?.debug("Agent model request diagnostics", {

@@ -33,6 +33,7 @@ import {
 	type AgentExtensionRule,
 	type AgentFinishReason,
 	type AgentMessage,
+	type AgentModel,
 	type AgentResult,
 	type AgentRunResult,
 	type AgentRuntimeEvent,
@@ -291,6 +292,12 @@ export type ConnectionOverrides = ConnectionUpdate;
  */
 export class SessionRuntime {
 	private config: AgentConfig;
+	/**
+	 * The credential the currently-live model was constructed with. A gateway
+	 * captures its apiKey at construction, so this is the only way to tell whether
+	 * the live model still matches `config.apiKey` after the host renewed it.
+	 */
+	private activeModelApiKey: string | undefined;
 	private readonly agentId: string;
 	private readonly parentAgentId?: string;
 	private readonly logger?: BasicLogger;
@@ -826,6 +833,9 @@ export class SessionRuntime {
 			this.logger,
 			this.telemetry,
 		);
+		// Remember which credential this model was built from, so a mid-turn
+		// renewal can rebuild it instead of silently continuing with the old one.
+		this.activeModelApiKey = this.config.apiKey;
 		// Merge extension-contributed tools with the config-declared
 		// tools for this turn. Extensions register tools via
 		// `api.registerTool` during `setup()` — parity with legacy
@@ -1013,12 +1023,35 @@ export class SessionRuntime {
 				const messages = control?.messages ?? ctx.request.messages;
 				const preparedMessages =
 					await this.prepareMessagesForModelRequest(messages);
+				const renewed = await this.renewCredentialForModel();
 				return {
 					...control,
 					messages: preparedMessages,
+					...(renewed ? { model: renewed } : {}),
 				};
 			},
 		};
+	}
+
+	/**
+	 * Asks the host to renew this session's provider credential and, when the value
+	 * actually changed, rebuilds the model so the new credential reaches the wire.
+	 *
+	 * Returns the rebuilt model, or undefined when nothing needed doing. Renewal
+	 * failures are not swallowed here: a credential that cannot be renewed must
+	 * surface as the real cause rather than as an opaque gateway 401 one layer up.
+	 */
+	private async renewCredentialForModel(): Promise<AgentModel | undefined> {
+		const syncCredentials = this.config.syncCredentials;
+		if (!syncCredentials) {
+			return undefined;
+		}
+		await syncCredentials();
+		if (this.config.apiKey === this.activeModelApiKey) {
+			return undefined;
+		}
+		this.activeModelApiKey = this.config.apiKey;
+		return createAgentModelFromConfig(this.config, this.logger, this.telemetry);
 	}
 
 	private createRuntimePrepareTurn(

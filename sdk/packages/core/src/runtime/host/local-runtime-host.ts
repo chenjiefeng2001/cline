@@ -2676,40 +2676,26 @@ export class LocalRuntimeHost implements RuntimeHost {
 					event,
 				),
 		} as AgentConfig;
-		const hostBeforeModel = agentConfig.hooks?.beforeModel;
+		// Credential renewal is wired as a config callback rather than a
+		// `beforeModel` hook. This host owns the token store, but the model is built
+		// by SessionRuntime and a gateway captures its apiKey when it is constructed —
+		// so mutating `config.apiKey` from a hook here would not reach the request
+		// about to be sent. SessionRuntime calls this before every model request and
+		// rebuilds the model when the value changed, which is what lets a turn outlive
+		// its access token instead of replaying itself with a dead credential.
+		//
+		// The host's own `beforeModel` is left untouched by the spread below: hosts
+		// use it to steer a turn (VS Code returns `stop` to switch plan/act mode), and
+		// composing it here would risk dropping that.
+		agentConfig.syncCredentials = async () => {
+			const liveSession = this.sessions.get(sessionId);
+			if (!liveSession) {
+				return;
+			}
+			await this.syncOAuthCredentials(liveSession);
+		};
 		agentConfig.hooks = {
 			...agentConfig.hooks,
-			// Refresh OAuth credentials immediately before every model request, not
-			// just once per turn at `executeTurn`. A turn that streams and runs tools
-			// for longer than the access token's lifetime used to have exactly one
-			// recovery: fail mid-turn, then replay the whole turn from the baseline —
-			// redoing every tool call — and if that retry hit a concurrent refresh it
-			// replayed with the same dead credential and surfaced the raw gateway 401.
-			// Re-checking here costs a settings read (the validator short-circuits
-			// while the token is comfortably valid) and turns a lost turn into a
-			// transparent renewal between two tool calls.
-			//
-			// `updateConnection` mutates the live AgentConfig, and the runtime invokes
-			// this hook before `model.stream(...)`, so the renewal applies to the very
-			// request that follows. A credential that genuinely cannot be renewed
-			// throws here, reporting the real cause instead of letting an expired token
-			// reach the gateway.
-			//
-			// The host's own `beforeModel` runs first and its result is passed through
-			// untouched: hosts use it to steer a turn (the VS Code plan/act mode switch
-			// returns `stop`), and overwriting it would break them. Skipping the refresh
-			// on a stop avoids a pointless credential round trip.
-			beforeModel: async (context) => {
-				const result = await hostBeforeModel?.(context);
-				if (result?.stop) {
-					return result;
-				}
-				const liveSession = this.sessions.get(sessionId);
-				if (liveSession) {
-					await this.syncOAuthCredentials(liveSession);
-				}
-				return result;
-			},
 			onEvent: async (event) => {
 				await bootstrap.hooks?.onEvent?.(event);
 				if (event.type !== "assistant-message") return;

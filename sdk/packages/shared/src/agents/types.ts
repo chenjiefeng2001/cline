@@ -889,6 +889,14 @@ export interface AgentConfig {
 	 */
 	hooks?: AgentHooks;
 	/**
+	 * Renews this session's provider credential in place, before each model
+	 * request. Supplied by the host that owns the credential store — the SDK core
+	 * runtime has no access to one. Mutating `apiKey` from this callback is what
+	 * lets a credential that expires mid-turn recover; the runtime rebuilds the
+	 * model when the value actually changed.
+	 */
+	syncCredentials?: () => Promise<void>;
+	/**
 	 * Optional parent agent ID for spawned/delegated runs.
 	 * Root agents should leave this undefined.
 	 */
