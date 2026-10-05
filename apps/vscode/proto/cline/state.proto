@@ -484,6 +484,14 @@ message UpdateSettingsRequest {
   // field: the state-proto generator has no array support and would emit a
   // scalar, so a real array would round-trip as a joined string.
   optional string file_boundary_additional_roots = 51;
+  // OS process sandbox for shell commands. This message is a hand-maintained
+  // duplicate of `Settings`, and the two drift silently: a setting added to one
+  // and not the other compiles until the webview tries to write it.
+  optional bool sandbox_enabled = 62;
+  // Whether sandboxed commands may reach the network. Off by default.
+  optional bool sandbox_network_access = 63;
+  // Explicit backend override; empty means the platform default.
+  optional string sandbox_backend = 64;
   optional bool agent_teams_enabled = 52;
   // Cross-session memory. Split into switches because the write paths retain
   // data outside the conversation and should be opted into deliberately.
