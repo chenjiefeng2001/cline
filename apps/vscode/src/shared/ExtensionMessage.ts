@@ -106,6 +106,13 @@ export interface ExtensionState {
 	runBudgetMaxTotalCost: number
 	fileBoundaryEnabled: boolean
 	fileBoundaryAdditionalRoots: string
+	/**
+	 * OS process sandbox for shell commands. Separate from the file boundary above:
+	 * that one checks paths inside the file tools, this confines the process.
+	 */
+	sandboxEnabled: boolean
+	sandboxNetworkAccess: boolean
+	sandboxBackend: string
 	agentTeamsEnabled: boolean
 	memoryEnabled: boolean
 	memoryRecallEnabled: boolean
