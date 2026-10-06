@@ -1,0 +1,315 @@
+name: upstream-sync
+
+# Bring upstream's fixes and features onto a review branch, never onto main.
+#
+# Why a branch and not a merge into main: this fork carries its own divergent work, and a
+# merge of upstream/main into main is not a mechanical operation here. Measured on
+# 2026-10-06: 962 upstream commits and 2247 changed files behind a 226-commit fork, with
+# 267 overlapping files and 152 of them conflicting (639 hunks, 314 of them in bun.lock).
+# Several conflicts are deliberate design divergence rather than churn - e.g. the
+# model-refresh helpers, where the fork reads the SDK provider collection synchronously and
+# upstream does not - so "take upstream" would silently revert fork behaviour. That is the
+# same failure shape as c7a945618, where a commit that read as formatting reverted 69 files.
+#
+# So this workflow automates the parts that are safe and stops at the ones that are not:
+#   - it selects upstream's fix/feat/security/perf/test commits and replays them oldest-first
+#     onto a fresh branch off main;
+#   - a commit that conflicts is aborted, recorded by SHA with the files it touched, and the
+#     run continues - nothing is auto-resolved, so nothing is silently wrong;
+#   - the branch plus a PR carrying the full applied/skipped report goes up for review;
+#   - main is never pushed to from here.
+#
+# The skipped list is the point of the exercise: it is a work queue, not noise to be
+# silenced. Clearing it is a deliberate act on the branch the PR proposes.
+
+on:
+    schedule:
+        # 04:17 UTC daily. Off the hour on purpose: scheduled workflows are queued at :00,
+        # and every fork of this repo wakes up then.
+        - cron: "17 4 * * *"
+    workflow_dispatch:
+        inputs:
+            upstream_ref:
+                description: "Upstream ref to sync from"
+                required: false
+                default: "main"
+            commit_types:
+                description: "Comma-separated conventional-commit types to replay"
+                required: false
+                default: "fix,feat,security,perf,test"
+            max_commits:
+                description: "Stop after this many commits (0 = no limit)"
+                required: false
+                default: "0"
+
+permissions:
+    contents: write
+    pull-requests: write
+
+concurrency:
+    # One sync at a time. Two runs racing on branch names and PRs is the failure mode that
+    # produces duplicate review queues nobody reads.
+    group: upstream-sync-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    sync:
+        runs-on: ubuntu-latest
+        # A replay of several hundred commits with conflict detection is not a 30-minute job.
+        timeout-minutes: 180
+        name: Replay upstream fixes and features
+        steps:
+            - name: Checkout main with full history
+              uses: actions/checkout@v4
+              with:
+                  ref: main
+                  fetch-depth: 0
+                  # The token must be able to push the sync branch and open the PR; the
+                  # default read-only token is why the permissions block above exists.
+                  token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Add upstream remote
+              id: upstream
+              run: |
+                  git remote remove upstream 2>/dev/null || true
+                  git remote add upstream https://github.com/cline/cline.git
+                  git fetch --no-tags upstream "${{ github.event.inputs.upstream_ref || 'main' }}:refs/remotes/upstream/sync"
+                  UPSTREAM_HEAD=$(git rev-parse refs/remotes/upstream/sync)
+                  MERGE_BASE=$(git merge-base origin/main "$UPSTREAM_HEAD")
+                  echo "upstream_head=$UPSTREAM_HEAD" >> "$GITHUB_OUTPUT"
+                  echo "merge_base=$MERGE_BASE" >> "$GITHUB_OUTPUT"
+                  echo "upstream_short=${UPSTREAM_HEAD:0:9}" >> "$GITHUB_OUTPUT"
+                  {
+                    echo "### upstream sync target"
+                    echo
+                    echo "- upstream head: \`$UPSTREAM_HEAD\`"
+                    echo "- merge base: \`$MERGE_BASE\`"
+                    echo "- commits upstream is ahead of main: $(git rev-list --count "$MERGE_BASE..$UPSTREAM_HEAD")"
+                    echo "- selected types: \`${{ github.event.inputs.commit_types || 'fix,feat,security,perf,test' }}\`"
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Select upstream commits to replay
+              id: select
+              run: |
+                  set -euo pipefail
+                  UPSTREAM_HEAD="${{ steps.upstream.outputs.upstream_head }}"
+                  MERGE_BASE="${{ steps.upstream.outputs.merge_base }}"
+                  TYPES="${{ github.event.inputs.commit_types || 'fix,feat,security,perf,test' }}"
+
+                  # Already-applied upstream commits are dropped with `git cherry`, not with
+                  # a SHA list: two commits can have different SHAs and the same patch (we
+                  # cherry-pick upstream work routinely), and only patch comparison knows.
+                  ALL=$(mktemp)
+                  git log --reverse --format='%H%x09%s' "$MERGE_BASE..$UPSTREAM_HEAD" > "$ALL"
+                  TOTAL=$(wc -l < "$ALL" | tr -d ' ')
+
+                  SEL="$RUNNER_TEMP/selected.tsv"
+                  : > "$SEL"
+                  while IFS=$'\t' read -r sha subject; do
+                    [ -z "$sha" ] && continue
+                    # Skip if this patch is already in main.
+                    if git cherry origin/main "$sha" 2>/dev/null | grep -q '^-'; then
+                      continue
+                    fi
+                    type=$(printf '%s' "$subject" | sed -n 's/^\([a-zA-Z]\{1,12\}\)\(([^)]*)\)\{0,1\}!\{0,1\}:.*/\1/p' | tr 'A-Z' 'a-z')
+                    [ -z "$type" ] && type="other"
+                    case ",$TYPES," in
+                      *",$type,"*) printf '%s\t%s\n' "$sha" "$subject" >> "$SEL" ;;
+                    esac
+                  done < "$ALL"
+
+                  COUNT=$(wc -l < "$SEL" | tr -d ' ')
+                  MAX="${{ github.event.inputs.max_commits || '0' }}"
+                  if [ "$MAX" != "0" ] && [ "$COUNT" -gt "$MAX" ]; then
+                    head -n "$MAX" "$SEL" > "$SEL.tmp" && mv "$SEL.tmp" "$SEL"
+                    COUNT=$MAX
+                  fi
+                  echo "selected=$COUNT" >> "$GITHUB_OUTPUT"
+                  echo "total_upstream=$TOTAL" >> "$GITHUB_OUTPUT"
+                  echo "selected_file=$SEL" >> "$GITHUB_OUTPUT"
+                  echo "[sync] upstream has $TOTAL commit(s) since the merge base; $COUNT selected for replay"
+                  if [ "$COUNT" = "0" ]; then
+                    echo "nothing to replay" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Skip when there is nothing to do
+              if: steps.select.outputs.selected == '0'
+              run: |
+                    echo "No upstream fix/feat commits to replay. Nothing to do."
+                    {
+                      echo
+                      echo "Nothing selected: every upstream commit since the merge base is"
+                      echo "either already applied or outside the selected types."
+                    } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Skip when a sync branch already tracks this upstream head
+              if: steps.select.outputs.selected != '0'
+              id: skip_existing
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  UPSTREAM_SHORT: ${{ steps.upstream.outputs.upstream_short }}
+              run: |
+                  # Re-running the schedule must not stack duplicate PRs on the same upstream
+                  # head. An existing open PR for that head means the work is already queued
+                  # for review and the new run would only add noise.
+                  existing=$(gh pr list --state open --limit 50 \
+                    --json headRefName \
+                    --jq "[.[] | select(.headRefName | startswith(\"upstream-sync/${UPSTREAM_SHORT}-\"))] | length")
+                  if [ "$existing" != "0" ]; then
+                    echo "An open PR already tracks upstream ${UPSTREAM_SHORT}; skipping."
+                    echo "skip_existing=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "skip_existing=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Create the sync branch
+              if: steps.select.outputs.selected != '0' && steps.skip_existing.outputs.skip_existing != 'true'
+              id: branch
+              run: |
+                  set -euo pipefail
+                  UPSTREAM_SHORT="${{ steps.upstream.outputs.upstream_short }}"
+                  STAMP=$(date -u +%Y%m%d-%H%M)
+                  BRANCH="upstream-sync/${UPSTREAM_SHORT}-${STAMP}"
+                  git checkout -b "$BRANCH"
+                  echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+            - name: Replay selected commits
+              if: steps.branch.outputs.branch != ''
+              id: replay
+              env:
+                  SEL: ${{ steps.select.outputs.selected_file }}
+              run: |
+                  set -uo pipefail
+                  BRANCH="${{ steps.branch.outputs.branch }}"
+                  APPLIED="$RUNNER_TEMP/applied.tsv"
+                  SKIPPED="$RUNNER_TEMP/skipped.tsv"
+                  : > "$APPLIED"; : > "$SKIPPED"
+                  TOTAL=0; OK=0; BAD=0
+                  LAST_HEAD=$(git rev-parse HEAD)
+
+                  while IFS=$'\t' read -r sha subject; do
+                    [ -z "$sha" ] && continue
+                    TOTAL=$((TOTAL + 1))
+                    if git cherry-pick -x "$sha" >/dev/null 2>&1; then
+                      OK=$((OK + 1)); printf '%s\t%s\n' "$sha" "$subject" >> "$APPLIED"
+                      LAST_HEAD=$(git rev-parse HEAD)
+                      echo "[sync] applied ${sha:0:9}  $subject"
+                    else
+                      # Record, never resolve. A conflict here is usually deliberate fork
+                      # behaviour meeting an upstream change, and picking a side silently is
+                      # exactly how fork work disappears.
+                      files=$(git diff --name-only --diff-filter=U | paste -sd, -)
+                      # `--abort` alone is what restores HEAD to the last successfully applied
+                      # commit. Do NOT add a `git reset --hard origin/main` here: it unwinds
+                      # every commit applied earlier in the run, so the first conflict would
+                      # discard the entire replay and push a near-empty branch.
+                      git cherry-pick --abort >/dev/null 2>&1 || true
+                      # Prove the abort landed where it should, so silent data loss fails the
+                      # run instead of shipping a branch that quietly lost work.
+                      if [ "$(git rev-parse HEAD)" != "$LAST_HEAD" ]; then
+                        echo "[sync] FATAL: abort lost applied commits (expected $LAST_HEAD, got $(git rev-parse HEAD))"
+                        exit 1
+                      fi
+                      printf '%s\t%s\t%s\n' "$sha" "$subject" "${files:-unknown}" >> "$SKIPPED"
+                      BAD=$((BAD + 1))
+                      echo "[sync] CONFLICT ${sha:0:9}  $subject  [${files:-unknown}]"
+                    fi
+                  done < "$SEL"
+
+                  # The applied counter and the branch itself must agree. They are computed
+                  # independently, so a mismatch means commits were lost somewhere between
+                  # the cherry-pick and the branch - exactly the failure that a bare
+                  # `git reset` in the conflict path causes.
+                  BRANCH_COUNT=$(git rev-list --count "origin/main..HEAD")
+                  if [ "$BRANCH_COUNT" -ne "$OK" ]; then
+                    echo "[sync] FATAL: applied counter says $OK but branch has $BRANCH_COUNT commits ahead"
+                    exit 1
+                  fi
+                  echo "applied=$OK" >> "$GITHUB_OUTPUT"
+                  echo "conflicted=$BAD" >> "$GITHUB_OUTPUT"
+                  echo "attempted=$TOTAL" >> "$GITHUB_OUTPUT"
+                  echo "applied_file=$APPLIED" >> "$GITHUB_OUTPUT"
+                  echo "skipped_file=$SKIPPED" >> "$GITHUB_OUTPUT"
+
+            - name: Push the sync branch
+              if: steps.replay.outputs.applied != '0'
+              env:
+                  BRANCH: ${{ steps.branch.outputs.branch }}
+              run: |
+                  set -euo pipefail
+                  git push --force-with-lease origin "$BRANCH"
+                  echo "pushed $BRANCH ($(git rev-list --count origin/main..HEAD) commit(s))"
+
+            - name: Report
+              if: steps.replay.outputs.applied != '0'
+              run: |
+                  {
+                    echo
+                    echo "### result"
+                    echo
+                    echo "- attempted: ${{ steps.replay.outputs.attempted }}"
+                    echo "- applied: **${{ steps.replay.outputs.applied }}**"
+                    echo "- conflicted and left for a human: ${{ steps.replay.outputs.conflicted }}"
+                    echo
+                    if [ "${{ steps.replay.outputs.conflicted }}" != "0" ]; then
+                      echo "#### conflicts (not auto-resolved, by design)"
+                      echo
+                      echo "| commit | subject | files |"
+                      echo "| --- | --- | --- |"
+                      while IFS=$'\t' read -r sha subject files; do
+                        [ -z "$sha" ] && continue
+                        echo "| \`${sha:0:9}\` | ${subject//|/\\|} | ${files//|/\\|} |"
+                      done < "${{ steps.replay.outputs.skipped_file }}"
+                      echo
+                    fi
+                  } >> "$GITHUB_STEP_SUMMARY"
+                  echo "branch=${{ steps.branch.outputs.branch }}" >> "$GITHUB_ENV"
+
+            - name: Open the review PR
+              if: steps.replay.outputs.applied != '0'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  BRANCH: ${{ steps.branch.outputs.branch }}
+              run: |
+                  set -euo pipefail
+                  UPSTREAM_HEAD="${{ steps.upstream.outputs.upstream_head }}"
+                  APPLIED="${{ steps.replay.outputs.applied }}"
+                  CONFLICTED="${{ steps.replay.outputs.conflicted }}"
+                  SKIPPED="${{ steps.replay.outputs.skipped_file }}"
+
+                  {
+                    echo "Automated upstream sync. **Do not merge without reading the conflict table.**"
+                    echo
+                    echo "Upstream head: \`$UPSTREAM_HEAD\`"
+                    echo
+                    echo "Replayed $APPLIED upstream commit(s) of type \`${{ github.event.inputs.commit_types || 'fix,feat,security,perf,test' }}\`."
+                    if [ "$CONFLICTED" != "0" ]; then
+                      echo "$CONFLICTED commit(s) conflicted and were **left out** rather than resolved."
+                    fi
+                    echo
+                    echo "Each commit is cherry-picked with \`-x\`, so \`git log\` here records the upstream SHA."
+                    echo
+                    echo "Conflicts were not auto-resolved because they are, in this fork, usually"
+                    echo "deliberate divergence rather than churn. Clear them on this branch."
+                    echo
+                    if [ "$CONFLICTED" != "0" ]; then
+                      echo "| commit | subject | files |"
+                      echo "| --- | --- | --- |"
+                      while IFS=$'\t' read -r sha subject files; do
+                        [ -z "$sha" ] && continue
+                        echo "| \`${sha:0:9}\` | ${subject//|/\\|} | ${files//|/\\|} |"
+                      done < "$SKIPPED"
+                    fi
+                    echo
+                    echo "---"
+                    echo
+                    echo "main is never written by this workflow; this PR is the only artefact."
+                  } > "$RUNNER_TEMP/pr.md"
+
+                  gh pr create \
+                    --base main \
+                    --head "$BRANCH" \
+                    --title "upstream sync: ${UPSTREAM_HEAD:0:9} ($APPLIED applied, ${CONFLICTED:-0} conflicted)" \
+                    --body-file "$RUNNER_TEMP/pr.md" \
+                    --label "upstream-sync" || \
+                    echo "::warning::Could not open the PR (it may already exist). The branch is pushed: $BRANCH"
