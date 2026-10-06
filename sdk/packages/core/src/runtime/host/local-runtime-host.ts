@@ -2480,6 +2480,27 @@ export class LocalRuntimeHost implements RuntimeHost {
 			configWithProvider.teamName = runtime.teamRuntime.getTeamName();
 		}
 
+		// Auth-retry hook for every agent in the session (lead, teammates,
+		// subagents): refresh OAuth credentials and propagate the new key to
+		// all connections, then let the runtime retry the failed run. Without
+		// this, a token that expires while the lead is blocked (e.g. in
+		// team_await_runs) kills teammate runs with a raw provider 401.
+		const onAuthError = async (): Promise<boolean> => {
+			const liveSession = this.sessions.get(sessionId);
+			if (!liveSession || !isOAuthProvider(liveSession.config.providerId)) {
+				return false;
+			}
+			try {
+				await this.syncOAuthCredentials(liveSession, { forceRefresh: true });
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		runtime.delegatedAgentConfigProvider?.updateConnectionDefaults({
+			onAuthError,
+		});
+
 		const tools = [...runtime.tools, ...(configWithProvider.extraTools ?? [])];
 		const extensions = runtime.extensions ?? bootstrap.extensions;
 		const explicitInitialCompactionState = startInput.initialCompactionState;
@@ -2492,60 +2513,62 @@ export class LocalRuntimeHost implements RuntimeHost {
 		});
 		const rawInitialCompactionState =
 			explicitInitialCompactionState ?? resumedCompactionState;
-		const initialCompactionState =
-			compact && rawInitialCompactionState
-				? {
-						...rawInitialCompactionState,
-						conversation_id:
-							rawInitialCompactionState.conversation_id?.trim() || sessionId,
-					}
-				: undefined;
-		const prepareTurn = compact
-			? createCompactionStateAwarePrepareTurn({
-					compact,
-					getState: () => activeSessionRef?.compactionState,
-					saveState: async (state) => {
-						const activeSession = activeSessionRef;
-						if (!activeSession) return;
-						const stateForSession = {
-							...state,
-							conversation_id: activeSession.sessionId,
-						};
-						try {
-							const result = await this.persistActiveSessionCompactionState(
-								activeSession,
-								stateForSession,
-							);
-							if (!result.updated) {
-								configWithProvider.logger?.debug?.(
-									"Skipped stale session compaction state",
-									{
-										sessionId: activeSession.sessionId,
-										sourceMessageCount: stateForSession.source_message_count,
-									},
-								);
-							}
-						} catch (error) {
-							configWithProvider.logger?.error?.(
-								"Failed to persist session compaction state",
-								{ sessionId: activeSession.sessionId, error },
-							);
-							captureSdkError(configWithProvider.telemetry, {
-								component: "core",
-								operation: "session.persist_compaction_state",
-								severity: "warn",
-								handled: true,
-								error,
-								context: {
-									sessionId: activeSession.sessionId,
-									providerId: configWithProvider.providerId,
-									modelId: configWithProvider.modelId,
-								},
-							});
-						}
-					},
-				})
+		// A compaction sidecar must keep projecting into the working context even
+		// when auto-compaction is disabled (`compact` undefined): manual /compact
+		// persists a sidecar and promises the next turn will use it. The
+		// state-aware prepareTurn handles `compact: undefined` by projecting the
+		// existing state without re-compacting, and no-ops when no state exists.
+		const initialCompactionState = rawInitialCompactionState
+			? {
+					...rawInitialCompactionState,
+					conversation_id:
+						rawInitialCompactionState.conversation_id?.trim() || sessionId,
+				}
 			: undefined;
+		const prepareTurn = createCompactionStateAwarePrepareTurn({
+			compact,
+			getState: () => activeSessionRef?.compactionState,
+			saveState: async (state) => {
+				const activeSession = activeSessionRef;
+				if (!activeSession) return;
+				const stateForSession = {
+					...state,
+					conversation_id: activeSession.sessionId,
+				};
+				try {
+					const result = await this.persistActiveSessionCompactionState(
+						activeSession,
+						stateForSession,
+					);
+					if (!result.updated) {
+						configWithProvider.logger?.debug?.(
+							"Skipped stale session compaction state",
+							{
+								sessionId: activeSession.sessionId,
+								sourceMessageCount: stateForSession.source_message_count,
+							},
+						);
+					}
+				} catch (error) {
+					configWithProvider.logger?.error?.(
+						"Failed to persist session compaction state",
+						{ sessionId: activeSession.sessionId, error },
+					);
+					captureSdkError(configWithProvider.telemetry, {
+						component: "core",
+						operation: "session.persist_compaction_state",
+						severity: "warn",
+						handled: true,
+						error,
+						context: {
+							sessionId: activeSession.sessionId,
+							providerId: configWithProvider.providerId,
+							modelId: configWithProvider.modelId,
+						},
+					});
+				}
+			},
+		});
 
 		const agentConfig = {
 			sessionId,
@@ -2554,6 +2577,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 			apiKey: providerConfig.apiKey,
 			baseUrl: providerConfig.baseUrl,
 			headers: providerConfig.headers,
+			onAuthError,
 			knownModels: providerConfig.knownModels,
 			providerConfig,
 			thinking: configWithProvider.thinking,
@@ -3420,6 +3444,26 @@ export class LocalRuntimeHost implements RuntimeHost {
 				session.compactionStateWriteQueue = undefined;
 			}
 		}
+	}
+
+	async readLiveSessionMessages(
+		sessionId: string,
+	): Promise<LlmsProviders.Message[]> {
+		const target = sessionId.trim();
+		if (!target) return [];
+		// Resident sessions are authoritative: disk persistence lags at
+		// assistant-message/turn boundaries and abort() does not flush, so a
+		// mid-turn read of the persisted file would silently drop the
+		// in-flight exchange (e.g. hosts that abort a turn and immediately
+		// re-read messages to rebuild the session for a plan/act mode switch).
+		const live = this.sessions.get(target);
+		if (live) {
+			const messages = live.agent.getMessages();
+			if (messages.length > 0) {
+				return messages;
+			}
+		}
+		return this.readSessionMessages(target);
 	}
 
 	async readSessionMessages(

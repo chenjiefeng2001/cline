@@ -691,18 +691,24 @@
         "@streamparser/json": "^0.0.21",
         "ai": "^6.0.144",
         "ai-sdk-ollama": "^3.8.8",
-        "ai-sdk-provider-claude-code": "^3.4.3",
-        "ai-sdk-provider-codex-cli": "^1.1.0",
         "ai-sdk-provider-opencode-sdk": "^3.0.1",
         "dify-ai-provider": "^1.1.0",
         "nanoid": "^5.1.7",
         "zod": "^4.3.6",
       },
+      "devDependencies": {
+        "ai-sdk-provider-claude-code": "^3.4.3",
+        "ai-sdk-provider-codex-cli": "^1.1.0",
+      },
       "peerDependencies": {
         "@aws-sdk/client-bedrock-runtime": "^3.0.0",
+        "ai-sdk-provider-claude-code": "^3.4.3",
+        "ai-sdk-provider-codex-cli": "^1.1.0",
       },
       "optionalPeers": [
         "@aws-sdk/client-bedrock-runtime",
+        "ai-sdk-provider-claude-code",
+        "ai-sdk-provider-codex-cli",
       ],
     },
     "sdk/packages/sdk": {
@@ -724,7 +730,7 @@
     },
     "sdk/packages/ui": {
       "name": "@cline/ui",
-      "version": "0.1.0",
+      "version": "0.2.0-next.0",
       "devDependencies": {
         "@fontsource-variable/schibsted-grotesk": "^5.2.8",
         "@fontsource/azeret-mono": "^5.2.9",
