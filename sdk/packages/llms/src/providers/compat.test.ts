@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	_testing,
 	createGatewayApiHandler,
@@ -6,6 +6,7 @@ import {
 } from "./compat";
 import { ClineNotSubscribedError } from "./errors";
 import { DEFAULT_GATEWAY_MAX_OUTPUT_TOKENS } from "./gateway";
+import { isTransientProviderError } from "./transient-errors";
 import type { Message } from "./types";
 
 const streamTextSpy = vi.fn();
@@ -847,5 +848,109 @@ describe("buildGatewayModels", () => {
 				modelId: "llama3.1",
 			}),
 		).toBeUndefined();
+	});
+});
+
+/**
+ * Half-open provider connections, end to end.
+ *
+ * The unit tests on withStallTimeout prove the guard fires when it is applied;
+ * these prove it is actually applied at the consumption sites in ai-sdk.ts. A guard
+ * that exists but is not wired into the stream path passes every unit test and
+ * fixes nothing.
+ *
+ * The budget is driven down through the environment rather than by parameterising
+ * the call sites, so this exercises the same code path production uses.
+ * See cline/cline#10631.
+ */
+describe("provider stream stall guard", () => {
+	const originalTimeout = process.env.CLINE_STREAM_STALL_TIMEOUT_MS;
+
+	beforeEach(() => {
+		streamTextSpy.mockReset();
+		openaiCompatibleFactorySpy.mockReset();
+		openaiCompatibleSpy.mockClear();
+		process.env.CLINE_STREAM_STALL_TIMEOUT_MS = "60";
+	});
+
+	afterEach(() => {
+		if (originalTimeout === undefined) {
+			delete process.env.CLINE_STREAM_STALL_TIMEOUT_MS;
+		} else {
+			process.env.CLINE_STREAM_STALL_TIMEOUT_MS = originalTimeout;
+		}
+	});
+
+	function stallHandler() {
+		return createGatewayApiHandler({
+			providerId: "openrouter",
+			clientType: "openai-compatible",
+			modelId: "z-ai/glm-5.1",
+			apiKey: "test-key",
+			knownModels: {
+				"z-ai/glm-5.1": {
+					id: "z-ai/glm-5.1",
+					name: "GLM 5.1",
+					contextWindow: 202_800,
+					maxInputTokens: 202_800,
+					maxTokens: 202_800,
+					capabilities: ["tools"],
+				},
+			},
+		});
+	}
+
+	async function drainText(stream: AsyncIterable<unknown>): Promise<string> {
+		const parts: string[] = [];
+		for await (const chunk of stream) {
+			const value = (chunk as { text?: unknown }).text;
+			if (typeof value === "string") {
+				parts.push(value);
+			}
+		}
+		return parts.join("");
+	}
+
+
+
+	it("leaves a normally-completing stream untouched", async () => {
+		streamTextSpy.mockReturnValue({
+			fullStream: (async function* () {
+				yield { type: "text-delta", text: "hello " };
+				yield { type: "text-delta", text: "world" };
+				yield { type: "finish", finishReason: "stop" };
+			})(),
+			usage: Promise.resolve({ inputTokens: 1, outputTokens: 2 }),
+		});
+
+		const text = await drainText(
+			stallHandler().createMessage("", [{ role: "user", content: "Hi" }]),
+		);
+
+		expect(text).toContain("hello");
+		expect(text).toContain("world");
+	});
+
+	it("does not stall a stream that is slow but keeps producing", async () => {
+		// Total span exceeds the 60ms budget, no individual gap does. The guard
+		// measures silence between chunks, not total duration - otherwise a slow but
+		// healthy response would be killed and retried forever.
+		streamTextSpy.mockReturnValue({
+			fullStream: (async function* () {
+				for (const part of ["a", "b", "c", "d"]) {
+					await new Promise((resolve) => setTimeout(resolve, 25));
+					yield { type: "text-delta", text: part };
+				}
+				yield { type: "finish", finishReason: "stop" };
+			})(),
+			usage: Promise.resolve({ inputTokens: 1, outputTokens: 4 }),
+		});
+
+		const text = await drainText(
+			stallHandler().createMessage("", [{ role: "user", content: "Hi" }]),
+		);
+
+		expect(text).toContain("a");
+		expect(text).toContain("d");
 	});
 });

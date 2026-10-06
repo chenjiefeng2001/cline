@@ -32,6 +32,7 @@ import {
 	getProviderCollection,
 	getProviderCollectionSync,
 } from "./model-registry";
+import { withStallTimeout } from "./stream-stall";
 import {
 	type ApiHandler,
 	type ApiStream,
@@ -670,7 +671,9 @@ class GatewayApiHandler implements ApiHandler {
 		);
 		const id = `gw_${nanoid(10)}`;
 		const stream = (async function* () {
-			for await (const event of await gateway.stream(request)) {
+			// Stall-guarded for the same reason as the provider paths in ai-sdk.ts: a
+			// half-open connection otherwise hangs this generator indefinitely.
+			for await (const event of withStallTimeout(await gateway.stream(request))) {
 				yield toApiStreamChunk(id, event);
 			}
 		})() as ApiStream;
@@ -726,7 +729,7 @@ export async function createGatewayApiHandlerAsync(
 			);
 			const id = `gw_${nanoid(10)}`;
 			const stream = (async function* () {
-				for await (const event of await gateway.stream(request)) {
+				for await (const event of withStallTimeout(await gateway.stream(request))) {
 					yield toApiStreamChunk(id, event);
 				}
 			})() as ApiStream;

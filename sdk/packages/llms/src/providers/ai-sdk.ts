@@ -40,6 +40,7 @@ import {
 	type AiSdkProviderOptionsTarget,
 	composeAiSdkProviderOptions,
 } from "./routing/provider-options";
+import { withStallTimeout } from "./stream-stall";
 import type {
 	AiSdkStreamPart,
 	AiSdkStreamResult,
@@ -926,7 +927,10 @@ async function* emitAiSdkEvents(
 
 	try {
 		if (stream.fullStream) {
-			for await (const part of stream.fullStream) {
+			// Bounded by silence, not by total duration: see withStallTimeout. Without
+			// this a half-open connection parks this loop forever, no error is raised,
+			// and the host's transient-retry path is never reached (cline/cline#10631).
+			for await (const part of withStallTimeout(stream.fullStream)) {
 				if (part.type === "text-delta") {
 					const text =
 						(part.textDelta as string | undefined) ??
@@ -1040,7 +1044,9 @@ async function* emitAiSdkEvents(
 				}
 			}
 		} else if (stream.textStream) {
-			for await (const text of stream.textStream) {
+			// Same stall guard as the fullStream path above - a text-only provider
+			// stream has exactly the same half-open failure mode.
+			for await (const text of withStallTimeout(stream.textStream)) {
 				yield { type: "text-delta", text };
 			}
 		}
