@@ -79,7 +79,18 @@ jobs:
             matrix:
                 include: ${{ fromJson(needs.matrix_prep.outputs.matrix) }}
         runs-on: ${{ matrix.runner }}-latest
-        timeout-minutes: 20
+        # 45, not 20. The Windows leg installs the workspace, builds the SDK and runs
+        # the suite, and at 20 minutes it was measured finishing all of that - step 12
+        # "Run E2E tests - Non-Linux" succeeded - and then being cancelled while
+        # "Post Cache Bun install cache" was still saving. So the budget was expiring
+        # during cleanup, after the result was already known, and GitHub reports a
+        # job-level timeout as `cancelled` rather than `failure`: the run reads as
+        # though a human aborted it. The tests passed and the run was still not green.
+        #
+        # This is headroom for the post-job steps, not a slower suite: the same job
+        # completed inside 20 minutes on other pushes, which is exactly why the limit
+        # looks arbitrary - it sits right on the boundary.
+        timeout-minutes: 45
         permissions:
             id-token: write
             contents: read
