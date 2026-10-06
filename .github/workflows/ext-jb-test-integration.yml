@@ -17,13 +17,27 @@ jobs:
     runs-on: ubuntu-latest
     # Auto-run only for trusted PR authors. Anyone else needs a maintainer
     # to opt their PR in by commenting /test-jetbrains.
+    #
+    # The repository and app-id checks are the difference between running and
+    # failing. This job mints an app token for `owner: cline,
+    # repositories: intellij-plugin`, so both the credentials and the target repo
+    # live in the upstream org. On a fork neither exists, and the
+    # author-association guard does not catch it either: the fork owner opens the
+    # PR, so author_association is OWNER and the job walks straight into
+    # create-github-app-token, which dies with "Input required and not supplied:
+    # app-id". That red is permanent, because the trigger is pull_request_target
+    # and pushing to the branch does not re-fire it.
     if: |
-      (github.event_name == 'pull_request_target' &&
-       contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/test-jetbrains') &&
-       contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association))
+      github.repository == 'cline/cline' &&
+      vars.CLINE_JETBRAINS_APP_ID != '' &&
+      (
+        (github.event_name == 'pull_request_target' &&
+         contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         contains(github.event.comment.body, '/test-jetbrains') &&
+         contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association))
+      )
     steps:
       - name: Generate GitHub App Token
         id: app-token
