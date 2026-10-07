@@ -931,6 +931,18 @@ export async function runCli(): Promise<void> {
 				return;
 			}
 		}
+		// Every --worktree run leaves a full detached checkout behind. Prune on the way
+		// in so the directory does not grow without bound across a long-lived install;
+		// failures are ignored because a stale worktree must never block a run.
+		try {
+			const { pruneTaskWorktrees } = await import("./utils/worktree");
+			const pruned = await pruneTaskWorktrees();
+			if (pruned.removed.length > 0) {
+				writeln(`Pruned ${pruned.removed.length} stale worktree(s)`);
+			}
+		} catch {
+			// Best effort.
+		}
 		const { createTaskWorktree } = await import("./utils/worktree");
 		const sourceCwd = args.cwd ?? process.cwd();
 		const result = await createTaskWorktree({ cwd: sourceCwd });
