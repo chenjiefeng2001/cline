@@ -81,6 +81,10 @@ export function addRootOptions(cmd: Command): Command {
 				"Levels of sub-agent delegation allowed (default: 1; the root session is 0, so 1 lets the root delegate but not a delegate). Raise only for recursive delegation - deep nesting multiplies tokens, latency and local load",
 			)
 			.option(
+				"--lazy-tool-loading",
+				"Withhold rarely-used tool schemas behind a `tool_search` meta-tool so each request sends fewer tokens. Team tools are deferred by default; revealed tools stay callable for the rest of the session. Off by default, since it costs one search round trip",
+			)
+			.option(
 				"--acp",
 				"Run in Agent Client Protocol (ACP) mode for editor integration",
 			)
@@ -263,6 +267,10 @@ export function commanderToParsedArgs(program: Command): ParsedArgs {
 		} else if (raw) {
 			result.invalidMaxSubagentDepth = raw;
 		}
+	}
+
+	if (opts.lazyToolLoading !== undefined) {
+		result.lazyToolLoading = true;
 	}
 
 	if (opts.thinking !== undefined) {

@@ -81,6 +81,11 @@ import {
 import { LoopDetectionTracker } from "../safety/loop-detection";
 import { MistakeTracker } from "../safety/mistake-tracker";
 import { RuntimeEventAdapter } from "./runtime-event-adapter";
+import {
+	createToolSearchLoader,
+	selectDeferredToolNames,
+} from "./tool-search-loader";
+import type { CoreLazyToolLoadingConfig } from "../../types/config";
 
 function formatToolResultError(output: unknown): string {
 	if (typeof output === "string") {
@@ -272,7 +277,17 @@ export interface SessionRuntimeOrchestratorDeps {
 		agentId: string;
 		conversationId: string;
 	};
-	readonly wrapTools?: (tools: AgentTool[]) => AgentTool[];
+readonly wrapTools?: (tools: AgentTool[]) => AgentTool[];
+	/**
+	 * Withhold deferred tool schemas behind `tool_search` [S4].
+	 *
+	 * Passed through `deps` rather than read off `AgentConfig` because the
+	 * setting is a host-level concern declared on `CoreSessionConfig`, and the
+	 * orchestrator only ever sees the narrower `AgentConfig`. Only the lead
+	 * session passes it; delegated agents keep the full tool set, since teams
+	 * are a lead-level capability.
+	 */
+	readonly lazyToolLoading?: CoreLazyToolLoadingConfig;
 	/**
 	 * Test hook: override the `AgentRuntime` factory. Production
 	 * callers leave this undefined and get the real `createAgentRuntime`.
@@ -357,6 +372,13 @@ export class SessionRuntime {
 	private activeRunPromise: Promise<AgentResult> | null = null;
 	/** Per-run `Agent → AgentEvent` adapter; `reset()` each run. */
 	private readonly eventAdapter = new RuntimeEventAdapter();
+	/**
+	 * Tool names revealed by `tool_search` so far, held for the whole session so
+	 * a tool revealed in an earlier run does not have to be found again.
+	 */
+	private readonly lazyToolLoaderLoaded = new Set<string>();
+	/** Deferred-tool-loading setting supplied by the host at construction. */
+	private readonly lazyToolLoading: CoreLazyToolLoadingConfig | undefined;
 	/** Session-shutdown gate — rejects late runs. */
 	private shutdownCalled = false;
 	/** Running tally of tool-call records for `AgentResult.toolCalls`. */
@@ -402,6 +424,7 @@ export class SessionRuntime {
 		this.createAgentRuntimeImpl =
 			deps.createAgentRuntimeImpl ?? createAgentRuntime;
 		this.wrapTools = deps.wrapTools;
+		this.lazyToolLoading = deps.lazyToolLoading;
 		this.initialRunId = deps.initialRunId;
 		this.chainRootRunId = deps.chainRootRunId;
 
@@ -898,7 +921,8 @@ export class SessionRuntime {
 		const conversationId = this.conversation.getConversationId();
 		const modelInfo = tryGetModelInfo(this.config);
 		const mergedTools = Array.from(mergedToolsByName.values());
-		const tools = this.wrapTools ? this.wrapTools(mergedTools) : mergedTools;
+		const wrapped = this.wrapTools ? this.wrapTools(mergedTools) : mergedTools;
+		const { tools, lazyLoader } = this.applyLazyToolLoading(wrapped);
 		// Seed initialMessages with the full prior transcript (including
 		// the user message we just appended) so multi-turn history is
 		// preserved across runs. Fixes P1 #1: prior turns were silently
@@ -926,7 +950,7 @@ export class SessionRuntime {
 				...this.config.toolContextMetadata,
 				[CLINE_INTERNAL_TELEMETRY_METADATA_KEY]: this.telemetry,
 			},
-			hooks: this.createRuntimeHooks(),
+			hooks: this.createRuntimeHooks(lazyLoader),
 			prepareTurn: this.createRuntimePrepareTurn(modelInfo, tools),
 			initialMessages,
 			systemPrompt,
@@ -1041,7 +1065,9 @@ export class SessionRuntime {
 		this.extensionsInitialized = true;
 	}
 
-	private createRuntimeHooks(): Partial<AgentRuntimeHooks> {
+	private createRuntimeHooks(
+		lazyLoader?: ReturnType<typeof createToolSearchLoader>,
+	): Partial<AgentRuntimeHooks> {
 		const hooks = mergeRuntimeHooks([
 			this.config.hooks,
 			...this.contributionRegistry
@@ -1051,7 +1077,15 @@ export class SessionRuntime {
 		return {
 			...hooks,
 			beforeModel: async (ctx) => {
-				const control = await hooks.beforeModel?.(ctx);
+				// Narrow first, so the host hooks below and the model see the same
+				// tool list rather than each reasoning about a different one.
+				const narrowedTools = lazyLoader
+					? lazyLoader.beforeModel(ctx).tools
+					: ctx.request.tools;
+				const control = await hooks.beforeModel?.({
+					...ctx,
+					request: { ...ctx.request, tools: narrowedTools },
+				});
 				if (control?.stop) {
 					return control;
 				}
@@ -1061,11 +1095,45 @@ export class SessionRuntime {
 				const renewed = await this.renewCredentialForModel();
 				return {
 					...control,
+					tools: control?.tools ?? narrowedTools,
 					messages: preparedMessages,
 					...(renewed ? { model: renewed } : {}),
 				};
 			},
 		};
+	}
+
+	/**
+	 * Splits the registered tools into always-visible and deferred sets, and adds
+	 * the `tool_search` tool that reveals the deferred ones [S4].
+	 *
+	 * `tool_search` has to be registered like any other tool, not merely exposed
+	 * through the hook: a tool the model can see but the runtime cannot find in
+	 * its tool map has no `execute` to call. The deferred tools stay registered
+	 * too, so revealing one is a schema visibility change, not a registration.
+	 *
+	 * The revealed set lives on the orchestrator rather than the per-run loader,
+	 * so a tool revealed in an earlier run of the same session stays revealed.
+	 */
+	private applyLazyToolLoading(tools: AgentTool[]): {
+		tools: AgentTool[];
+		lazyLoader?: ReturnType<typeof createToolSearchLoader>;
+	} {
+		const config = this.lazyToolLoading;
+		if (!config || config.enabled === false) {
+			return { tools };
+		}
+		const deferredNames = selectDeferredToolNames(tools, config);
+		if (deferredNames.length === 0) {
+			return { tools };
+		}
+		const wanted = new Set(deferredNames);
+		const lazyLoader = createToolSearchLoader({
+			deferredTools: tools.filter((tool) => wanted.has(tool.name)),
+			loaded: this.lazyToolLoaderLoaded,
+			maxResults: config.maxResults,
+		});
+		return { tools: [...tools, lazyLoader.tool], lazyLoader };
 	}
 
 	/**

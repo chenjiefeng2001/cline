@@ -49,6 +49,7 @@ export const SETTINGS_SCHEMA_MAP: Record<string, string> = {
 	maxParallelToolCalls: "maxParallelToolCalls",
 	maxToolCalls: "maxToolCalls",
 	maxSubAgentDepth: "maxSubAgentDepth",
+	lazyToolLoading: "lazyToolLoading",
 	runBudgetMaxTotalCost: "runBudgetMaxTotalCost",
 	fileBoundaryEnabled: "fileBoundaryEnabled",
 	fileBoundaryAdditionalRoots: "fileBoundaryAdditionalRoots",

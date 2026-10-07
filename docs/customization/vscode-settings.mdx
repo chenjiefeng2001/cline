@@ -20,6 +20,7 @@ These bound what a single agent run may cost.
 | `cline.maxConsecutiveMistakes` | `3` | Consecutive mistakes before the run pauses for you (0–10) |
 | `cline.maxToolCalls` | `0` | Tool calls per run. **`0` means no limit.** Reaching it ends the run as `tool_calls_exhausted` |
 | `cline.maxSubAgentDepth` | `0` | Levels of `spawn_agent` delegation. **`0` means "unset", so the SDK default of 1 applies** — see below |
+| `cline.lazyToolLoading` | `false` | Hide rarely-used tool schemas behind a `tool_search` meta-tool — see below |
 
 `0` is a decision, not a typo: it removes the ceiling entirely, which is useful
 for long autonomous runs. A value that is not a usable number — negative,
@@ -94,6 +95,23 @@ Two things to know before turning it on:
 The same switch is available in the CLI as `--sandbox` / `--sandbox-network`, and
 in ACP sessions as a session config option (an editor client can set it, seeded by
 `CLINE_PROCESS_SANDBOX`).
+
+## Lazy tool loading
+
+Every model request carries the full schema of every tool the session registered.
+Teams alone contribute 18, so a session that never uses teams still pays for all
+18 on every turn.
+
+With `cline.lazyToolLoading` on, rarely-used tool schemas are hidden behind a
+`tool_search` meta-tool. Deferred tools stay registered and callable — the model
+searches for one, and the best matches become visible to it on the next turn.
+`team_*` tools are deferred by default.
+
+It defaults to **off**, because revealing a tool costs one search round trip. On a
+default session it removes about 39% of the per-request tool array, at a cost of
+roughly 520 tokens for `tool_search` and its catalogue — so it suits long sessions
+that mostly avoid teams, and suits team-heavy sessions poorly. The same switch is
+available in the CLI as `--lazy-tool-loading`.
 
 ## MCP
 

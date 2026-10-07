@@ -2756,6 +2756,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 		};
 		const agent = this.createAgentInstance(agentConfig, {
 			wrapTools,
+			lazyToolLoading: configWithProvider.lazyToolLoading,
 			runtimeIdentity: startInput.runtimeIdentity,
 			initialRunId: restoringCheckpoint
 				? readCheckpointRunId(initialSessionMetadata)

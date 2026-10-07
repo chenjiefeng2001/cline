@@ -1015,6 +1015,11 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 	// SDK default stands, rather than restating it here where it could drift.
 	const maxSubAgentDepth = readOptionalPositiveInt(stateManager.getGlobalSettingsKey("maxSubAgentDepth"))
 
+	// Withhold rarely-used tool schemas behind `tool_search`. Passed as
+	// `enabled: true` only when the setting is on; an absent or false value
+	// leaves the SDK's opt-in default alone.
+	const lazyToolLoading = stateManager.getGlobalSettingsKey("lazyToolLoading") === true
+
 	// V16 §2 — prompt-caching wiring: the final prompt is now complete (base +
 	// rules + preferred language). Track it so successive builds (and Plan ⇄ Act
 	// switches) can be measured for shared-prefix stability. A stable prefix is
@@ -1109,6 +1114,7 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		},
 		enableSpawnAgent,
 		...(maxSubAgentDepth !== undefined ? { maxSubAgentDepth } : {}),
+		...(lazyToolLoading ? { lazyToolLoading: { enabled: true } } : {}),
 		enableAgentTeams,
 		// Mistake escalation cap. Previously absent, so the SDK used its hard-coded 6
 		// while the UI advertised the user's configured value - the setting looked live

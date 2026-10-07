@@ -345,6 +345,7 @@ export const ExtensionStateContextProvider: React.FC<{
 		fileBoundaryEnabled: true,
 		maxToolCalls: 0,
 		maxSubAgentDepth: 0,
+		lazyToolLoading: false,
 		sandboxEnabled: false,
 		sandboxNetworkAccess: false,
 		sandboxBackend: "",

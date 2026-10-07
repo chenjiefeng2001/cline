@@ -361,6 +361,11 @@ const USER_SETTINGS_FIELDS = {
 	// means "unset", so the SDK's default of 1 applies — restating it in the host
 	// would let the two drift apart.
 	maxSubAgentDepth: { default: 0 as number },
+	// Withhold rarely-used tool schemas behind a `tool_search` meta-tool. Team
+	// tools are deferred by default, which is 18 schemas off every request that
+	// never touches them. Default off: it costs one search round trip, which only
+	// pays off once a session is long enough for the saved tokens to matter.
+	lazyToolLoading: { default: false as boolean },
 	// OS-level process isolation for shell commands (macOS Seatbelt / Linux
 	// bubblewrap). Distinct from the file boundary above, which is a path check
 	// inside the file tools; this confines the process, so it also covers what the

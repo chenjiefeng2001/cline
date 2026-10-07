@@ -108,6 +108,7 @@ Source of truth: [CLI Reference](/cli/cli-reference)
 | `--max-parallel-tool-calls <count>` | Concurrent tool calls per turn (default `6`; `1` is serial) |
 | `--max-tool-calls <count>` | Cap tool calls for a single run (default: unlimited) |
 | `--max-subagent-depth <count>` | Levels of sub-agent delegation (default `1`; `0` forbids it) |
+| `--lazy-tool-loading` | Hide rarely-used tool schemas behind a `tool_search` meta-tool (default: off) |
 | `--sandbox` | Run shell commands in an OS process sandbox: writes confined to the workspace, network denied |
 | `--sandbox-network` | Let sandboxed commands reach the network |
 
