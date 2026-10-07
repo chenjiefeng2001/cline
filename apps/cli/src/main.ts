@@ -1170,6 +1170,9 @@ export async function runCli(): Promise<void> {
 			...(args.maxSubagentDepth !== undefined
 				? { maxSubAgentDepth: args.maxSubagentDepth }
 				: {}),
+			// Omitted unless the flag is passed: lazy loading is opt-in because it
+			// trades a search round trip for a smaller prompt.
+			...(args.lazyToolLoading ? { lazyToolLoading: { enabled: true } } : {}),
 			enableAgentTeams: !isYoloMode,
 			enableTools: true,
 			cwd,

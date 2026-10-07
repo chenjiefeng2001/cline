@@ -337,8 +337,10 @@ Desktop-integrated approval mode is also supported via env wiring (`CLINE_TOOL_A
 - `AI_GATEWAY_API_KEY` - API key for Vercel AI Gateway (when using `-P vercel-ai-gateway`)
 - `V0_API_KEY` - API key for v0 (when using `-P v0`)
 - `CLINE_DATA_DIR` - Base data directory for sessions/settings/teams/hooks
-- `CLINE_SANDBOX` - Set to `1` to force sandbox mode
+- `CLINE_SANDBOX` - Set to `1` to isolate state into a sandbox directory. This is data-directory isolation only; for OS process isolation use `CLINE_PROCESS_SANDBOX`.
 - `CLINE_SANDBOX_DATA_DIR` - Override sandbox state directory
+- `CLINE_PROCESS_SANDBOX` - Set to `1` to run shell commands in an OS process sandbox (Seatbelt / bubblewrap): writes confined to the workspace, network denied. Fail-closed, and unsupported on Windows.
+- `CLINE_PROCESS_SANDBOX_NETWORK` - Set to `1` to let sandboxed commands reach the network (implies `CLINE_PROCESS_SANDBOX`)
 - `CLINE_TEAM_DATA_DIR` - Override team persistence directory
 - `CLINE_MAX_ITERATIONS` - Iteration ceiling for ACP sessions, which have no flags (default `50`)
 - `CLINE_MAX_BUDGET_USD` - Spend ceiling in USD for ACP sessions (default `5`)

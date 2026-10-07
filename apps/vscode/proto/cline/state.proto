@@ -313,6 +313,7 @@ message Settings {
   optional string sandbox_backend = 207;
   optional int32 max_tool_calls = 208;
   optional int32 max_sub_agent_depth = 209;
+  optional bool lazy_tool_loading = 210;
 }
 
 message State {
@@ -483,6 +484,8 @@ message UpdateSettingsRequest {
   optional int32 max_tool_calls = 65;
   // Levels of spawn_agent nesting; 0 means the SDK default.
   optional int32 max_sub_agent_depth = 66;
+  // Withhold rarely-used tool schemas behind a `tool_search` meta-tool.
+  optional bool lazy_tool_loading = 67;
   // Spend ceiling in USD for one agent run (0 = no ceiling).
   optional double run_budget_max_total_cost = 49;
   // Restrict the file tools to the session workspace.

@@ -50,6 +50,7 @@ Options:
   --max-parallel-tool-calls <count>  Tool calls executed concurrently within one turn (default: 6; 1 forces serial)
   --max-tool-calls <count>      Maximum tool calls a single run may execute (default: unlimited)
   --max-subagent-depth <count>  Levels of sub-agent delegation allowed (default: 1)
+  --lazy-tool-loading          Withhold rarely-used tool schemas behind a tool_search meta-tool
   --sandbox                    Run shell commands inside an OS process sandbox
   --sandbox-network            Let sandboxed shell commands reach the network
   -h, --help                   display help for command
@@ -287,6 +288,24 @@ environment variable cannot quietly remove a limit. Two deliberate exceptions:
 typo landing on `0` is rejected instead of read as "no ceiling"), and
 `--max-subagent-depth` accepts `0` because it is meaningful there — `0` forbids
 delegation entirely, whereas omitting the flag leaves the default of `1`.
+
+### Lazy tool loading
+
+`--lazy-tool-loading` withholds rarely-used tool schemas behind a `tool_search`
+meta-tool. Every model request otherwise carries the full schema of every tool the
+session registered, and teams alone contribute 18 of them — so a run that never
+touches teams still pays for all 18 on every turn.
+
+With the flag on, deferred tools are hidden from the model but stay registered and
+callable. `tool_search` takes a plain-language query, and the best matches become
+visible to the model on its next turn. Deferred tools are `team_*` by default.
+
+It is **off by default**: revealing a tool costs one search round trip, which only
+pays off once a session is long enough for the saved tokens to outweigh it. Turn it
+on for long sessions, or leave it off for short ones.
+
+Delegated sub-agents are unaffected — they keep the full tool set, since teams are
+a lead-level capability.
 
 ### OS process sandbox
 

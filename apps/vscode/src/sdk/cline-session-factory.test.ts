@@ -908,6 +908,47 @@ describe("buildSessionConfig", () => {
 		})
 	})
 
+	/**
+	 * Lazy tool loading is opt-in, so the "off" case matters as much as the "on"
+	 * one: a truthiness slip would leave the field unset when enabled (feature
+	 * silently dead) or set when disabled (a search round trip nobody asked for).
+	 */
+	describe("lazyToolLoading setting", () => {
+		const withLazyToolLoading = (raw: unknown) => {
+			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {
+				if (key === "lazyToolLoading") {
+					return raw
+				}
+				if (key === "subagentsEnabled" || key === "useAutoCondense") {
+					return false
+				}
+				return undefined
+			})
+			return () => buildSessionConfig({ cwd: "/tmp/workspace" })
+		}
+
+		it("omits the config entirely when the setting is absent", async () => {
+			// Omitted, not `false`: the SDK reads an absent field as disabled, so
+			// passing `false` would be fine but asserting absence keeps the
+			// opt-in default in one place.
+			expect((await withLazyToolLoading(undefined)()).lazyToolLoading).toBeUndefined()
+		})
+
+		it("enables it when the setting is true", async () => {
+			expect((await withLazyToolLoading(true)()).lazyToolLoading).toEqual({
+				enabled: true,
+			})
+		})
+
+		it("stays off for false and for non-boolean values", async () => {
+			// VS Code settings can arrive as strings from a hand-edited state file;
+			// only a real boolean should turn this on.
+			for (const off of [false, 0, 1, "true", "", null]) {
+				expect((await withLazyToolLoading(off)()).lazyToolLoading).toBeUndefined()
+			}
+		})
+	})
+
 	describe("sandbox settings", () => {
 		const withSandboxSettings = (settings: Record<string, unknown>): (() => Promise<CoreSessionConfig>) => {
 			mocks.stateManager.getGlobalSettingsKey.mockImplementation((key: string) => {

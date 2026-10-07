@@ -130,6 +130,25 @@ export interface CoreModelConfig {
 	temperature?: number;
 }
 
+/**
+ * Serialisable form of the lazy tool-loading setting.
+ *
+ * A predicate would be more expressive, but session config crosses the hub
+ * boundary and is rebuilt in the daemon process, so it has to survive
+ * serialisation as plain data.
+ */
+export interface CoreLazyToolLoadingConfig {
+	/** Default `true` when the field is present at all. */
+	enabled?: boolean;
+	/**
+	 * Tool names to defer, supporting a single trailing `*` wildcard.
+	 * Defaults to `["team_*"]`.
+	 */
+	defer?: string[];
+	/** Cap on how many tools one `tool_search` call reveals. Default 5. */
+	maxResults?: number;
+}
+
 export interface CoreRuntimeFeatures {
 	enableTools: boolean;
 	enableSpawnAgent: boolean;
@@ -148,6 +167,19 @@ export interface CoreRuntimeFeatures {
 	 */
 	maxSubAgentDepth?: number;
 	enableAgentTeams: boolean;
+	/**
+	 * Withhold most tool schemas behind a `tool_search` meta-tool so the model
+	 * only pays for the ones it uses [S4].
+	 *
+	 * Teams alone add 18 tools, and a run that never touches them still ships
+	 * every schema. Deferred tools stay registered and executable — they are
+	 * simply hidden from the model until it searches, so nothing becomes
+	 * unreachable the way a depth-withheld tool does.
+	 *
+	 * Omitted means disabled. It stays opt-in because it trades a first-search
+	 * round trip for a smaller prompt, which is a worse deal for short sessions.
+	 */
+	lazyToolLoading?: CoreLazyToolLoadingConfig;
 	disableMcpSettingsTools?: boolean;
 	yolo?: boolean;
 }

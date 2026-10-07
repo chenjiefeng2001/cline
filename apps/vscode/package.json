@@ -459,6 +459,11 @@
 					"type": "number",
 					"description": "Levels of sub-agent delegation allowed (the root session is 0). Default 1: the root can delegate, a delegate cannot delegate again. Raise it only for recursive delegation - deep nesting multiplies tokens, latency and local load."
 				},
+				"cline.lazyToolLoading": {
+					"type": "boolean",
+					"default": false,
+					"description": "Withhold rarely-used tool schemas behind a `tool_search` meta-tool, so each request sends fewer tokens. Team tools are deferred by default. Revealed tools stay callable for the rest of the session. Off by default, since it costs one search round trip."
+				},
 				"cline.fileBoundaryEnabled": {
 					"type": "boolean",
 					"description": "Restrict file tools (read_files, editor) to the session workspace. Turning this off lets the agent reach any path on disk — prefer adding directories to cline.fileBoundaryAdditionalRoots instead."
