@@ -6,7 +6,6 @@ import {
 	readdir,
 	realpath,
 	rm,
-	stat,
 	utimes,
 	writeFile,
 } from "node:fs/promises";
