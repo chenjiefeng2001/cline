@@ -193,6 +193,17 @@ jobs:
               working-directory: ${{ github.workspace }}
               run: bun run build:sdk
 
+            # This job was the only one that ran for a CLI-only change, and it
+            # typechecked nothing: `Quality Checks` is gated on the vscode and
+            # testing_platform filters, and `sdk-test` on `sdk/**`. Two type errors
+            # reached main that way (`readdir` withFileTypes returning Dirent[]
+            # declared as string[], plus an unused import). The script is
+            # `typecheck`, not `check-types`, which is what made the gap easy to
+            # miss locally as well.
+            - name: Typecheck CLI
+              working-directory: ${{ github.workspace }}
+              run: bun -F @cline/cli typecheck
+
             - name: Run CLI tests
               working-directory: ${{ github.workspace }}
               run: bun -F @cline/cli test

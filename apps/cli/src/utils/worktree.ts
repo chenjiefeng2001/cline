@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import type { Dirent } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { access, mkdir, readdir, rm, stat } from "node:fs/promises";
 import * as path from "node:path";
@@ -181,7 +182,7 @@ export async function pruneTaskWorktrees(options?: {
 	const skipped: string[] = [];
 	let failed = 0;
 
-	let taskDirs: string[];
+	let taskDirs: Dirent[];
 	try {
 		taskDirs = await readdir(getTaskWorktreesHomePath(), { withFileTypes: true });
 	} catch {
@@ -194,7 +195,7 @@ export async function pruneTaskWorktrees(options?: {
 			continue;
 		}
 		const taskPath = path.join(getTaskWorktreesHomePath(), taskDir.name);
-		let workspaceDirs: import("node:fs").Dirent[];
+		let workspaceDirs: Dirent[];
 		try {
 			workspaceDirs = await readdir(taskPath, { withFileTypes: true });
 		} catch {
@@ -247,7 +248,7 @@ export interface PruneTaskWorktreesResult {
  */
 async function newestMtimeMs(dir: string, depth = 2): Promise<number> {
 	let newest = 0;
-	let entries: import("node:fs").Dirent[];
+	let entries: Dirent[];
 	try {
 		entries = await readdir(dir, { withFileTypes: true });
 	} catch {
