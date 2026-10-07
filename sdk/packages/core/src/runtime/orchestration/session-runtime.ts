@@ -24,6 +24,7 @@ import type {
 } from "../../extensions/tools/team";
 import type { WorkspaceManager } from "../../services/workspace/workspace-manager";
 import type { CoreSessionConfig } from "../../types/config";
+import type { SubAgentRunRegistry } from "./subagent-run-registry";
 
 /**
  * Internal structural alias for the lead-agent handle that
@@ -45,6 +46,12 @@ export interface BuiltRuntime {
 	telemetry?: ITelemetryService;
 	teamRuntime?: AgentTeamsRuntime;
 	teamRestoredFromPersistence?: boolean;
+	/**
+	 * Backgrounded sub-agent runs, owned per session so a result stays readable
+	 * after the run that produced it has ended. Distinct from `teamRuntime.runs`,
+	 * which is gated on `enableAgentTeams` and assumes live `teammate` members.
+	 */
+	subAgentRuns?: SubAgentRunRegistry;
 	delegatedAgentConfigProvider?: DelegatedAgentConfigProvider;
 	extensions?: AgentConfig["extensions"];
 	completionPolicy?: AgentConfig["completionPolicy"];
@@ -66,7 +73,11 @@ export interface RuntimeBuilderInput {
 	onSubAgentEvent?: (event: AgentEvent) => void;
 	onSubAgentStart?: (context: SubAgentStartContext) => void | Promise<void>;
 	onSubAgentEnd?: (context: SubAgentEndContext) => void | Promise<void>;
-	createSpawnTool?: () => AgentTool;
+	/**
+	 * Builds the session's `spawn_agent`. Receives the registry that backs
+	 * `background: true` so the tool and its reader share one store.
+	 */
+	createSpawnTool?: (runs?: SubAgentRunRegistry) => AgentTool;
 	onTeamRestored?: () => void;
 	userInstructionService?: UserInstructionConfigService;
 	pluginSkillDirectories?: ReadonlyArray<string>;

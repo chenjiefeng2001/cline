@@ -482,3 +482,181 @@ describe("createSpawnAgentTool", () => {
 		);
 	});
 });
+
+/**
+ * Backgrounding is only safe because of the run registry: without it the child
+ * would finish where nobody can read it and its tokens would be spent invisibly.
+ * These tests pin that contract, including the abort detail that is easy to get
+ * wrong and impossible to notice.
+ */
+describe("spawn_agent background mode", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	const provider = () =>
+		createDelegatedAgentConfigProvider({
+			providerId: "anthropic",
+			modelId: "mock-model",
+		});
+
+	const resolved = (text: string) => ({
+		text,
+		iterations: 1,
+		finishReason: "completed",
+		usage: { inputTokens: 5, outputTokens: 3 },
+	});
+
+	it("returns a runId immediately without waiting for the child", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		const { SubAgentRunRegistry } = await import(
+			"../../../runtime/orchestration/subagent-run-registry.js"
+		);
+		let release: (() => void) | undefined;
+		runMock.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					release = () => resolve(resolved("late answer"));
+				}),
+		);
+		const runs = new SubAgentRunRegistry();
+		const tool = createSpawnAgentTool({ configProvider: provider(), runs });
+
+		const output = (await tool.execute(
+			{ systemPrompt: "focused", task: "long work", background: true },
+			{ agentId: "parent", conversationId: "conv", iteration: 1 },
+		)) as unknown as { started: boolean; runId: string };
+
+		// The call must not have waited: that is the entire point.
+		expect(output.started).toBe(true);
+		expect(output.runId).toBeTruthy();
+		expect(runs.get(output.runId)?.status).toBe("running");
+
+		release?.();
+		await vi.waitFor(() => expect(runs.get(output.runId)?.status).toBe("completed"));
+		expect(runs.get(output.runId)?.resultText).toBe("late answer");
+	});
+
+	it("records a failure so the work is not silently lost", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		const { SubAgentRunRegistry } = await import(
+			"../../../runtime/orchestration/subagent-run-registry.js"
+		);
+		runMock.mockRejectedValue(new Error("provider 500"));
+		const runs = new SubAgentRunRegistry();
+		const tool = createSpawnAgentTool({ configProvider: provider(), runs });
+
+		const output = (await tool.execute(
+			{ systemPrompt: "focused", task: "doomed work", background: true },
+			{ agentId: "parent", conversationId: "conv", iteration: 1 },
+		)) as unknown as { runId: string };
+
+		await vi.waitFor(() =>
+			expect(runs.get(output.runId)?.status).toBe("failed"),
+		);
+		expect(runs.get(output.runId)?.error).toContain("provider 500");
+	});
+
+	it("does NOT inherit the parent turn's abort signal", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		const { SubAgentRunRegistry } = await import(
+			"../../../runtime/orchestration/subagent-run-registry.js"
+		);
+		runMock.mockResolvedValue(resolved("done"));
+		const runs = new SubAgentRunRegistry();
+		const tool = createSpawnAgentTool({ configProvider: provider(), runs });
+		const controller = new AbortController();
+
+		await tool.execute(
+			{ systemPrompt: "focused", task: "background work", background: true },
+			{
+				agentId: "parent",
+				conversationId: "conv",
+				iteration: 1,
+				signal: controller.signal,
+			},
+		);
+
+		// Inheriting it would abort the child the moment the starting turn ended,
+		// which is the opposite of backgrounding.
+		expect(agentConstructorSpy).toHaveBeenCalledWith(
+			expect.not.objectContaining({ abortSignal: expect.anything() }),
+		);
+	});
+
+	it("still inherits the abort signal for a normal blocking spawn", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		runMock.mockResolvedValue(resolved("done"));
+		const tool = createSpawnAgentTool({ configProvider: provider() });
+		const controller = new AbortController();
+
+		await tool.execute(
+			{ systemPrompt: "focused", task: "blocking work" },
+			{
+				agentId: "parent",
+				conversationId: "conv",
+				iteration: 1,
+				signal: controller.signal,
+			},
+		);
+
+		expect(agentConstructorSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ abortSignal: controller.signal }),
+		);
+	});
+
+	it("refuses backgrounding when no registry is configured", async () => {
+		// Falling back to a blocking run would ignore what the caller asked for,
+		// and running detached would lose the result. Both are worse than failing.
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		const tool = createSpawnAgentTool({ configProvider: provider() });
+		await expect(
+			tool.execute(
+				{ systemPrompt: "focused", task: "work", background: true },
+				{ agentId: "parent", conversationId: "conv", iteration: 1 },
+			),
+		).rejects.toThrow(/run registry/i);
+		expect(runMock).not.toHaveBeenCalled();
+	});
+
+	it("still forwards lifecycle callbacks for a background run", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		const { SubAgentRunRegistry } = await import(
+			"../../../runtime/orchestration/subagent-run-registry.js"
+		);
+		runMock.mockResolvedValue(resolved("answer"));
+		const onSubAgentStart = vi.fn();
+		const onSubAgentEnd = vi.fn();
+		const tool = createSpawnAgentTool({
+			configProvider: provider(),
+			runs: new SubAgentRunRegistry(),
+			onSubAgentStart,
+			onSubAgentEnd,
+		});
+
+		await tool.execute(
+			{ systemPrompt: "focused", task: "work", background: true },
+			{ agentId: "parent", conversationId: "conv", iteration: 1 },
+		);
+
+		await vi.waitFor(() => expect(onSubAgentEnd).toHaveBeenCalledTimes(1));
+		expect(onSubAgentStart).toHaveBeenCalledTimes(1);
+	});
+
+	it("labels a run from the task when no label is given", async () => {
+		const { createSpawnAgentTool } = await import("./spawn-agent-tool.js");
+		const { SubAgentRunRegistry } = await import(
+			"../../../runtime/orchestration/subagent-run-registry.js"
+		);
+		runMock.mockResolvedValue(resolved("done"));
+		const runs = new SubAgentRunRegistry();
+		const tool = createSpawnAgentTool({ configProvider: provider(), runs });
+
+		const output = (await tool.execute(
+			{ systemPrompt: "f", task: "Check the auth flow", background: true },
+			{ agentId: "parent", conversationId: "conv", iteration: 1 },
+		)) as unknown as { label: string };
+		// Status listings are unreadable if every row is blank.
+		expect(output.label).toBe("Check the auth flow");
+	});
+});

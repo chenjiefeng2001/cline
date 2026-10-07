@@ -46,6 +46,7 @@ import type {
 	StartSessionInput,
 } from "../runtime/host/runtime-host";
 import type { RuntimeBuilderInput } from "../runtime/orchestration/session-runtime";
+import type { SubAgentRunRegistry } from "../runtime/orchestration/subagent-run-registry";
 import { SessionSource } from "../types/common";
 import type { CoreSessionConfig } from "../types/config";
 import {
@@ -244,7 +245,11 @@ export interface PrepareLocalRuntimeBootstrapOptions {
 		onSubAgentStart?: (context: SubAgentStartContext) => void | Promise<void>;
 		onSubAgentEnd?: (context: SubAgentEndContext) => void | Promise<void>;
 	};
-	createSpawnTool: () => AgentTool;
+	/**
+	 * Builds the session's `spawn_agent`. Receives the registry backing
+	 * `background: true`, supplied by the runtime builder that owns it.
+	 */
+	createSpawnTool: (runs?: SubAgentRunRegistry) => AgentTool;
 	readSessionMetadata: () => Promise<Record<string, unknown> | undefined>;
 	writeSessionMetadata: (
 		metadata: Record<string, unknown>,

@@ -1085,3 +1085,77 @@ Review skill.`,
 		await runtime.shutdown("test");
 	});
 });
+
+/**
+ * End-to-end wiring for backgrounded sub-agents, at the layer where the session
+ * tool list is actually assembled. The registry must be created here and handed
+ * to the spawn tool, otherwise `background: true` is either refused or, worse,
+ * accepted with nowhere to store the result.
+ */
+describe("background sub-agent wiring", () => {
+	it("hands the spawn tool a registry and exposes it on the built runtime", async () => {
+		const runtime = await new DefaultRuntimeBuilder().build({
+			config: makeBaseConfig({
+				enableSpawnAgent: true,
+				enableAgentTeams: false,
+			}),
+			createSpawnTool: (runs) => {
+				expect(runs).toBeDefined();
+				return makeSpawnTool();
+			},
+		});
+		expect(runtime.subAgentRuns).toBeDefined();
+		expect(runtime.subAgentRuns?.hasRunning()).toBe(false);
+	});
+
+	it("reuses one registry across builds for the same session key", async () => {
+		// A per-build registry would lose results the moment a run finished and the
+		// next run rebuilt the runtime, which is the normal cadence.
+		const builder = new DefaultRuntimeBuilder();
+		const input = {
+			config: makeBaseConfig({
+				enableSpawnAgent: true,
+				enableAgentTeams: false,
+				sessionId: "session-x",
+			}),
+			createSpawnTool: () => makeSpawnTool(),
+		};
+		const first = await builder.build(input);
+		first.subAgentRuns?.start({
+			subAgentId: "a1",
+			conversationId: "c1",
+			label: "reviewer",
+			task: "review",
+		});
+		const second = await builder.build(input);
+		expect(second.subAgentRuns).toBe(first.subAgentRuns);
+		expect(second.subAgentRuns?.list()).toHaveLength(1);
+	});
+
+	it("provides a registry even when teams are disabled", async () => {
+		// Backgrounding is a sub-agent feature; gating it on teams would hide it
+		// from every session that has teams off, which is not the default.
+		const runtime = await new DefaultRuntimeBuilder().build({
+			config: makeBaseConfig({
+				enableSpawnAgent: true,
+				enableAgentTeams: false,
+			}),
+			createSpawnTool: () => makeSpawnTool(),
+		});
+		expect(runtime.teamRuntime).toBeUndefined();
+		expect(runtime.subAgentRuns).toBeDefined();
+	});
+
+	it("passes a registry even when delegation is off", async () => {
+		// Cheap and harmless, and it means a host enabling delegation later does
+		// not need a second code path.
+		const runtime = await new DefaultRuntimeBuilder().build({
+			config: makeBaseConfig({
+				enableSpawnAgent: false,
+				enableAgentTeams: false,
+			}),
+			createSpawnTool: () => makeSpawnTool(),
+		});
+		expect(runtime.subAgentRuns).toBeDefined();
+	});
+});

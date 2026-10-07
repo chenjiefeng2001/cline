@@ -62,6 +62,7 @@ import type {
 	RuntimeBuilderInput,
 	BuiltRuntime as RuntimeEnvironment,
 } from "./session-runtime";
+import { SubAgentRunRegistry } from "./subagent-run-registry";
 
 function hasConfigExtension(
 	extensions: ReadonlyArray<RuntimeConfigExtensionKind> | undefined,
@@ -510,6 +511,12 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 		string,
 		{
 			runtime?: AgentTeamsRuntime;
+			/**
+			 * Backgrounded sub-agent runs, one per session key. Held here rather than
+			 * on the built runtime so a result outlives the run that produced it,
+			 * which is the whole point of backgrounding.
+			 */
+			subAgentRuns?: SubAgentRunRegistry;
 			delegatedAgentConfigProvider: ReturnType<
 				typeof createDelegatedAgentConfigProvider
 			>;
@@ -836,21 +843,33 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 				);
 			}
 		}
-		if (!this.teamRuntimeEntries.has(registryKey)) {
+if (!this.teamRuntimeEntries.has(registryKey)) {
 			this.teamRuntimeEntries.set(registryKey, {
 				delegatedAgentConfigProvider,
 			});
 		}
+
+		const sessionEntry = this.teamRuntimeEntries.get(registryKey) as {
+			runtime?: AgentTeamsRuntime;
+			subAgentRuns?: SubAgentRunRegistry;
+			delegatedAgentConfigProvider: ReturnType<
+				typeof createDelegatedAgentConfigProvider
+			>;
+		};
+		// Created once per session key, not per run, so a result stays readable
+		// after the run that produced it has finished. Deliberately independent of
+		// `enableAgentTeams`: backgrounding is a sub-agent feature, and gating it
+		// on teams would hide it from every session with teams off.
+		sessionEntry.subAgentRuns ??= new SubAgentRunRegistry();
+		this.teamRuntimeEntries.set(registryKey, sessionEntry);
+		const subAgentRuns = sessionEntry.subAgentRuns;
 
 		const ensureTeamRuntime = (): AgentTeamsRuntime | undefined => {
 			if (!normalized.enableAgentTeams) {
 				return undefined;
 			}
 
-			const registryEntry = this.teamRuntimeEntries.get(registryKey) ?? {
-				delegatedAgentConfigProvider,
-			};
-			this.teamRuntimeEntries.set(registryKey, registryEntry);
+			const registryEntry = sessionEntry;
 			teamRuntime = registryEntry.runtime;
 
 			if (!teamRuntime) {
@@ -947,7 +966,9 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 		};
 
 		if (normalized.enableSpawnAgent && createSpawnTool) {
-			const spawnTool = createSpawnTool();
+			// The registry reaches the tool here, which is what makes
+			// `background: true` readable instead of fire-and-forget.
+			const spawnTool = createSpawnTool(subAgentRuns);
 			tools.push({
 				...spawnTool,
 				execute: async (spawnInput, context) => {
@@ -1016,6 +1037,9 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 			telemetry: telemetry ?? config.telemetry,
 			teamRuntime,
 			teamRestoredFromPersistence: Boolean(restoredTeamState),
+			// Exposed so the host can drain, prune or report outstanding runs at
+			// session teardown.
+			subAgentRuns,
 			delegatedAgentConfigProvider:
 				this.teamRuntimeEntries.get(registryKey)
 					?.delegatedAgentConfigProvider ?? delegatedAgentConfigProvider,

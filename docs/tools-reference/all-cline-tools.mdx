@@ -22,7 +22,8 @@ When running through `ClineCore`, these built-ins are available:
 | `skills` | Run a configured skill inside the main conversation |
 | `ask_question` | Ask the user one multiple-choice question |
 | `submit_and_exit` | Submit a final answer and stop (opt-in, off by default) |
-| `spawn_agent` | Delegate a task to a subagent with a custom system prompt |
+| `spawn_agent` | Delegate a task to a subagent with a custom system prompt. Set `background: true` to start it and continue immediately |
+| `subagent_runs` | Read the status and results of backgrounded subagents |
 | `teams` | Expand into the 18 `team_*` tools (opt-in, off by default) |
 
 Hosts may add their own. The VS Code extension contributes `attempt_completion`,
@@ -46,9 +47,36 @@ can otherwise fan out until the machine is saturated. Raise the bound with
 delegation entirely.
 
 `team_*` tools are a separate surface with their own concurrency ceiling
-(`maxConcurrentRuns`, default 2) and their own roles, and teammate-style
-asynchronous delegation is available there — `spawn_agent` itself is synchronous
-and waits for the subagent to finish.
+(`maxConcurrentRuns`, default 2) and their own roles.
+
+### Background subagents
+
+By default `spawn_agent` waits for the subagent to finish and returns its result in
+the same turn. Passing `background: true` starts it and returns a `runId`
+immediately, so you can keep working while it runs.
+
+**Nothing is delivered automatically.** A backgrounded subagent's result is not
+pushed back to you — read it with `subagent_runs`, either `read` when you want it or
+`await` to block until it finishes. Its tokens are spent either way, so a backgrounded
+subagent you never read is wasted work.
+
+```json
+{ "action": "await", "runId": "subrun_00001", "includeResult": true }
+```
+
+`subagent_runs` also takes `list` for status across all runs and `prune` to drop
+finished records. A run's status is `running`, `completed` or `failed`; `await`
+reports `stillRunning` rather than failing when it times out, since the run may
+legitimately still be going.
+
+Backgrounding is available on the root session only. A delegate has no
+`subagent_runs` tool, so a backgrounded subagent spawned deeper down would have
+nowhere to be read from, and `background: true` is refused rather than silently
+becoming fire-and-forget.
+
+A backgrounded subagent is **not** cancelled when the turn that started it ends —
+that is the point — but it is still bounded by its own `maxIterations`, and a failed
+run is recorded as `failed` with its error rather than being dropped.
 
 ## Tool Categories
 

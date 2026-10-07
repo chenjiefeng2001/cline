@@ -10,6 +10,8 @@ import type {
 	SubAgentStartContext,
 } from "../../../extensions/tools/team";
 import { createSpawnAgentTool } from "../../../extensions/tools/team";
+import type { SubAgentRunRegistry } from "../../orchestration/subagent-run-registry";
+import { createSubAgentRunsTool } from "../../orchestration/subagent-runs-tool";
 import { buildTelemetryAgentIdentity } from "../../../services/agent-events";
 import { filterDisabledTools } from "../../../services/global-settings";
 import {
@@ -153,6 +155,12 @@ export function createSessionSpawnTool(
 	toolExecutors?: Partial<ToolExecutors>,
 	/** Current nesting level; the root session passes 0 (the default). */
 	depth = 0,
+	/**
+	 * Registry backing `background: true`. Only the root session gets one, so a
+	 * sub-agent cannot spawn further background runs whose results would have
+	 * nowhere to be read from.
+	 */
+	runs?: SubAgentRunRegistry,
 ): AgentTool {
 	const lifecycle = createSessionSubAgentLifecycleCallbacks(
 		deps,
@@ -177,8 +185,17 @@ export function createSessionSpawnTool(
 					rootSessionId,
 					toolExecutors,
 					depth + 1,
+					// Not forwarded: a sub-agent has no `subagent_runs` tool to read
+					// them, so backgrounding deeper down would be fire-and-forget.
+					undefined,
 				),
 			);
+		}
+		// The reader tool ships alongside spawn_agent so a backgrounded run is
+		// always reachable. Depth-gated the same way, since without spawn there is
+		// nothing to read.
+		if (runs && isSubAgentDepthAllowed(config, depth)) {
+			tools.push(createSubAgentRunsTool(runs));
 		}
 		return filterDisabledTools(tools);
 	};
@@ -221,6 +238,9 @@ export function createSessionSpawnTool(
 		},
 		createSubAgentTools,
 		wrapTools: deps.wrapTools,
+		// Omitted rather than passed as undefined so `background: true` is refused
+		// with a clear message instead of silently behaving like a blocking run.
+		...(runs ? { runs } : {}),
 		...lifecycle,
 	}) as AgentTool;
 }

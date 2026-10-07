@@ -2443,12 +2443,14 @@ export class LocalRuntimeHost implements RuntimeHost {
 				void this.eventBridge.handleTeamEvent(sessionId, event);
 				bootstrap.config.onTeamEvent?.(event);
 			},
-			createSpawnTool: () =>
+			createSpawnTool: (runs) =>
 				createSessionSpawnTool(
 					subAgentDeps,
 					bootstrap.config,
 					sessionId,
 					sessionToolExecutors,
+					0,
+					runs,
 				),
 			createSubAgentLifecycleCallbacks: (config) =>
 				createSessionSubAgentLifecycleCallbacks(
