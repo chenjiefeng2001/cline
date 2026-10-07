@@ -138,3 +138,60 @@ describe("subagent_runs tool", () => {
 		await expect(call({ action: "read" })).rejects.toThrow();
 	});
 });
+
+/**
+ * "Finished" is not the same as "used". A backgrounded run whose result is never
+ * collected still cost tokens, and the completion guard depends on `readAt` to tell
+ * those apart, so these pin when a read actually counts as collecting.
+ */
+describe("subagent_runs collection tracking", () => {
+	it("marks a run read only when the result was requested", async () => {
+		const { runs, call } = setup();
+		const record = startRun(runs);
+		runs.complete(record.runId, { text: "the answer" });
+
+		await call({ action: "read", runId: record.runId });
+		// A status-only read is not collection: the model still has no answer.
+		expect(runs.unread()).toHaveLength(1);
+
+		await call({ action: "read", runId: record.runId, includeResult: true });
+		expect(runs.unread()).toHaveLength(0);
+	});
+
+	it("marks a run read after await with the result", async () => {
+		const { runs, call } = setup();
+		const record = startRun(runs);
+		runs.complete(record.runId, { text: "the answer" });
+		await call({ action: "await", runId: record.runId, includeResult: true });
+		expect(runs.unread()).toHaveLength(0);
+	});
+
+	it("leaves a run unread when await times out", async () => {
+		// Otherwise a timed-out wait would silently mark work as collected while the
+		// result is still unread and still costing tokens.
+		const { runs, call } = setup();
+		const record = startRun(runs);
+		await call({ action: "await", runId: record.runId, timeoutMs: 10 });
+		expect(runs.unread()).toHaveLength(0); // still running, not yet settled
+		runs.complete(record.runId, { text: "late" });
+		expect(runs.unread()).toHaveLength(1);
+	});
+
+	it("ignores an unknown runId rather than marking something read", async () => {
+		const { runs, call } = setup();
+		const record = startRun(runs);
+		runs.complete(record.runId, { text: "x" });
+		await call({ action: "read", runId: "subrun_99999", includeResult: true });
+		expect(runs.get(record.runId)?.readAt).toBeUndefined();
+		expect(runs.unread()).toHaveLength(1);
+	});
+
+	it("pruning drops unread records so the guard stops nagging", async () => {
+		const { runs, call } = setup();
+		const record = startRun(runs);
+		runs.complete(record.runId, { text: "x" });
+		expect(runs.unread()).toHaveLength(1);
+		await call({ action: "prune" });
+		expect(runs.unread()).toHaveLength(0);
+	});
+});

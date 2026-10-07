@@ -69,6 +69,17 @@ finished records. A run's status is `running`, `completed` or `failed`; `await`
 reports `stillRunning` rather than failing when it times out, since the run may
 legitimately still be going.
 
+<Note>
+  A result counts as collected only when you read it with `includeResult: true`. A
+  status-only `read` or `list` tells you a run exists but not what it found, so it
+  does not mark the result collected.
+</Note>
+
+While any background subagent is still running **or** has a result you have not
+read, the session holds off finishing the turn and tells you which ones need
+collecting. That is deliberate: without it, a completed-but-unread result is the
+easy mistake to make, since nothing about a finished run looks outstanding.
+
 Backgrounding is available on the root session only. A delegate has no
 `subagent_runs` tool, so a backgrounded subagent spawned deeper down would have
 nowhere to be read from, and `background: true` is refused rather than silently

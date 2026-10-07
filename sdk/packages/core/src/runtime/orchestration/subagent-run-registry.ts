@@ -30,6 +30,14 @@ export interface SubAgentRunRecord {
 	status: SubAgentRunStatus;
 	startedAt: number;
 	completedAt?: number;
+	/**
+	 * Set once the parent has actually collected this run's outcome.
+	 *
+	 * Tracked separately from `status` because "finished" is not the same as
+	 * "used": a run that completed while nobody read it still cost tokens, and that
+	 * is the waste this registry exists to prevent.
+	 */
+	readAt?: number;
 	/** Child's final text. Truncated on read so a long result cannot flood a turn. */
 	resultText?: string;
 	error?: string;
@@ -124,6 +132,26 @@ export class SubAgentRunRegistry {
 
 	hasRunning(): boolean {
 		return [...this.runs.values()].some((run) => run.status === "running");
+	}
+
+	/**
+	 * Marks a run's outcome as collected. Returns false for an unknown run so a
+	 * typo'd id does not look like a successful read.
+	 */
+	markRead(runId: string): boolean {
+		const record = this.runs.get(runId);
+		if (!record) {
+			return false;
+		}
+		record.readAt = Date.now();
+		return true;
+	}
+
+	/** Runs that have settled but whose result was never collected. */
+	unread(): SubAgentRunRecord[] {
+		return [...this.runs.values()].filter(
+			(run) => run.status !== "running" && run.readAt === undefined,
+		);
 	}
 
 	/**

@@ -110,6 +110,12 @@ export function createSubAgentRunsTool(
 				if (!record) {
 					return { error: `Unknown run: ${runId}` };
 				}
+				if (includeResult) {
+					// Reading the result is what marks it collected. Without this the
+					// completion guard could never tell a result that was used from one
+					// that was paid for and ignored.
+					runs.markRead(runId);
+				}
 				return {
 					run: describeSubAgentRun(
 						includeResult ? record : { ...record, resultText: undefined },
@@ -127,6 +133,11 @@ export function createSubAgentRunsTool(
 				const record = await runs.await(runId, timeoutMs ?? 60_000);
 				if (!record) {
 					return { error: `Unknown run: ${runId}` };
+				}
+				// Only a settled run counts as collected; a timeout leaves it unread so
+				// the guard still prompts.
+				if (includeResult && record.status !== "running") {
+					runs.markRead(runId);
 				}
 				return {
 					run: describeSubAgentRun(
