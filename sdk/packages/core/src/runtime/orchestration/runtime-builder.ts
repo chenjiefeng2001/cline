@@ -1020,16 +1020,66 @@ if (!this.teamRuntimeEntries.has(registryKey)) {
 					return undefined;
 				}
 			: undefined;
-		const completionPolicy = requiresCompletionTool
-			? {
-					requireCompletionTool: true,
-					...(teamCompletionGuard
-						? { completionGuard: teamCompletionGuard }
-						: {}),
-				}
-			: teamCompletionGuard
-				? { completionGuard: teamCompletionGuard }
-				: undefined;
+		/**
+		 * Stops the model finishing a turn while a backgrounded sub-agent it
+		 * started is still running, or while a finished result is still unread.
+		 *
+		 * Both cases are the same waste seen from different moments: tokens spent
+		 * on a result nobody collected. "Still running" is the obvious one, but a
+		 * completed run whose result was never read is equally wasted and is the
+		 * likelier mistake — the model has no signal that anything is outstanding.
+		 *
+		 * Composed with the team guard rather than replacing it, so a session using
+		 * both gets both reminders.
+		 */
+		const subAgentCompletionGuard = (): string | undefined => {
+			if (!subAgentRuns) {
+				return undefined;
+			}
+			const running = subAgentRuns
+				.list()
+				.filter((run) => run.status === "running");
+			const unread = subAgentRuns.unread();
+			if (running.length === 0 && unread.length === 0) {
+				return undefined;
+			}
+			const parts: string[] = [];
+			if (running.length > 0) {
+				parts.push(
+					`still running: ${running.map((run) => `${run.runId} ("${run.label}")`).join(", ")}`,
+				);
+			}
+			if (unread.length > 0) {
+				parts.push(
+					`finished but never read: ${unread.map((run) => `${run.runId} ("${run.label}", ${run.status})`).join(", ")}`,
+				);
+			}
+			return `[SYSTEM] You started background sub-agent(s) that are not accounted for — ${parts.join("; ")}. Their results are not delivered to you automatically. Use subagent_runs with action "await" or action "read" (includeResult: true) to collect them before you finish, otherwise their token spend is wasted.`;
+		};
+
+		const anyCompletionGuard = (): string | undefined => {
+			// Team first: its obligations are the ones the model must clear before
+			// stopping, and asking about the sub-agent registry first would mask them.
+			return teamCompletionGuard?.() ?? subAgentCompletionGuard();
+		};
+
+		// Attached on a *static* condition, never by invoking the guard here. A
+		// sub-agent guard cannot fire at build time (no run has started yet) and must
+		// still be attached so it fires later; invoking the team guard eagerly would
+		// touch the team runtime during build, which is a layer violation and breaks
+		// builds whose team runtime is a partial stub.
+		const guardCanFire =
+			normalized.enableSpawnAgent === true || normalized.enableAgentTeams === true;
+
+		const completionPolicy = (() => {
+			if (!requiresCompletionTool) {
+				return guardCanFire ? { completionGuard: anyCompletionGuard } : undefined;
+			}
+			return {
+				requireCompletionTool: true,
+				...(guardCanFire ? { completionGuard: anyCompletionGuard } : {}),
+			};
+		})();
 
 		return {
 			tools: finalTools,
@@ -1065,6 +1115,22 @@ if (!this.teamRuntimeEntries.has(registryKey)) {
 			},
 			shutdown: async (reason: string) => {
 				shutdownTeamRuntime(teamRuntime, reason);
+				if (subAgentRuns?.hasRunning()) {
+					// Logged rather than awaited: a background sub-agent is deliberately
+					// not tied to the parent turn, so shutdown cannot wait for it without
+					// turning an interactive exit into a hang. Recording which runs were
+					// still in flight is what makes the wasted spend explainable after
+					// the fact.
+					const abandoned = subAgentRuns
+						.list()
+						.filter((run) => run.status === "running")
+						.map((run) => `${run.runId} ("${run.label}")`)
+						.join(", ");
+					logger?.log?.(
+						`Session shut down with ${subAgentRuns.list().filter((run) => run.status === "running").length} background sub-agent(s) still running: ${abandoned}`,
+					);
+				}
+				subAgentRuns?.clear();
 				this.teamRuntimeEntries.delete(registryKey);
 				await mcpShutdown?.();
 				if (!userInstructionServiceProvided) {

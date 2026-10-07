@@ -1159,3 +1159,100 @@ describe("background sub-agent wiring", () => {
 		expect(runtime.subAgentRuns).toBeDefined();
 	});
 });
+
+/**
+ * The guard against the failure mode backgrounding introduces: a sub-agent still
+ * spending tokens after the parent decided it was finished, with nobody left to
+ * read the result.
+ */
+describe("background sub-agent completion guard", () => {
+	async function buildWithRun() {
+		const runtime = await new DefaultRuntimeBuilder().build({
+			config: makeBaseConfig({
+				enableSpawnAgent: true,
+				enableAgentTeams: false,
+			}),
+			createSpawnTool: () => makeSpawnTool(),
+		});
+		return runtime;
+	}
+
+	it("is absent while nothing is running", async () => {
+		const runtime = await buildWithRun();
+		// A guard that always fires would nag every ordinary turn.
+		expect(runtime.completionPolicy?.completionGuard?.()).toBeUndefined();
+	});
+
+	it("names the outstanding run so the model can collect it", async () => {
+		const runtime = await buildWithRun();
+		const record = runtime.subAgentRuns!.start({
+			subAgentId: "a1",
+			conversationId: "c1",
+			label: "auth-reviewer",
+			task: "review",
+		});
+		const message = runtime.completionPolicy?.completionGuard?.();
+		expect(message).toContain(record.runId);
+		expect(message).toContain("auth-reviewer");
+		// The guard has to say the result is not delivered automatically, or the
+		// model reads it as a nag and stops without collecting anything.
+		expect(message).toMatch(/not delivered/i);
+	});
+
+	it("keeps firing while a finished result is unread", async () => {
+		// The likelier mistake: the run completed, so nothing looks outstanding, but
+		// nobody collected it and the tokens are already spent.
+		const runtime = await buildWithRun();
+		const record = runtime.subAgentRuns!.start({
+			subAgentId: "a1",
+			conversationId: "c1",
+			label: "done",
+			task: "review",
+		});
+		runtime.subAgentRuns!.complete(record.runId, { text: "ok" });
+		const message = runtime.completionPolicy?.completionGuard?.();
+		expect(message).toContain(record.runId);
+		expect(message).toMatch(/never read/i);
+	});
+
+	it("goes quiet once the result has been collected", async () => {
+		const runtime = await buildWithRun();
+		const record = runtime.subAgentRuns!.start({
+			subAgentId: "a1",
+			conversationId: "c1",
+			label: "done",
+			task: "review",
+		});
+		runtime.subAgentRuns!.complete(record.runId, { text: "ok" });
+		runtime.subAgentRuns!.markRead(record.runId);
+		expect(runtime.completionPolicy?.completionGuard?.()).toBeUndefined();
+	});
+
+	it("still fires for a failed run until its result is read", async () => {
+		// A failure is exactly when a result most needs reading.
+		const runtime = await buildWithRun();
+		const record = runtime.subAgentRuns!.start({
+			subAgentId: "a1",
+			conversationId: "c1",
+			label: "doomed",
+			task: "review",
+		});
+		runtime.subAgentRuns!.fail(record.runId, new Error("provider 500"));
+		expect(runtime.completionPolicy?.completionGuard?.()).toContain("failed");
+		runtime.subAgentRuns!.markRead(record.runId);
+		expect(runtime.completionPolicy?.completionGuard?.()).toBeUndefined();
+	});
+
+	it("drops the registry and records abandoned runs on shutdown", async () => {
+		const runtime = await buildWithRun();
+		runtime.subAgentRuns!.start({
+			subAgentId: "a1",
+			conversationId: "c1",
+			label: "still-going",
+			task: "review",
+		});
+		await runtime.shutdown("test");
+		// Cleared so a reused session key cannot resurrect stale records.
+		expect(runtime.subAgentRuns?.hasRunning()).toBe(false);
+	});
+});
