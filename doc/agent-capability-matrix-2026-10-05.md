@@ -263,7 +263,7 @@ Seatbelt 是 `(allow default)` + 拒写入，bubblewrap 分支没有 `--unshare-
 
 | # | 事项 | 原因 |
 |---|---|---|
-| S4 | 延迟工具加载 | `beforeModel` 能覆盖 `tools` 只是**接口就绪**，不是机制。真正实现需要工具描述索引、检索、以及模型误选时的退化路径；半套只会让模型看不见工具 |
+| ~~S4~~ | ~~延迟工具加载~~ | **已做**（2d48b0695，PR #5）。eforeModel 覆盖 	ools 确实是充分条件：延迟工具保持注册可执行、只对模型隐藏，检索退化为返回空集并明说无可搜 |
 | S5 | `spawn_agent` 后台化 | teammate 有 `startTeammateRun` + `team_await_runs` 作为回传通道，**sub-agent 没有**。无通道的"后台化"是 fire-and-forget：结果无人可读、token 隐形泄漏，比阻塞更糟 |
 | S6 | LSP 工具 | 依赖外部 language server，工作量与"加一个工具"不同量级，且降级路径必须先想清楚 |
 | S9 | AI 审批复核 | 需要复核 agent + 策略文件 + 熔断，是对权限体系的扩展而非新增一项 |
@@ -286,3 +286,24 @@ Seatbelt 是 `(allow default)` + 拒写入，bubblewrap 分支没有 `--unshare-
 - **`spawn_agent` 的工具集递归包含自身**，全仓无 `maxDepth` 守卫（已修）。
 - **网关在构造时固化 apiKey**，每回合只构造一次 model，因此
   `updateConnection({apiKey})` 与"同一 runtime 上重跑"都用不到刷新后的凭据（已修）。
+
+### S4 落地时的补充发现
+
+- **"接口就绪"这个判断本身不够。** 报告 §7 原先记的是"`beforeModel` 能覆盖
+  `tools` 只是接口就绪，不是机制"。实现时发现更关键的约束是
+  `AgentToolContext` **没有 `tools` 字段**：延迟工具目录无法在执行期从 context
+  读回本次运行实际注册了什么，只能在 loader 创建时闭包捕获。orchestrator 每 run
+  重建 loader 正是靠这一点保证目录准确。
+- **`tool_search` 必须像普通工具一样注册**，不能只经 hook 暴露：模型看得见但
+  runtime 在工具表里找不到的工具没有 `execute` 可调用。延迟工具同理留在表内，
+  揭示只是可见性变化。
+- **描述必须在每次请求时重算。** 目录若在构造时算一次，模型已揭示的工具会在整个
+  会话里持续被标为"unloaded"。`skills` 工具的 `description` getter 就是为此存在
+  的先例，runtime 在发送边界才重建定义。
+- **停用词不是锦上添花。** 查询 "spawn a teammate" 里的 `a` 作为子串命中几乎
+  所有工具名与描述，导致整个延迟集合被揭示——恰好抵消此功能的目的。
+- **实测收益**（生产 18 个 team 工具，默认 25 工具会话）：4690 → 2880
+  approxTokens/请求，约 39%。但重度使用 teams 的会话每个请求反多付约 520 tokens
+  的目录成本，因此默认关闭而非默认开启。
+- **仍未验证**：模型是否真的会调用 `tool_search`。目录写在描述里，但弱模型可能
+  当它不存在。这需要真实模型交互，静态核对给不出结论。
