@@ -3,7 +3,9 @@ import "should"
 import {
 	getFallbackWindowsPowerShellPath,
 	getWindowsPowerShellCandidates,
+	type PowerShellProbeResult,
 	probeWindowsExecutable,
+	probeWindowsExecutableDetailed,
 	resetPowerShellResolverCacheForTesting,
 	resolveWindowsPowerShellExecutable,
 	setPowerShellProbeForTesting,
@@ -130,5 +132,86 @@ describe("PowerShell resolver", () => {
 		})
 		await resolveWindowsPowerShellExecutable()
 		probeCalls.should.equal(2)
+	})
+})
+
+/**
+ * The defect these cover: a probe that ran out of budget was reported as
+ * "unavailable", so on a cold or scanned CI runner a perfectly good PowerShell
+ * was discarded and the resolver fell through to a worse shell -- which then made
+ * the first hook pay an even slower start. Observed on `windows-latest` as
+ * hook tests failing at 20-30s with a timeout rather than an assertion, matching
+ * the earlier incident already documented in hook-factory.test.ts.
+ */
+describe("PowerShell resolver probe outcomes", () => {
+	beforeEach(() => {
+		process.env.ProgramFiles = "C:\\Program Files"
+		process.env.ProgramW6432 = ""
+		setPowerShellProbeForTesting(null)
+		resetPowerShellResolverCacheForTesting()
+	})
+
+	afterEach(() => {
+		setPowerShellProbeForTesting(null)
+		resetPowerShellResolverCacheForTesting()
+	})
+
+	it("keeps a candidate that merely exceeded the probe budget", async () => {
+		const candidates = getWindowsPowerShellCandidates()
+		const slowCandidate = candidates[0]
+		setPowerShellProbeForTesting((candidate) => (candidate === slowCandidate ? "slow" : "missing"))
+
+		const resolved = await resolveWindowsPowerShellExecutable()
+		// Previously this fell through to the legacy fallback, discarding a shell
+		// that would have worked.
+		resolved.should.equal(slowCandidate)
+	})
+
+	it("prefers an available candidate over an earlier slow one", async () => {
+		const candidates = getWindowsPowerShellCandidates()
+		const slowCandidate = candidates[0]
+		const goodCandidate = candidates[1]
+		setPowerShellProbeForTesting((candidate) => {
+			if (candidate === slowCandidate) return "slow"
+			return candidate === goodCandidate ? "available" : "missing"
+		})
+
+		const resolved = await resolveWindowsPowerShellExecutable()
+		resolved.should.equal(goodCandidate)
+	})
+
+	it("still falls back when every candidate is genuinely missing", async () => {
+		setPowerShellProbeForTesting(async (): Promise<PowerShellProbeResult> => "missing")
+		const resolved = await resolveWindowsPowerShellExecutable()
+		resolved.should.equal(getFallbackWindowsPowerShellPath())
+	})
+
+	it("treats a boolean probe hook as before", async () => {
+		// Callers written against the original two-outcome contract must keep
+		// working; false still means missing, not slow.
+		const candidates = getWindowsPowerShellCandidates()
+		const preferred = candidates[0]
+		let calls = 0
+		setPowerShellProbeForTesting(async (candidate) => {
+			calls += 1
+			return candidate === preferred
+		})
+
+		const resolved = await resolveWindowsPowerShellExecutable()
+		resolved.should.equal(preferred)
+		calls.should.equal(1)
+	})
+
+	it("does not spawn anything for an absolute path that does not exist", async () => {
+		const absent = "C:\\Program Files\\Definitely\\Not\\Installed\\pwsh.exe"
+		const result = await probeWindowsExecutableDetailed(absent, 50)
+		// A stat call instead of a process launch, which is what removes most of
+		// the probe cost when PowerShell 7 is not installed.
+		result.should.equal("missing")
+	})
+
+	it("keeps the boolean probe meaning 'usable within the budget'", async () => {
+		const result = await probeWindowsExecutable("this-command-does-not-exist-xyz", 50)
+		result.should.equal(false)
 	})
 })
