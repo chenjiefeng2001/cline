@@ -1,5 +1,8 @@
 export { resolveExistingFilePath } from "./path-resolution";
 export {
+	filterUserLevelPaths,
+	isBareMode,
+	setBareMode,
 	AGENT_CONFIG_DIRECTORY_NAME,
 	AGENTS_RULES_FILE_NAME,
 	CLINE_CONNECTOR_SETTINGS_FILE_NAME,

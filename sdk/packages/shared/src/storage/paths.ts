@@ -8,7 +8,7 @@ import {
 	statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PluginManifest } from "..";
 
 /**
@@ -188,6 +188,106 @@ export function resolveDocumentsExtensionPath(
 	name: DocumentsExtensionName,
 ): string {
 	return join(resolveDocumentsClineDirectoryPath(), name);
+}
+
+/**
+ * Bare mode: ignore every user-level configuration source [S12].
+ *
+ * The goal is reproducibility. With it on, the agent's behaviour depends only on
+ * the repository, because none of the per-user customisation that normally feeds
+ * it is discovered: agents, skills, rules, workflows, plugins, hooks and MCP
+ * servers.
+ *
+ * Workspace-level sources are kept, since those are the ones a checkout already
+ * carries and therefore the ones a reproducible run should still honour.
+ * User state that is not configuration -- sessions, provider settings, auth --
+ * is deliberately untouched, so a bare run still persists and can be resumed;
+ * discarding it would make "run it twice" impossible rather than reproducible.
+ *
+ * Implemented as a single filter here rather than as a variant of each resolver,
+ * because these paths are consumed from several packages and a flag that had to
+ * be threaded through every call site would inevitably be missed by one of them.
+ *
+ * Off by default; set from the environment so it applies before any config is
+ * read, and exposed as a setter for hosts that decide programmatically.
+ */
+let BARE_MODE = process.env.CLINE_BARE === "1";
+
+export function isBareMode(): boolean {
+	return BARE_MODE;
+}
+
+export function setBareMode(enabled: boolean): void {
+	BARE_MODE = enabled;
+}
+
+/**
+ * Drops the user-level (home directory) entries from a config search path list.
+ *
+ * Applied at the end of every user-level resolver, so a source added later
+ * cannot leak past this by being resolved somewhere else.
+ *
+ * `workspacePath` is exempt, and that exemption is load-bearing rather than
+ * convenient: a checkout inside the home directory is an ordinary setup, and
+ * treating `~/projects/app` as "user-level" would strip the repository's own
+ * rules, skills and hooks -- silently, and exactly in the mode whose purpose is
+ * to depend only on the repository.
+ */
+export function filterUserLevelPaths(
+	paths: readonly string[],
+	workspacePath?: string,
+): string[] {
+	if (!BARE_MODE) {
+		return dedupePaths(paths);
+	}
+	const workspaceRoot = workspacePath ? safeResolve(workspacePath) : undefined;
+	return dedupePaths(
+		paths.filter((candidate) => {
+			if (workspaceRoot && isUnder(candidate, workspaceRoot)) {
+				return true;
+			}
+			return !isUnderHomeDir(candidate);
+		}),
+	);
+}
+
+/** Whether `candidate` is `root` itself or inside it. */
+function isUnder(candidate: string, root: string): boolean {
+	const resolved = safeResolve(candidate);
+	// An unresolvable candidate cannot be shown to be inside root, so it is not
+	// exempted here; the caller's fallback keeps it.
+	return resolved !== undefined && (resolved === root || resolved.startsWith(`${root}${sep}`));
+}
+
+/**
+ * Whether a path lives under the user's home directory.
+ *
+ * Compared on resolved absolute paths so `~/...`-style aliases and trailing
+ * separators cannot slip a user-level source through the filter.
+ */
+function isUnderHomeDir(candidate: string): boolean {
+	if (!candidate) {
+		return false;
+	}
+	const resolved = safeResolve(candidate);
+	if (!resolved) {
+		// Unresolvable paths are kept: dropping a path we cannot classify would
+		// silently remove configuration the caller expected.
+		return false;
+	}
+	const home = safeResolve(HOME_DIR);
+	if (!home) {
+		return false;
+	}
+	return resolved === home || resolved.startsWith(`${home}${sep}`);
+}
+
+function safeResolve(candidate: string): string | undefined {
+	try {
+		return resolve(candidate);
+	} catch {
+		return undefined;
+	}
 }
 
 export function resolveClineDataDir(): string {
@@ -400,12 +500,12 @@ export function resolveAgentsConfigDirPath(): string {
 export function resolveAgentConfigSearchPaths(
 	workspacePath?: string,
 ): string[] {
-	return dedupePaths([
+	return filterUserLevelPaths([
 		workspacePath
 			? join(workspacePath, CLINE_CONFIG_DIR, AGENT_CONFIG_DIRECTORY_NAME)
 			: "",
 		resolveAgentsConfigDirPath(),
-	]);
+	], workspacePath);
 }
 
 export function resolveHooksConfigSearchPaths(
@@ -421,13 +521,13 @@ export function resolveHooksConfigSearchPaths(
 			join(workspacePath, CLINE_CONFIG_DIR, HOOKS_CONFIG_DIRECTORY_NAME),
 		);
 	}
-	return dedupePaths(hooks);
+	return filterUserLevelPaths(hooks, workspacePath);
 }
 
 export function resolveSkillsConfigSearchPaths(
 	workspacePath?: string,
 ): string[] {
-	return dedupePaths([
+	return filterUserLevelPaths([
 		...getWorkspaceSkillDirectories(workspacePath),
 		join(resolveClineDir(), SKILLS_CONFIG_DIRECTORY_NAME),
 		join(
@@ -435,7 +535,7 @@ export function resolveSkillsConfigSearchPaths(
 			LEGACY_AGENT_SKILLS_CONFIG_DIR,
 			SKILLS_CONFIG_DIRECTORY_NAME,
 		),
-	]);
+	], workspacePath);
 }
 
 export function resolveGlobalAgentsRulesPath(): string {
@@ -454,19 +554,19 @@ export function resolveRulesConfigSearchPaths(
 	const workspaceAgentsFile = workspacePath
 		? [join(workspacePath, AGENTS_RULES_FILE_NAME)]
 		: [];
-	return dedupePaths([
+	return filterUserLevelPaths([
 		...workspaceAgentsFile,
 		...wsPaths,
 		resolveGlobalAgentsRulesPath(),
 		join(resolveClineDir(), RULES_CONFIG_DIRECTORY_NAME),
 		resolveDocumentsExtensionPath("Rules"),
-	]);
+	], workspacePath);
 }
 
 export function resolveWorkflowsConfigSearchPaths(
 	workspacePath?: string,
 ): string[] {
-	return dedupePaths([
+	return filterUserLevelPaths([
 		workspacePath
 			? join(workspacePath, ".clinerules", WORKFLOWS_CONFIG_DIRECTORY_NAME)
 			: "",
@@ -475,17 +575,17 @@ export function resolveWorkflowsConfigSearchPaths(
 		workspacePath
 			? join(workspacePath, ".cline", WORKFLOWS_CONFIG_DIRECTORY_NAME)
 			: "",
-	]);
+	], workspacePath);
 }
 
 export function resolvePluginConfigSearchPaths(
 	workspacePath?: string,
 ): string[] {
-	return dedupePaths([
+	return filterUserLevelPaths([
 		workspacePath ? join(workspacePath, ".cline", PLUGINS_DIRECTORY_NAME) : "",
 		join(resolveClineDir(), PLUGINS_DIRECTORY_NAME),
 		resolveDocumentsExtensionPath("Plugins"),
-	]);
+	], workspacePath);
 }
 
 const PLUGIN_MODULE_EXTENSIONS = new Set([".js", ".ts"]);

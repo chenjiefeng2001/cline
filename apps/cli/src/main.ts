@@ -755,6 +755,14 @@ export async function runCli(): Promise<void> {
 	// Default flow: no subcommand matched, or fall-through from config/history.
 	let args = commanderToParsedArgs(program);
 
+	// Applied here, before anything reads configuration. Bare mode filters the
+	// user-level search paths at resolution time, so setting it later would let
+	// the first reads pick up user config and defeat the point of the flag.
+	if (args.bare) {
+		const { setBareMode } = await import("@cline/shared/storage");
+		setBareMode(true);
+	}
+
 	let resumeSessionId: string | undefined = ctx.resumeSessionId;
 	if (resumeSessionId) {
 		// The history picker already created (and tore down) an OpenTUI renderer

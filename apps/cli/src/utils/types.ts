@@ -95,6 +95,8 @@ export interface ParsedArgs {
 	invalidMaxParallelToolCalls?: string;
 	invalidMaxToolCalls?: string;
 	invalidMaxSubagentDepth?: string;
+	/** Whether --bare was passed. */
+	bare?: boolean;
 	/** Whether --lazy-tool-loading was passed. */
 	lazyToolLoading?: boolean;
 	thinking: boolean;

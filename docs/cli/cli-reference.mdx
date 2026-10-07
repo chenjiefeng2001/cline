@@ -50,6 +50,7 @@ Options:
   --max-parallel-tool-calls <count>  Tool calls executed concurrently within one turn (default: 6; 1 forces serial)
   --max-tool-calls <count>      Maximum tool calls a single run may execute (default: unlimited)
   --max-subagent-depth <count>  Levels of sub-agent delegation allowed (default: 1)
+  --bare                         Ignore user-level configuration so the run depends only on the repository
   --lazy-tool-loading          Withhold rarely-used tool schemas behind a tool_search meta-tool
   --sandbox                    Run shell commands inside an OS process sandbox
   --sandbox-network            Let sandboxed shell commands reach the network
@@ -288,6 +289,26 @@ environment variable cannot quietly remove a limit. Two deliberate exceptions:
 typo landing on `0` is rejected instead of read as "no ceiling"), and
 `--max-subagent-depth` accepts `0` because it is meaningful there — `0` forbids
 delegation entirely, whereas omitting the flag leaves the default of `1`.
+
+### Bare mode
+
+`--bare` (or `CLINE_BARE=1`) ignores **user-level** configuration, so a run depends
+only on the repository. Suppressed: global agents, skills, rules, workflows,
+plugins and hooks.
+
+Kept: anything the checkout itself carries (workspace-level agents, skills, rules,
+workflows, plugins and hooks), and user *state* — sessions, provider settings,
+credentials. Discarding those would make a bare run impossible to resume or repeat,
+which is not what reproducibility means here.
+
+<Note>
+  MCP servers are **not** suppressed yet. They are user-level too, but their
+  settings path is resolved through a separate call path whose return type is
+  threaded through several callers; changing it properly is its own change rather
+  than a line to add here.
+</Note>
+
+Bare mode is off by default.
 
 ### Lazy tool loading
 
