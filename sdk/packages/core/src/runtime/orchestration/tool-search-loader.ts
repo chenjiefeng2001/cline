@@ -215,11 +215,6 @@ export function createToolSearchLoader(options: ToolSearchLoaderOptions): {
 	 * stays to name plus a one-line gloss — the JSON Schema is exactly what this
 	 * feature withholds until a search earns it.
 	 */
-	const catalogueLines = [...deferred.values()]
-		.filter((tool) => !options.loaded.has(tool.name))
-		.map((tool) => `- ${tool.name}: ${summarise(tool.description)}`)
-		.join("\n");
-
 	const ToolSearchInputSchema = z.object({
 		query: z
 			.string()
@@ -236,16 +231,33 @@ export function createToolSearchLoader(options: ToolSearchLoaderOptions): {
 			.describe(`Maximum tools to reveal. At most ${maxResults}.`),
 	});
 
+	/**
+	 * Derived per read rather than once, mirroring the `skills` tool: the runtime
+	 * rebuilds tool definitions for every model request, so a value computed at
+	 * construction would keep advertising already-revealed tools as "unloaded" for
+	 * the rest of the session and invite the model to search for them again.
+	 */
+	const describe = () => {
+		const catalogue = [...deferred.values()]
+			.filter((tool) => !options.loaded.has(tool.name))
+			.map((tool) => `- ${tool.name}: ${summarise(tool.description)}`)
+			.join("\n");
+		const header =
+			"Search for tools that are available in this session but whose full schemas are not loaded yet, and reveal the best matches so they become callable. " +
+			"Use this when you need a capability you cannot see a tool for. Revealed tools are callable on your next turn.";
+		// Once everything is revealed the catalogue is empty, and a header with
+		// nothing under it reads as a broken tool rather than a finished job.
+		return catalogue
+			? `${header}\n\nUnloaded tools available to search:\n${catalogue}`
+			: `${header}\n\nEvery deferred tool in this session has already been revealed, so there is nothing left to search for.`;
+	};
+
 	const searchTool = createTool<
 		{ query: string; limit?: number },
 		{ revealed: string[]; message: string }
 	>({
 		name: TOOL_SEARCH_TOOL_NAME,
-		description:
-			"Search for tools that are available in this session but whose full schemas are not loaded yet, and reveal the best matches so they become callable. " +
-			"Use this when you need a capability you cannot see a tool for. Revealed tools are callable on your next turn.\n\n" +
-			"Unloaded tools available to search:\n" +
-			catalogueLines,
+		description: describe(),
 		inputSchema: zodToJsonSchema(ToolSearchInputSchema),
 		execute: async (input) => {
 			// The schema is passed as JSON Schema, so `createTool` cannot attach a
@@ -273,6 +285,13 @@ export function createToolSearchLoader(options: ToolSearchLoaderOptions): {
 						: `Now callable: ${revealed.join(", ")}.`,
 			};
 		},
+	});
+	// The runtime rebuilds definitions per request, so a getter re-derives the
+	// catalogue at exactly the send-to-model boundary.
+	Object.defineProperty(searchTool, "description", {
+		get: describe,
+		enumerable: true,
+		configurable: true,
 	});
 
 	const beforeModel = (ctx: {

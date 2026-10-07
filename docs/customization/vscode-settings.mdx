@@ -107,9 +107,11 @@ With `cline.lazyToolLoading` on, rarely-used tool schemas are hidden behind a
 searches for one, and the best matches become visible to it on the next turn.
 `team_*` tools are deferred by default.
 
-It defaults to **off**, because revealing a tool costs one search round trip. Turn
-it on for long sessions where that trade is worth it. The same switch is available
-in the CLI as `--lazy-tool-loading`.
+It defaults to **off**, because revealing a tool costs one search round trip. On a
+default session it removes about 39% of the per-request tool array, at a cost of
+roughly 520 tokens for `tool_search` and its catalogue — so it suits long sessions
+that mostly avoid teams, and suits team-heavy sessions poorly. The same switch is
+available in the CLI as `--lazy-tool-loading`.
 
 ## MCP
 

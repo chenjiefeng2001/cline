@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AgentTool, AgentToolDefinition } from "@cline/shared";
+import { createDelegatedAgentConfigProvider } from "../../extensions/tools/team/delegated-agent";
+import { AgentTeamsRuntime } from "../../extensions/tools/team/multi-agent";
+import { createAgentTeamsTools } from "../../extensions/tools/team/team-tools";
 import {
 	DEFAULT_DEFERRED_TOOL_PATTERNS,
 	createToolSearchLoader,
@@ -150,6 +153,78 @@ describe("createToolSearchLoader", () => {
 		// carry names and summaries only.
 		expect(loader.tool.description).not.toContain("inputSchema");
 		expect(loader.tool.description).not.toContain("properties");
+	});
+
+	it("drops a revealed tool from the description it advertises", async () => {
+		const { loader } = setup();
+		// "spawn teammate" ranks all three (every description mentions a teammate), so
+	// the query has to be narrow enough to reveal exactly one.
+	// "teammate" appears in all three descriptions, so the query needs a term unique
+	// to one tool for exactly one to be revealed.
+	await loader.tool.execute({ query: "rolePrompt" }, {} as never);
+		// Computed once at construction this would keep advertising a revealed
+		// tool as "unloaded" for the rest of the session, inviting a re-search
+		// that can only return nothing.
+		expect(loader.tool.description).not.toContain("team_spawn_teammate");
+		// The catalogue must survive, or the model has no way to find what is
+		// still hidden.
+		expect(loader.tool.description).toContain("Unloaded tools available to search:");
+		expect(loader.tool.description).toContain("team_send_message");
+	});
+
+	it("says so plainly once every deferred tool is revealed", async () => {
+		const { loader } = setup();
+		for (const query of ["spawn teammate", "run task", "send message"]) {
+			await loader.tool.execute({ query }, {} as never);
+		}
+		// An empty catalogue under the normal header reads as a broken tool.
+		expect(loader.tool.description).not.toContain("Unloaded tools available");
+		expect(loader.tool.description).toContain("nothing left to search for");
+	});
+
+	/**
+	 * The feature trades a search round trip for a smaller request, so the saving
+	 * has to be real rather than assumed. These use the production team tools
+	 * instead of stubs: an earlier estimate came from schema stubs and overstated
+	 * nothing, but a stub set cannot tell you whether the *default* deferral
+	 * (`team_*`) is actually worth enabling.
+	 *
+	 * Token counts are approximated at 4 chars/token. Good enough to compare two
+	 * payloads against each other, not to predict a bill.
+	 */
+	describe("payload saving with the real team tools", () => {
+		const approxTokens = (payload: unknown) =>
+			Math.ceil(JSON.stringify(payload).length / 4);
+
+		it("shrinks the request materially with the default deferral", async () => {
+			const teamTools = createAgentTeamsTools({
+				runtime: new AgentTeamsRuntime({ teamName: "size-probe" }),
+				requesterId: "lead",
+				teammateConfigProvider: createDelegatedAgentConfigProvider({
+					providerId: "anthropic",
+					modelId: "claude-sonnet-4-5-20250929",
+				}),
+				createBaseTools: () => [],
+			});
+			const loader = createToolSearchLoader({
+				deferredTools: teamTools,
+				loaded: new Set<string>(),
+			});
+			const sessionTools = [...teamTools, loader.tool];
+
+			const baseline = approxTokens(teamTools);
+			const narrowed = approxTokens(
+				loader.beforeModel({ request: { tools: sessionTools as AgentToolDefinition[] } })
+					.tools,
+			);
+
+			// Measured: 18 team schemas cost ~2350 approxTokens, and the catalogue
+			// that replaces them costs ~520. The floor is deliberately loose — it
+			// exists to catch a regression that quietly stops deferring, not to
+			// track the exact figure as schemas evolve.
+			expect(narrowed).toBeLessThan(baseline * 0.75);
+			expect(baseline - narrowed).toBeGreaterThan(1000);
+		});
 	});
 
 	it("does not mutate the caller's tool array", () => {

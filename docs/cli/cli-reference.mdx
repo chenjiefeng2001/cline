@@ -301,8 +301,13 @@ callable. `tool_search` takes a plain-language query, and the best matches becom
 visible to the model on its next turn. Deferred tools are `team_*` by default.
 
 It is **off by default**: revealing a tool costs one search round trip, which only
-pays off once a session is long enough for the saved tokens to outweigh it. Turn it
-on for long sessions, or leave it off for short ones.
+pays off once a session is long enough for the saved tokens to outweigh it.
+
+Measured on a default session (7 base tools plus 18 team tools), enabling it drops
+the tool array from about 4690 to 2880 approximate tokens per request — roughly 39%
+— at a cost of about 520 tokens for the `tool_search` tool and its catalogue. A
+session that never touches teams comes out ahead after a request or two; one that
+does use teams pays that 520 on every request, so it is a poor fit there.
 
 Delegated sub-agents are unaffected — they keep the full tool set, since teams are
 a lead-level capability.
