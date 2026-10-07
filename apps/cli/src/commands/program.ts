@@ -85,6 +85,10 @@ export function addRootOptions(cmd: Command): Command {
 				"Withhold rarely-used tool schemas behind a `tool_search` meta-tool so each request sends fewer tokens. Team tools are deferred by default; revealed tools stay callable for the rest of the session. Off by default, since it costs one search round trip",
 			)
 			.option(
+				"--bare",
+				"Ignore all user-level configuration (agents, skills, rules, workflows, plugins, hooks) so the run depends only on the repository. Workspace-level config and session state are kept. Also settable with CLINE_BARE=1",
+			)
+			.option(
 				"--acp",
 				"Run in Agent Client Protocol (ACP) mode for editor integration",
 			)
@@ -267,6 +271,10 @@ export function commanderToParsedArgs(program: Command): ParsedArgs {
 		} else if (raw) {
 			result.invalidMaxSubagentDepth = raw;
 		}
+	}
+
+	if (opts.bare !== undefined) {
+		result.bare = !!opts.bare;
 	}
 
 	if (opts.lazyToolLoading !== undefined) {
