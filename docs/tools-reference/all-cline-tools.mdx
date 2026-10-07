@@ -26,8 +26,24 @@ When running through `ClineCore`, these built-ins are available:
 | `subagent_runs` | Read the status and results of backgrounded subagents |
 | `teams` | Expand into the 18 `team_*` tools (opt-in, off by default) |
 
-Hosts may add their own. The VS Code extension contributes `attempt_completion`,
-and any tool an MCP server publishes is registered alongside the built-ins.
+Hosts may add their own. The VS Code extension contributes `attempt_completion` and
+`get_diagnostics`, and any tool an MCP server publishes is registered alongside the
+built-ins.
+
+### `get_diagnostics` (VS Code only)
+
+Reports the errors and warnings that the editor's language servers currently see.
+Useful after editing code to confirm a change type-checks, and before starting work
+to find pre-existing problems. Pass `severity: "error"` to see only errors.
+
+It is contributed by the host rather than built into core, because only an editor
+host has a language server — in the CLI the capability simply does not exist rather
+than returning empty results.
+
+**An empty result is ambiguous and the tool says so.** No diagnostics is
+indistinguishable from no language server running for those files, so it reports
+that it cannot tell the two apart instead of claiming the code is clean. Treat it
+as "no information", not "no problems".
 
 <Note>
   `Agent` from `@cline/agents` does not include built-ins by default. You provide tools explicitly.

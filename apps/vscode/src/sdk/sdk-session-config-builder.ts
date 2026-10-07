@@ -1,6 +1,9 @@
 import type { CoreSessionConfig } from "@cline/core"
 import { type AgentTool, createTool } from "@cline/shared"
 import type { StateManager } from "@/core/storage/StateManager"
+import { HostProvider } from "@/hosts/host-provider"
+import { diagnosticsToProblemsString } from "@/integrations/diagnostics"
+import { DiagnosticSeverity } from "@/shared/proto/index.cline"
 import { buildSessionConfig, type SessionConfigInput } from "./cline-session-factory"
 import { buildAgentHooks, type HookMessageEmitter } from "./hooks-adapter"
 
@@ -45,6 +48,10 @@ export class SdkSessionConfigBuilder {
 			config.extraTools = config.extraTools?.filter((tool) => tool.name !== "switch_to_act_mode")
 		}
 
+		// Available in both modes: a planning pass is exactly when you want to know
+		// the editor already sees errors, before planning a change.
+		config.extraTools = [...(config.extraTools ?? []), createGetDiagnosticsTool()]
+
 		return config
 	}
 
@@ -78,4 +85,60 @@ export class SdkSessionConfigBuilder {
 			},
 		})
 	}
+}
+
+/**
+ * Exposes the editor's language-server diagnostics to the model.
+ *
+ * The bridge, proto and formatter already existed for the `@workspace:problems`
+ * mention, so this capability was fully built and reachable only by a user typing
+ * a mention -- the inverse of a dead setting: working, but not available to the
+ * agent. Contributing it here rather than in core is the correct layer, since
+ * only an editor host has a language server; a core tool would be empty
+ * everywhere else.
+ */
+function createGetDiagnosticsTool(): AgentTool {
+	return createTool({
+		name: "get_diagnostics",
+		description:
+			"Report errors and warnings that the editor's language servers currently report for workspace files. " +
+			"Use this after editing code to confirm a change type-checks, or to find pre-existing problems before starting work. " +
+			"Only covers files a language server is active for.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				severity: {
+					type: "string",
+					enum: ["error", "warning"],
+					description: "Lowest severity to include. Defaults to warnings, i.e. both.",
+				},
+			},
+		},
+		timeoutMs: 10000,
+		retryable: false,
+		execute: async (input: unknown) => {
+			const requested = (input as { severity?: unknown } | undefined)?.severity
+			const severities =
+				requested === "error"
+					? [DiagnosticSeverity.DIAGNOSTIC_ERROR]
+					: [DiagnosticSeverity.DIAGNOSTIC_ERROR, DiagnosticSeverity.DIAGNOSTIC_WARNING]
+
+			const response = await HostProvider.workspace.getDiagnostics({})
+			const fileDiagnostics = response.fileDiagnostics ?? []
+
+			if (fileDiagnostics.length === 0) {
+				// Deliberately not "no errors found". An empty result is equally what a
+				// workspace with no language server looks like, so telling the model the
+				// code is clean would be a claim nothing supports.
+				return "No diagnostics are available. Either there are no problems, or no language server is running for these files -- this tool cannot tell the two apart."
+			}
+
+			const formatted = await diagnosticsToProblemsString(fileDiagnostics, severities)
+			if (!formatted.trim()) {
+				const label = requested === "error" ? "errors" : "errors or warnings"
+				return `No ${label} found in ${fileDiagnostics.length} file(s) that have diagnostics.`
+			}
+			return formatted
+		},
+	})
 }
