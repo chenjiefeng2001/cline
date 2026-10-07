@@ -264,7 +264,7 @@ Seatbelt 是 `(allow default)` + 拒写入，bubblewrap 分支没有 `--unshare-
 | # | 事项 | 原因 |
 |---|---|---|
 | ~~S4~~ | ~~延迟工具加载~~ | **已做**（2d48b0695，PR #5）。eforeModel 覆盖 	ools 确实是充分条件：延迟工具保持注册可执行、只对模型隐藏，检索退化为返回空集并明说无可搜 |
-| S5 | `spawn_agent` 后台化 | teammate 有 `startTeammateRun` + `team_await_runs` 作为回传通道，**sub-agent 没有**。无通道的"后台化"是 fire-and-forget：结果无人可读、token 隐形泄漏，比阻塞更糟 |
+| S5 | `spawn_agent` 后台化 | 原判断**成立**，且比原记录更严格：已确认 sub-agent 结果仅存在于阻塞返回值（spawn-agent-tool.ts:164-188），无任何工具/API 可读——搜遍 core 无 listSubSessions/getSubAgentResult。**但原记录低估了已有基础**，详见 §7 |
 | S6 | LSP 工具 | 依赖外部 language server，工作量与"加一个工具"不同量级，且降级路径必须先想清楚 |
 | S9 | AI 审批复核 | 需要复核 agent + 策略文件 + 熔断，是对权限体系的扩展而非新增一项 |
 | S10 | teams 默认策略 | 产品决策：18 个工具默认开/关的两头不讨好，取舍应由用户定 |
@@ -307,3 +307,45 @@ Seatbelt 是 `(allow default)` + 拒写入，bubblewrap 分支没有 `--unshare-
   的目录成本，因此默认关闭而非默认开启。
 - **仍未验证**：模型是否真的会调用 `tool_search`。目录写在描述里，但弱模型可能
   当它不存在。这需要真实模型交互，静态核对给不出结论。
+
+### S5 复核：原结论成立，但原记录低估了已有基础
+
+原记录说 sub-agent 没有回传通道。这**正确**，且比原判断更彻底：
+
+- `spawn_agent` 的 `execute` 直接 `await subAgent.run(...)` 并把结果返回
+  （`spawn-agent-tool.ts:164-188`），子 agent 的 `abortSignal` 继承自父工具调用，
+  即子生命周期 == 父工具调用生命周期。
+- 返回后，子 agent 结果**只以三种形式存在**：UI 事件流（VS Code 还在调用期间
+  主动抑制子事件，`message-translator.ts:1773-1778`）、遥测的输出**行数**（非文本、
+  非 token）、以及按 `agentId` 落盘的子会话行与消息文件
+  （`team-child-session-manager.ts:373-404`）。
+- 已确认 core 内**没有任何工具或 API 可以读取子 agent 结果**。
+
+**但原记录漏了三样已存在的东西：**
+
+1. **持久化的按 agentId 索引数据**（上面第三项）是真实存在、可通过既有
+   `listSessions({parentSessionId})` 读到的。它是**基础，不是通道**：按 agentId
+   而非 runId 索引，同一 agent 两次 spawn 会塌成一行，且没有任何面向模型的工具
+   触及它。
+2. **`sdk/examples/plugins/agents-squad/index.ts` 已经把整个特性做出来了**
+   （约 870 行）：`start_subagent` 起独立 session 后 `void runSubagentTurn(...)`，
+   用模块级 `Map<string, RunningSubagent>` 登记，配 `get_subagent` 轮询，
+   并且有第三条通道 `emitSteer` → `steer_message` 主动推回
+   （`agent-event-bridge.ts:159-186`）。这同时证明推送路径需要 `steer_message`
+   ——正是 team runtime 用 auto-continue 循环而非工具来解决的那一环。
+   它是插件示例而非生产 SDK，登记表是进程内内存态。
+3. **`runtime/continuation/` 的 `RunContinuationRecord`** 提供了最接近的结构范本：
+   按 `continuationKey` + `sessionId` 索引、带 lease/claim、可跨重启
+   `listRecoverable(sessionId)`。但它是**审批专用**——唯一写入方是
+   `recordApprovalRequest`，恢复的是被挂起的回合，不跑后台工作。
+
+**因此不改的理由**：复用 `AgentTeamsRuntime.runs` 是分层违规而非捷径。它受
+`enableAgentTeams` 门控（`runtime-builder.ts:845-848`），且每条读写路径都假设存在
+`role: "teammate"` 的成员与存活 agent（`multi-agent.ts:1354-1355`、
+`routeToTeammate:1026`）；`startTeammateRun` 还会发 `RunQueued`，被
+`trackTeamRunState` 汇入 `activeTeamRunIds`，从而把普通 sub-agent 卷进 team 的
+完成守卫与持久化。让非 team 委派依赖 team runtime 会污染其记账。
+
+正确路径是在 session 级新建 run 登记表 + 至少一条读取通道，推送复用
+`steer_message`，轮询形态参照 `agents-squad`。工作量与 S4 不同量级，S4 是把
+既有 hook 用起来，S5 要新增状态机与三条通道。
