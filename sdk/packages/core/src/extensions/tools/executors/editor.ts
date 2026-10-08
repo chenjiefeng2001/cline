@@ -184,6 +184,24 @@ async function createFile(
 ): Promise<string> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	await fs.writeFile(filePath, fileText, { encoding });
+
+	// Read the file back and confirm it holds what we asked for. A write that resolves
+	// is not proof that all of it landed: a short or partial write leaves the model
+	// reading a truncated file, and the success message tells it the job is done, so it
+	// moves on and builds on a file that is quietly missing content. That is the
+	// "write_to_file truncates content ... especially for large files" report in
+	// cline/cline#4384. Compare bytes rather than length alone so an encoding round
+	// trip cannot masquerade as truncation.
+	const written = await fs.readFile(filePath, encoding);
+	if (written !== fileText) {
+		const writtenChars = [...written].length;
+		const intendedChars = [...fileText].length;
+		throw new Error(
+			`Write to ${filePath} did not complete: the file on disk holds ${writtenChars} of ${intendedChars} characters. ` +
+				`The write was reported as successful but its content does not match what was requested, so it must not be treated as a finished edit. Re-read the file to see what is present, then write the remainder in smaller chunks.`,
+		);
+	}
+
 	return `File created successfully at: ${filePath}`;
 }
 
