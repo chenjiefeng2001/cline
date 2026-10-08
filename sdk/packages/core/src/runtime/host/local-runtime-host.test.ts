@@ -868,6 +868,68 @@ describe("LocalRuntimeHost", () => {
 		);
 	});
 
+	it("forwards the session's tool-call ceiling to the lead agent", async () => {
+		// Regression: nothing in the tree ever populated
+		// `execution.maxToolCalls`, and this literal did not set the top-level
+		// `maxToolCalls` either. The builder reads
+		// `agentConfig.maxToolCalls ?? agentConfig.execution?.maxToolCalls`, so both
+		// were `undefined` and the lead agent ran uncapped while
+		// `cline.maxToolCalls` and `--max-tool-calls` looked wired end to end.
+		//
+		// Fixing only the builder (as an earlier change did) left this break
+		// untouched, which is why the lead host now carries a compile-time
+		// exhaustiveness guard over its own key set.
+		const sessionId = "sess-lead-max-tool-calls";
+		const sessionService = {
+			ensureSessionsDir: vi.fn().mockReturnValue("/tmp/sessions"),
+			createRootSessionWithArtifacts: vi.fn().mockResolvedValue({
+				manifestPath: "/tmp/manifest.json",
+				messagesPath: "/tmp/messages.json",
+				manifest: createManifest(sessionId),
+			}),
+			persistSessionMessages: vi.fn(),
+			updateSessionStatus: vi.fn().mockResolvedValue({ updated: true }),
+			writeSessionManifest: vi.fn(),
+			listSessions: vi.fn().mockResolvedValue([]),
+			deleteSession: vi.fn().mockResolvedValue({ deleted: true }),
+		};
+		const runtimeBuilder = {
+			build: vi.fn().mockReturnValue({ tools: [], shutdown: vi.fn() }),
+		};
+		const agent = {
+			run: vi.fn().mockResolvedValue(createResult()),
+			continue: vi.fn().mockResolvedValue(createResult()),
+			getMessages: vi.fn().mockReturnValue([]),
+			getAgentId: vi.fn().mockReturnValue("agent-root-1"),
+			getConversationId: vi.fn().mockReturnValue("conv-root-1"),
+			abort: vi.fn(),
+			subscribeEvents: vi.fn().mockReturnValue(() => {}),
+			updateConnection: vi.fn(),
+			canStartRun: vi.fn().mockReturnValue(true),
+			shutdown: vi.fn().mockResolvedValue(undefined),
+		};
+		const createAgent = vi.fn(() => agent as never);
+		const manager = new RuntimeHostUnderTest({
+			distinctId,
+			sessionService: sessionService as never,
+			runtimeBuilder: runtimeBuilder as never,
+			createAgent,
+		});
+
+		await manager.startSession(
+			normalizeStartInput({
+				config: createConfig({ sessionId, maxToolCalls: 7 }),
+				prompt: "hello",
+				interactive: true,
+			}),
+		);
+
+		expect(createAgent).toHaveBeenCalledWith(
+			expect.objectContaining({ maxToolCalls: 7 }),
+			expect.objectContaining({ wrapTools: expect.any(Function) }),
+		);
+	});
+
 	it("persists provider/model connection updates to the session manifest", async () => {
 		const sessionId = "sess-connection-manifest-update";
 		const manifest = createManifest(sessionId);
