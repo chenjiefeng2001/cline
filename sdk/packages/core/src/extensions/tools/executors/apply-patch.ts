@@ -199,15 +199,31 @@ function applyChunks(
 	const result: string[] = [];
 	let currentIndex = 0;
 
-	for (const chunk of chunks) {
+	// Chunks arrive in the order the model wrote them, which need not be file order -
+	// a model routinely emits a later function's hunk before an earlier one's. Applying
+	// them in arrival order walked the file backwards and produced either scrambled
+	// output or a "currentIndex > chunk.origIndex" abort, so a patch that was correct
+	// on its own terms failed outright. Reported as cline/cline#4384 (see also #4067).
+	//
+	// Sort by resolved file position first. Array#sort is specified as stable, so two
+	// hunks landing on the same offset keep their emission order.
+	const ordered = chunks
+		.map((chunk, order) => ({ chunk, order }))
+		.sort((a, b) => a.chunk.origIndex - b.chunk.origIndex || a.order - b.order)
+		.map((entry) => entry.chunk);
+
+	for (const chunk of ordered) {
 		if (chunk.origIndex > lines.length) {
 			throw new DiffError(
 				`${filePath}: chunk.origIndex ${chunk.origIndex} > lines.length ${lines.length}`,
 			);
 		}
+		// A hunk has to start at or after the end of the previous one. Anything earlier
+		// means the two contexts matched ambiguously and overlap, which is reported
+		// rather than silently interleaved.
 		if (currentIndex > chunk.origIndex) {
 			throw new DiffError(
-				`${filePath}: currentIndex ${currentIndex} > chunk.origIndex ${chunk.origIndex}`,
+				`${filePath}: hunk at line ${chunk.origIndex + 1} overlaps the preceding hunk and cannot be applied unambiguously`,
 			);
 		}
 		result.push(...lines.slice(currentIndex, chunk.origIndex));

@@ -427,7 +427,23 @@ function findContext(
 		return [newIndex, fuzz + 10000, similarity];
 	}
 
-	return findCore(start);
+	const forward = findCore(start);
+	if (forward[0] !== -1) {
+		return forward;
+	}
+
+	// A model may emit the hunks for one file in any order, and re-scanning from the
+	// top of the file is the only way to reach one that appears earlier than the
+	// previous hunk. The forward-only search missed it and reported the whole patch as
+	// unmatched, which is what made reverse-ordered edits fail outright.
+	// Reported as cline/cline#4384 (and its #4067, "SEARCH/REPLACE blocks are out of
+	// order"). The backward hit is charged a large fuzz cost so callers can still see
+	// that the match was found in an unexpected place.
+	const backward = findCore(0);
+	if (backward[0] === -1) {
+		return backward;
+	}
+	return [backward[0], backward[1] + 10000, backward[2]];
 }
 
 type PeekResult = [string[], PatchChunk[], number, boolean];

@@ -145,6 +145,59 @@ describe("createApplyPatchExecutor", () => {
 		).rejects.toThrow("Invalid patch text - incomplete sentinels");
 	});
 
+	it("applies hunks emitted in reverse file order", async () => {
+		// Models emit the hunks for one file in any order. Distinct lines so the fuzzy
+		// fallback cannot match a neighbouring line: the point here is position, not
+		// similarity. Reported as cline/cline#4384 (see also #4067).
+		const filePath = path.join(tempDir, "router.ts");
+		await fs.writeFile(
+			filePath,
+			[
+				"function handleAlpha() {",
+				"  return 'alpha';",
+				"}",
+				"",
+				"function handleBeta() {",
+				"  return 'beta';",
+				"}",
+				"",
+				"function handleGamma() {",
+				"  return 'gamma';",
+				"}",
+			].join("\n"),
+			"utf-8",
+		);
+
+		const execute = createApplyPatchExecutor();
+		// gamma lives last, alpha first: the patch asks for the later one first.
+		const result = await execute(
+			{
+				input: [
+					"*** Update File: router.ts",
+					"@@",
+					" function handleGamma() {",
+					"-  return 'gamma';",
+					"+  return 'GAMMA';",
+					" }",
+					"@@",
+					" function handleAlpha() {",
+					"-  return 'alpha';",
+					"+  return 'ALPHA';",
+					" }",
+				].join("\n"),
+			},
+			tempDir,
+			{} as never,
+		);
+
+		const updated = await fs.readFile(filePath, "utf-8");
+		expect(result).toContain("Successfully applied patch");
+		// Both edits land, and the file is not scrambled: each function keeps its own body.
+		expect(updated).toContain("function handleAlpha() {\n  return 'ALPHA';\n}");
+		expect(updated).toContain("function handleGamma() {\n  return 'GAMMA';\n}");
+		expect(updated).toContain("function handleBeta() {\n  return 'beta';\n}");
+	});
+
 	it("rejects a patch when a hunk context does not match", async () => {
 		const filePath = path.join(tempDir, "note.txt");
 		const original = ["alpha", "beta", "gamma"].join("\n");
