@@ -136,13 +136,18 @@ export function createAgentRuntimeConfig(
 		budget: agentConfig.budget,
 		toolExecution,
 		maxParallelToolCalls: agentConfig.maxParallelToolCalls,
-		// Tool-call ceiling for the lead agent. It is declared under `execution` on
-		// the session config and on `AgentExecutionConfig`, but nothing copied it onto
-		// `AgentRuntimeConfig`, so `AgentRuntime` read `undefined` and no cap was ever
-		// applied to a lead session — only to delegated sub-agents, which read
-		// `config.execution?.maxToolCalls` directly in the runtime builder. Setting
-		// `cline.maxToolCalls` or `--max-tool-calls` appeared to work and did nothing.
-		maxToolCalls: agentConfig.execution?.maxToolCalls,
+		// Tool-call ceiling for the lead agent.
+		//
+		// Three spellings of one knob exist, and this is the join. The session-facing
+		// one is `execution.maxToolCalls`, which is what VS Code and the CLI populate
+		// and what the runtime builder reads for delegated sub-agents. `AgentConfig`
+		// *also* declares a top-level `maxToolCalls`, and nothing in the host ever set
+		// it, so a consumer reaching for that spelling had their value silently
+		// dropped. Both are honoured, most specific first, so neither spelling is a
+		// no-op. It was left unbridged for so long precisely because an object literal
+		// satisfies the wider type without mentioning the field.
+		maxToolCalls:
+			agentConfig.maxToolCalls ?? agentConfig.execution?.maxToolCalls,
 		toolPolicies: agentConfig.toolPolicies,
 		toolContextMetadata: input.toolContextMetadata,
 		requestToolApproval: agentConfig.requestToolApproval,

@@ -362,6 +362,34 @@ describe("tool-call ceiling reaches the runtime", () => {
 		expect(config.maxToolCalls).toBe(3)
 	})
 
+	it("honours the top-level AgentConfig spelling as well", () => {
+		// `AgentConfig` declares `maxToolCalls` directly as well as under
+		// `execution`. Nothing set the top-level one, so a consumer who reached for it
+		// had their ceiling silently discarded. Either spelling must now work.
+		const config = createAgentRuntimeConfig({
+			agentConfig: {
+				systemPrompt: "test",
+				maxToolCalls: 7,
+			} as unknown as CreateAgentRuntimeConfigInput["agentConfig"],
+			agentId: "test",
+			model: new StoppingModel(),
+		})
+		expect(config.maxToolCalls).toBe(7)
+	})
+
+	it("prefers the top-level spelling when both are present", () => {
+		// Most specific wins, and the precedence is pinned so it cannot drift.
+		const config = createAgentRuntimeConfig({
+			agentConfig: {
+				systemPrompt: "test",
+				maxToolCalls: 7,
+				execution: { maxToolCalls: 3 },
+			} as unknown as CreateAgentRuntimeConfigInput["agentConfig"],
+			agentId: "test",
+			model: new StoppingModel(),
+		})
+		expect(config.maxToolCalls).toBe(7)
+	})
 	it("stays undefined when unset, so an uncapped session is not capped", () => {
 		// A default injected here would silently limit every session that never
 		// asked for a limit.
