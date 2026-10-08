@@ -90,7 +90,20 @@ export function isTransientProviderError(error: unknown): boolean {
 		return true;
 	}
 
+	// A stalled provider stream is a half-open connection: the socket is alive, so
+	// nothing errors, but no data ever arrives and the turn is stuck forever. Retrying
+	// is the right response and is the only recovery short of the user cancelling.
+	//
+	// Matched on BOTH name and message because the name does not survive the trip:
+	// emitAiSdkEvents converts a stream error into a `finish` event whose `error` field
+	// is the flattened message, so by the time this predicate sees a stall it usually
+	// sees only text. The phrase is ours and fixed, and the name check still covers a
+	// direct throw.
 	const text = errorText(error).toLowerCase();
+	if (name === "StreamStalledError" || text.includes("provider stream stalled")) {
+		return true;
+	}
+
 	if (!text) {
 		return false;
 	}
