@@ -2375,6 +2375,48 @@ describe("AgentRuntime", () => {
 		});
 	});
 
+	it("stops the run when a beforeTool hook cancels, instead of feeding the denial back to the model", async () => {
+		// A PreToolUse hook that answers {"cancel": true} raises ControlledStopError
+		// without touching the abort controller. executeToolCalls used to catch it,
+		// synthesise a "preparation failed" tool result and continue, so the model was
+		// handed a refusal instead of a stop: it retried the same call, the task never
+		// reached a terminal state, and the UI sat on a dead "Resume task" button.
+		// Reported as cline/cline#9937.
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "cancelled",
+					toolName: "echo",
+					inputText: '{"text":"dangerous"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			// A second turn would only happen if the cancellation was swallowed and the
+			// run continued, so the model must never be consulted again.
+			() => {
+				throw new Error("model must not be called again after a hook cancel");
+			},
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			tools: [createEchoTool()],
+			hooks: {
+				beforeTool: () => ({ stop: true, reason: "blocked by policy hook" }),
+			},
+		});
+
+		const result = await runtime.run("Run something dangerous");
+
+		expect(result.status).toBe("aborted");
+		// The stop must reach the transcript rather than be laundered into a tool
+		// result the model can argue with.
+		expect(result.error).toBeUndefined();
+		expect(result.messages.some((message) => message.role === "tool")).toBe(
+			false,
+		);
+	});
+
 	it("treats invalid tool-call JSON as a tool error instead of failing the run", async () => {
 		const model = new ScriptedModel([
 			() => [
