@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	buildMessageModelInfo,
 	buildModelOptions,
+	type CreateAgentRuntimeConfigInput,
 	createAgentRuntimeConfig,
 	resolveToolExecution,
 } from "./agent-runtime-config-builder";
@@ -271,3 +272,147 @@ describe("createAgentRuntimeConfig", () => {
 		expect(runtimeConfig.initialMessages).toHaveLength(1);
 	});
 });
+
+/**
+ * The tool-call ceiling reached delegated sub-agents but not the lead agent:
+ * `maxToolCalls` lives under `execution` on both the session config and
+ * `AgentExecutionConfig`, and nothing copied it onto `AgentRuntimeConfig`. The
+ * runtime therefore read `undefined` and applied no cap, while `cline.maxToolCalls`
+ * and `--max-tool-calls` looked wired all the way to the config layer.
+ *
+ * The assertion that matters is the behavioural one -- that a run is actually cut
+ * off -- because a field-mapping check would have passed while the feature was
+ * dead.
+ */
+
+/**
+ * Model that always asks for the same tool, so a run can only end through the
+ * ceiling. Defined here because the scripted model used by the agents package is
+ * local to its own test file and not exported.
+ */
+class LoopingToolCallModel implements AgentModel {
+	private remaining = 50;
+
+	async stream(
+		_request: Parameters<AgentModel["stream"]>[0],
+	): Promise<AsyncIterable<AgentModelEvent>> {
+		this.remaining -= 1;
+		if (this.remaining < 0) {
+			throw new Error("No scripted model step available");
+		}
+		const callId = `call-${this.remaining}`;
+		async function* events(): AsyncGenerator<AgentModelEvent> {
+			yield {
+				type: "tool-call-delta",
+				toolCallId: callId,
+				toolName: "noop",
+				inputText: "{}",
+			};
+			yield { type: "finish", reason: "tool-calls" };
+		}
+		return events();
+	}
+}
+
+class StoppingModel implements AgentModel {
+	async stream(): Promise<AsyncIterable<AgentModelEvent>> {
+		async function* events(): AsyncGenerator<AgentModelEvent> {
+			// `text` is not part of a finish event; the run's text comes from the
+			// text-delta events that precede it.
+			yield { type: "text-delta", text: "done" };
+			yield { type: "finish", reason: "stop" };
+		}
+		return events();
+	}
+}
+
+const testAgentConfig = (execution?: {
+	maxToolCalls?: number;
+}): CreateAgentRuntimeConfigInput["agentConfig"] =>
+	({
+		systemPrompt: "test",
+		...(execution ? { execution } : {}),
+	}) as unknown as CreateAgentRuntimeConfigInput["agentConfig"];
+
+const noopTool = {
+	name: "noop",
+	description: "does nothing",
+	inputSchema: { type: "object", properties: {} },
+	execute: async () => ({ ok: true }),
+} as unknown as NonNullable<CreateAgentRuntimeConfigInput["tools"]>[number];
+
+/**
+ * The tool-call ceiling reached delegated sub-agents but not the lead agent.
+ * `maxToolCalls` is declared under `execution` on both the session config and
+ * `AgentExecutionConfig`, but `createAgentRuntimeConfig` never copied it onto
+ * `AgentRuntimeConfig`. The runtime therefore read `undefined` and applied no cap,
+ * while `cline.maxToolCalls` and `--max-tool-calls` looked wired all the way down.
+ *
+ * The existing ceiling tests in the agents package construct `AgentRuntimeConfig`
+ * directly, so they passed the whole time this was dead. That is why the assertion
+ * here goes through the builder and then actually runs the loop.
+ */
+describe("tool-call ceiling reaches the runtime", () => {
+	it("copies execution.maxToolCalls onto the runtime config", () => {
+		const config = createAgentRuntimeConfig({
+			agentConfig: testAgentConfig({ maxToolCalls: 3 }),
+			agentId: "test",
+			model: new StoppingModel(),
+		})
+		expect(config.maxToolCalls).toBe(3)
+	})
+
+	it("stays undefined when unset, so an uncapped session is not capped", () => {
+		// A default injected here would silently limit every session that never
+		// asked for a limit.
+		expect(
+			createAgentRuntimeConfig({
+				agentConfig: testAgentConfig(),
+				agentId: "test",
+				model: new StoppingModel(),
+			}).maxToolCalls,
+		).toBeUndefined()
+
+		// Unrelated execution settings must not conjure a ceiling.
+		expect(
+			createAgentRuntimeConfig({
+				agentConfig: testAgentConfig({}),
+				agentId: "test",
+				model: new StoppingModel(),
+			}).maxToolCalls,
+		).toBeUndefined()
+	})
+
+	it("actually refuses further tool calls once the ceiling is reached", async () => {
+		const { AgentRuntime } = await import("@cline/agents")
+
+		const runtimeConfig = createAgentRuntimeConfig({
+			agentConfig: testAgentConfig({ maxToolCalls: 2 }),
+			agentId: "test",
+			model: new LoopingToolCallModel(),
+			tools: [noopTool],
+		})
+
+		const result = await new AgentRuntime(runtimeConfig).run("go")
+
+		// Without the mapping this ends as `failed` -- the model loop runs until the
+		// scripted model runs out of steps, because nothing was capping it.
+		expect(result.status).toBe("tool_calls_exhausted")
+	})
+
+	it("leaves an uncapped session to finish on its own", async () => {
+		const { AgentRuntime } = await import("@cline/agents")
+
+		const runtimeConfig = createAgentRuntimeConfig({
+			agentConfig: testAgentConfig(),
+			agentId: "test",
+			model: new StoppingModel(),
+			tools: [noopTool],
+		})
+
+		const result = await new AgentRuntime(runtimeConfig).run("go")
+
+		expect(runtimeConfig.maxToolCalls).toBeUndefined()
+		expect(result.status).not.toBe("tool_calls_exhausted")
+	})
+})
