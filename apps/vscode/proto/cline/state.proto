@@ -293,6 +293,17 @@ message Settings {
   optional OpenRouterModelInfo act_mode_cline_pass_model_info = 186;
   optional string mode_configurations = 187;
   optional int32 mode_configuration_version = 188;
+  // BEGIN webview-writable settings
+  //
+  // Every field between these markers must also exist on `UpdateSettingsRequest`
+  // below. That message is a hand-maintained duplicate rather than a generated
+  // one, so nothing in the toolchain notices a field added here and forgotten
+  // there: it compiles, it ships, and the setting simply cannot be written from
+  // the webview until someone notices. `proto-settings-parity.test.ts` enforces
+  // the invariant so the two copies cannot drift.
+  //
+  // Model/provider configuration deliberately lives outside this block; those
+  // fields are written through their own RPCs, not through UpdateSettings.
   optional bool agent_teams_enabled = 189;
   optional int32 max_iterations_setting = 190;
   optional int32 run_budget_max_total_cost = 191;
@@ -314,6 +325,7 @@ message Settings {
   optional int32 max_tool_calls = 208;
   optional int32 max_sub_agent_depth = 209;
   optional bool lazy_tool_loading = 210;
+  // END webview-writable settings
 }
 
 message State {
@@ -486,6 +498,7 @@ message UpdateSettingsRequest {
   optional int32 max_sub_agent_depth = 66;
   // Withhold rarely-used tool schemas behind a `tool_search` meta-tool.
   optional bool lazy_tool_loading = 67;
+  // Withhold rarely-used tool schemas behind a `tool_search` meta-tool.
   // Spend ceiling in USD for one agent run (0 = no ceiling).
   optional double run_budget_max_total_cost = 49;
   // Restrict the file tools to the session workspace.
