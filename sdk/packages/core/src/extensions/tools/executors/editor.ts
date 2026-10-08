@@ -196,6 +196,49 @@ async function fileExists(filePath: string): Promise<boolean> {
 	}
 }
 
+/**
+ * Find `needle` in `content`, ignoring trailing whitespace on each line.
+ *
+ * A formatter runs between the model's read and its edit, and it typically strips
+ * or adds trailing whitespace. The `old_text` the model sends then no longer occurs
+ * verbatim even though the code is unchanged, so an exact match fails and the edit
+ * is refused - "Auto-formatting in VSCode breaks diff matching by changing
+ * whitespace after edits" in cline/cline#4384.
+ *
+ * Leading whitespace and inter-line indentation are left significant: they carry
+ * meaning in most languages, and folding them would make the fallback match code
+ * the model never saw.
+ *
+ * Returns every match. A single match is applied; more than one is refused, because
+ * picking one of several candidates silently edits the wrong code.
+ */
+function findTrailingWhitespaceInsensitiveMatches(
+	content: string,
+	needle: string,
+): number[] {
+	const stripTrailing = (line: string): string => line.replace(/[ \t]+$/, "");
+	const needleLines = needle.split("\n").map(stripTrailing);
+	if (needleLines.every((line) => line === "")) {
+		return [];
+	}
+	const contentLines = content.split("\n");
+	const width = needleLines.length;
+	const matches: number[] = [];
+	for (let i = 0; i + width <= contentLines.length; i++) {
+		let hit = true;
+		for (let j = 0; j < width; j++) {
+			if (stripTrailing(contentLines[i + j]) !== needleLines[j]) {
+				hit = false;
+				break;
+			}
+		}
+		if (hit) {
+			matches.push(i);
+		}
+	}
+	return matches;
+}
+
 async function replaceInFile(
 	filePath: string,
 	oldStr: string,
@@ -205,12 +248,51 @@ async function replaceInFile(
 ): Promise<string> {
 	const content = await fs.readFile(filePath, encoding);
 	const eol = detectLineEnding(content);
+	const eolLength = eol.length;
+	const lines = content.split(/\r\n|\n/);
 	const normalizedOldStr = normalizeLineEndings(oldStr, eol);
 	const normalizedNewStr = normalizeLineEndings(newStr ?? "", eol);
 	const occurrences = countOccurrences(content, normalizedOldStr);
 
 	if (occurrences === 0) {
-		throw new Error(`No replacement performed: text not found in ${filePath}.`);
+		// Fall back to a trailing-whitespace-insensitive match before giving up, and
+		// only accept it when it identifies exactly one location. Reporting "not found"
+		// for code that is really there just sends the model around the retry loop that
+		// this issue describes.
+		const tolerant = findTrailingWhitespaceInsensitiveMatches(
+			content,
+			normalizedOldStr,
+		);
+		if (tolerant.length === 0) {
+			throw new Error(`No replacement performed: text not found in ${filePath}.`);
+		}
+		if (tolerant.length > 1) {
+			throw new Error(
+				`No replacement performed: old_text matches ${tolerant.length} places in ${filePath} once trailing whitespace is ignored, so it is ambiguous. Include more surrounding lines to identify a unique region.`,
+			);
+		}
+		const startLine = tolerant[0];
+		const endLine = startLine + normalizedOldStr.split("\n").length;
+		// Rebuild by character offset rather than re-joining lines, so everything
+		// outside the replaced region - including whether the file ended with a
+		// newline - is preserved exactly. Re-joining would invent or drop a trailing
+		// newline and silently rewrite the end of a file nobody asked to change.
+		const lineStartOffset = (target: number): number => {
+			let offset = 0;
+			for (let i = 0; i < target && i < lines.length; i++) {
+				offset += lines[i].length + eolLength;
+			}
+			return offset;
+		};
+		const endOffset = Math.min(lineStartOffset(endLine), content.length);
+		const updated =
+			content.slice(0, lineStartOffset(startLine)) +
+			normalizedNewStr +
+			content.slice(endOffset);
+		await fs.writeFile(filePath, updated, { encoding });
+
+		const diff = createLineDiff(content, updated, maxDiffLines);
+		return `Edited ${filePath}\n${diff}`;
 	}
 
 	if (occurrences > 1) {
@@ -219,7 +301,7 @@ async function replaceInFile(
 		);
 	}
 
-	// Replacer function so "$"-sequences in new_text ($&, $', $`, $$, $n)
+	// Replacer function so "$"-sequences in new_text ($&, $', $`, $n)
 	// are inserted literally instead of being expanded by String.replace.
 	const updated = content.replace(normalizedOldStr, () => normalizedNewStr);
 	await fs.writeFile(filePath, updated, { encoding });
