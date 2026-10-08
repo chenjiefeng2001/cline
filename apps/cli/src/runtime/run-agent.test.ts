@@ -1302,3 +1302,194 @@ describe("runAgent", () => {
 		);
 	});
 });
+
+/**
+ * cline/cline#14544: `cline -m model "prompt" | head` printed nothing and never
+ * exited, while the same command under a PTY worked.
+ *
+ * Two independent defects, both of which had to be fixed for a non-interactive run to
+ * be usable by a script or an agent harness:
+ *
+ *  1. The answer was never written to stdout in text mode. `result.text` was only
+ *     emitted on the JSON branch; printRunStats prints timings under --verbose; the SDK
+ *     core never touches process.stdout and createCliCore takes no output sink.
+ *  2. Teardown was unbounded. `.catch(() => {})` covers a step that rejects, not one
+ *     that never settles, so a stuck dispose meant runCli() never returned and the
+ *     unconditional process.exit() at the end of index.ts was never reached.
+ */
+describe("non-interactive text output (#14544)", () => {
+	// This block is deliberately outside the suite above, so it does not inherit that
+	// suite's beforeEach. Without these resets the writeln spy accumulates calls across
+	// tests here and the "not called with" assertions below fail on a previous test's
+	// output rather than on real behaviour.
+	beforeEach(() => {
+		sessionManagerMocks.start.mockReset();
+		sessionManagerMocks.send.mockReset();
+		sessionManagerMocks.stop.mockReset();
+		// `mockReset` makes these return undefined, and runAgent reads `.catch` off the
+		// returned value before awaiting it, so an undefined return throws a TypeError
+		// mid-teardown. The mocks must return promises, not bare undefined.
+		sessionManagerMocks.stop.mockResolvedValue(undefined);
+		sessionManagerMocks.dispose.mockReset();
+		sessionManagerMocks.dispose.mockResolvedValue(undefined);
+		sessionManagerMocks.abort.mockReset();
+		sessionManagerMocks.abort.mockResolvedValue(undefined);
+		sessionManagerMocks.getAccumulatedUsage.mockReset();
+		outputMocks.writeln.mockReset();
+		outputMocks.writeErr.mockReset();
+		outputMocks.emitJsonLine.mockReset();
+		// Also required, not just hygiene: createRuntimeHooks returns undefined until it
+		// is configured, so runAgent's teardown threw on `runtimeHooks.shutdown()` and
+		// never reached dispose at all.
+		hookMocks.runtimeHooks.shutdown.mockReset();
+		hookMocks.runtimeHooks.shutdown.mockResolvedValue(undefined);
+		hookMocks.createRuntimeHooks.mockReturnValue(hookMocks.runtimeHooks);
+	});
+
+	const baseConfig = {
+		cwd: process.cwd(),
+		enableAgentTeams: false,
+		enableSpawnAgent: false,
+		enableTools: [],
+		execution: { maxConsecutiveMistakes: 3 },
+		logger: undefined,
+		mode: "yolo",
+		modelId: "google/gemini-3-flash-preview",
+		outputMode: "text",
+		providerId: "openrouter",
+		systemPrompt: "system",
+		thinking: false,
+		toolPolicies: { "*": { autoApprove: true } },
+		verbose: false,
+		workspaceRoot: process.cwd(),
+	} as never;
+
+	const completedResult = {
+		text: "the answer the model produced",
+		usage: {
+			inputTokens: 1,
+			outputTokens: 1,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			totalCost: undefined,
+		},
+		messages: [],
+		toolCalls: [],
+		iterations: 1,
+		finishReason: "completed",
+		model: { id: "gemini", provider: "openrouter", info: {} },
+		startedAt: new Date("2026-03-22T00:00:00.000Z"),
+		endedAt: new Date("2026-03-22T00:00:01.000Z"),
+		durationMs: 1000,
+	};
+
+	it("prints the model's answer to stdout in text mode", async () => {
+		sessionManagerMocks.start.mockResolvedValue({
+			sessionId: "session-1",
+			manifestPath: "/tmp/manifest.json",
+			messagesPath: "/tmp/messages.json",
+			manifest: { session_id: "session-1" },
+			result: completedResult,
+		});
+		sessionManagerMocks.getAccumulatedUsage.mockResolvedValue(undefined);
+
+		const { runAgent } = await import("./run-agent");
+		await runAgent("test prompt", baseConfig);
+
+		// This is the assertion the bug needed: before the fix the answer was produced,
+		// stored in the session, and then silently dropped.
+		expect(outputMocks.writeln).toHaveBeenCalledWith(
+			"the answer the model produced",
+		);
+	});
+
+	it("does not print the answer twice in JSON mode", async () => {
+		sessionManagerMocks.start.mockResolvedValue({
+			sessionId: "session-1",
+			manifestPath: "/tmp/manifest.json",
+			messagesPath: "/tmp/messages.json",
+			manifest: { session_id: "session-1" },
+			result: completedResult,
+		});
+		sessionManagerMocks.getAccumulatedUsage.mockResolvedValue(undefined);
+
+		const { runAgent } = await import("./run-agent");
+		await runAgent("test prompt", {
+			...(baseConfig as object),
+			outputMode: "json",
+		} as never);
+
+		expect(outputMocks.writeln).not.toHaveBeenCalledWith(
+			"the answer the model produced",
+		);
+		expect(outputMocks.emitJsonLine).toHaveBeenCalledWith(
+			"stdout",
+			expect.objectContaining({
+				type: "run_result",
+				text: "the answer the model produced",
+			}),
+		);
+	});
+
+	it("does not print the answer on stdout when the run failed", async () => {
+		sessionManagerMocks.start.mockResolvedValue({
+			sessionId: "session-1",
+			manifestPath: "/tmp/manifest.json",
+			messagesPath: "/tmp/messages.json",
+			manifest: { session_id: "session-1" },
+			result: {
+				...completedResult,
+				finishReason: "error",
+				text: "provider exploded",
+			},
+		});
+		sessionManagerMocks.getAccumulatedUsage.mockResolvedValue(undefined);
+
+		const { runAgent } = await import("./run-agent");
+		await runAgent("test prompt", baseConfig);
+
+		// Failures already go to stderr; printing them to stdout too would double-report.
+		expect(outputMocks.writeln).not.toHaveBeenCalledWith("provider exploded");
+		expect(outputMocks.writeErr).toHaveBeenCalledWith("provider exploded");
+	});
+
+	it("finishes even when session teardown never settles", async () => {
+		sessionManagerMocks.start.mockResolvedValue({
+			sessionId: "session-1",
+			manifestPath: "/tmp/manifest.json",
+			messagesPath: "/tmp/messages.json",
+			manifest: { session_id: "session-1" },
+			result: completedResult,
+		});
+		sessionManagerMocks.getAccumulatedUsage.mockResolvedValue(undefined);
+		// The failure mode: a dispose that never resolves. Before the deadline this hung
+		// runCli() forever, so index.ts never reached process.exit().
+		sessionManagerMocks.dispose.mockReturnValue(new Promise<void>(() => {}));
+
+		const { runAgent } = await import("./run-agent");
+		const started = Date.now();
+		await expect(runAgent("test prompt", baseConfig)).resolves.toBeUndefined();
+
+		expect(Date.now() - started).toBeLessThan(20_000);
+	}, 30_000);
+
+	it("still tears down normally when dispose settles", async () => {
+		sessionManagerMocks.start.mockResolvedValue({
+			sessionId: "session-1",
+			manifestPath: "/tmp/manifest.json",
+			messagesPath: "/tmp/messages.json",
+			manifest: { session_id: "session-1" },
+			result: completedResult,
+		});
+		sessionManagerMocks.getAccumulatedUsage.mockResolvedValue(undefined);
+		sessionManagerMocks.dispose.mockResolvedValue(undefined);
+
+		const { runAgent } = await import("./run-agent");
+		await runAgent("test prompt", baseConfig);
+
+		expect(sessionManagerMocks.dispose).toHaveBeenCalledWith(
+			"cli_run_shutdown",
+		);
+		expect(sessionManagerMocks.stop).toHaveBeenCalledWith("session-1");
+	});
+});
