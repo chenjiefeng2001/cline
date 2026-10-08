@@ -122,6 +122,13 @@ export function createAgentRuntimeConfig(
 		budget: agentConfig.budget,
 		toolExecution,
 		maxParallelToolCalls: agentConfig.maxParallelToolCalls,
+		// Tool-call ceiling for the lead agent. It is declared under `execution` on
+		// the session config and on `AgentExecutionConfig`, but nothing copied it onto
+		// `AgentRuntimeConfig`, so `AgentRuntime` read `undefined` and no cap was ever
+		// applied to a lead session — only to delegated sub-agents, which read
+		// `config.execution?.maxToolCalls` directly in the runtime builder. Setting
+		// `cline.maxToolCalls` or `--max-tool-calls` appeared to work and did nothing.
+		maxToolCalls: agentConfig.execution?.maxToolCalls,
 		toolPolicies: agentConfig.toolPolicies,
 		toolContextMetadata: input.toolContextMetadata,
 		requestToolApproval: agentConfig.requestToolApproval,
