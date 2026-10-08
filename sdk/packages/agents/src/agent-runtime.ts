@@ -2050,6 +2050,18 @@ export class AgentRuntime {
 				prepared.push(await this.prepareToolExecution(toolCall, callIndex));
 			} catch (error) {
 				this.throwIfAborted();
+				// A hook returning {"cancel": true} raises ControlledStopError. That is
+				// a control signal, not a tool failure, and it deliberately never
+				// touches the abort controller - so throwIfAborted above does not see
+				// it. Swallowing it here turned the denial into a synthetic
+				// "preparation failed" tool result and the run carried on: the model
+				// was handed a refusal instead of a stop, retried the same call, and
+				// the task never reached a terminal state, leaving the UI on a dead
+				// "Resume task" button until VS Code was restarted. Rethrow so the run
+				// loop's catch can report `aborted` and emit run-finished.
+				if (error instanceof ControlledStopError) {
+					throw error;
+				}
 				prepared.push({
 					toolCall,
 					callIndex,
