@@ -133,6 +133,40 @@ function printRunStats(
 	}
 }
 
+/**
+ * How long teardown may take before the CLI stops waiting for it.
+ *
+ * The run itself is already durable by this point - the session manifest and
+ * transcript are on disk - so abandoning a slow dispose costs nothing that the
+ * process exiting would not also discard.
+ */
+const CLEANUP_DEADLINE_MS = 5_000;
+
+/**
+ * Race teardown against a deadline so it can never keep the process alive.
+ *
+ * The existing `.catch(() => {})` on each teardown step only covers a step that
+ * *rejects*. A step that never settles is not caught by anything, `cleanupRuntime()`
+ * never resolves, `runCli()` never returns, and the unconditional `process.exit()`
+ * at the end of index.ts is never reached. That is the second half of
+ * cline/cline#14544: the task completes and is written to the session store, and
+ * the process then hangs forever.
+ */
+function withTeardownDeadline(
+	work: Promise<void>,
+	deadlineMs: number,
+): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<void>((resolve) => {
+		timer = setTimeout(resolve, deadlineMs);
+	});
+	return Promise.race([work.catch(() => {}), deadline]).finally(() => {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
+	});
+}
+
 export async function runAgent(
 	prompt: string,
 	config: Config,
@@ -236,20 +270,27 @@ export async function runAgent(
 
 	let cleanupDone: Promise<void> | undefined;
 	const cleanupRuntime = () => {
-		cleanupDone ??= (async () => {
-			process.off("SIGINT", handleSigint);
-			process.off("SIGTERM", handleSigterm);
-			unsubscribe();
-			await runtimeHooks.shutdown().catch(() => {});
-			if (activeSessionId) {
-				await sessionManager.stop(activeSessionId).catch(() => {});
-			}
-			await sessionManager.dispose("cli_run_shutdown").catch(() => {});
-			setActiveRuntimeAbort(undefined);
-		})();
+		cleanupDone ??= withTeardownDeadline(
+			(async () => {
+				try {
+					process.off("SIGINT", handleSigint);
+					process.off("SIGTERM", handleSigterm);
+					unsubscribe();
+					await runtimeHooks.shutdown().catch(() => {});
+					if (activeSessionId) {
+						await sessionManager.stop(activeSessionId).catch(() => {});
+					}
+					await sessionManager.dispose("cli_run_shutdown").catch(() => {});
+				} finally {
+					// Always clear the abort hook, including when the deadline fired and
+					// the steps above were abandoned mid-flight.
+					setActiveRuntimeAbort(undefined);
+				}
+			})(),
+			CLEANUP_DEADLINE_MS,
+		);
 		return cleanupDone;
 	};
-
 	const handleSigint = () => {
 		if (abortAll()) {
 			emitAbortRequested(config, "sigint");
@@ -405,6 +446,24 @@ export async function runAgent(
 			}
 			process.exitCode = 1;
 			return;
+		}
+
+		// Text mode is the default and the mode every script and agent harness uses, so
+		// the answer has to be printed here. It was not: result.text was only emitted on
+		// the JSON branch, printRunStats prints timings under --verbose, and nothing
+		// else in the CLI writes it - createCliCore takes no output sink and the SDK core
+		// never touches process.stdout. A non-interactive run therefore produced no
+		// answer at all. Reported as cline/cline#14544, where
+		// `cline -m model "prompt" | head` hung with empty stdout.
+		//
+		// Deliberately after the aborted and non-completed branches above: those route
+		// the text to stderr, so printing it here as well would double-report failures
+		// onto stdout, which a script would then read as a successful answer.
+		if (config.outputMode === "text") {
+			const answer = result.text?.trim();
+			if (answer) {
+				writeln(answer);
+			}
 		}
 
 		printRunStats(
