@@ -185,3 +185,7 @@ jobs:
                   name: playwright-recordings-${{ matrix.runner }}
                   path: |
                       test-results/playwright/
+                  # Failure-only debug output: useful while diagnosing the run that
+                  # broke, worthless a quarter later. Traces and videos are large and
+                  # this uploads once per matrix leg.
+                  retention-days: 7

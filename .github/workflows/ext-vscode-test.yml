@@ -354,6 +354,10 @@ jobs:
                   name: pr-coverage-reports
                   path: |
                       apps/vscode/webview-ui/coverage/lcov.info
+                  # Coverage is only read while reviewing the PR. At the 90-day
+                  # default every PR kept a copy, which is most of this repo's
+                  # Actions storage bill.
+                  retention-days: 7
 
     test-platform-integration:
         needs: [detect-changes, quality-checks]
@@ -410,6 +414,7 @@ jobs:
               with:
                 name: test-platform-integration-core-coverage
                 path: apps/vscode/coverage/**/lcov.info
+                retention-days: 7
 
     # Keep the required "test" check as a tiny aggregate gate instead of the conditional
     # VS Code matrix. GitHub treats conditionally skipped jobs as successful required

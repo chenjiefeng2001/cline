@@ -251,6 +251,9 @@ jobs:
           name: cline-nightly-${{ steps.version.outputs.version }}
           path: staging/cline-nightly-${{ steps.version.outputs.version }}.vsix
           if-no-files-found: error
+          # Consumed by the publish step in this same run; no reason to keep the
+          # nightly VSIX for the default 90 days.
+          retention-days: 7
 
       # The job is main-only; step-level dry-run gating still permits a build-only
       # rehearsal without publishing or tagging.
