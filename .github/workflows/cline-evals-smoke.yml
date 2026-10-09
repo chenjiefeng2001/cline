@@ -105,3 +105,4 @@ jobs:
                   name: smoke-results-${{ github.run_id }}
                   path: evals/smoke-tests/results/
                   if-no-files-found: ignore
+                  retention-days: 7

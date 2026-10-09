@@ -191,6 +191,7 @@ jobs:
                   name: claude-dev-${{ github.event.inputs.version }}
                   path: staging/claude-dev-${{ github.event.inputs.version }}.vsix
                   if-no-files-found: error
+                  retention-days: 7
 
             - name: Publish to Marketplace
               if: ${{ github.event.inputs.publish == 'true' }}
