@@ -13,6 +13,26 @@ describe("TaskResume Hook", () => {
 	let hookTestEnv: HookTestEnv
 	const WINDOWS_HOOK_TEST_TIMEOUT_MS = 15000
 
+	/**
+	 * Per-scenario allowance for the fixture test below.
+	 *
+	 * Each scenario spawns a child process and they run strictly back to back, so a
+	 * budget sized for one spawn is wrong by a factor of the scenario count. The old
+	 * single 15000 ms budget covered seven sequential spawns and failed at exactly
+	 * that ceiling on a loaded Windows runner - reporting a hook failure that was
+	 * really just the clock running out mid-loop.
+	 */
+	const HOOK_FIXTURE_SCENARIO_BUDGET_MS = 15000
+
+	/**
+	 * Number of scenarios the fixture test is expected to run.
+	 *
+	 * Used only to size the timeout, and asserted against the real list at runtime so
+	 * that adding a scenario without raising the budget fails loudly here instead of
+	 * turning the suite flaky on CI.
+	 */
+	const DECLARED_FIXTURE_SCENARIOS = 6
+
 	type FixtureScenario = {
 		fixtureName: string
 		lastMessageTs: string
@@ -631,6 +651,14 @@ console.log(JSON.stringify({
 					},
 				]
 
+				// Keep the declared budget honest: a scenario added here without raising
+				// the timeout must fail as a clear error, not as an intermittent CI
+				// timeout six weeks from now.
+				scenarios.length.should.equal(
+					DECLARED_FIXTURE_SCENARIOS,
+					`scenario count changed: update DECLARED_FIXTURE_SCENARIOS so the timeout still covers every spawn`,
+				)
+
 				for (const scenario of scenarios) {
 					await withFixtureRunner(
 						"TaskResume",
@@ -654,7 +682,7 @@ console.log(JSON.stringify({
 					)
 				}
 			},
-			WINDOWS_HOOK_TEST_TIMEOUT_MS,
+			DECLARED_FIXTURE_SCENARIOS * HOOK_FIXTURE_SCENARIO_BUDGET_MS,
 		)
 
 		it("should preserve fixture-based failure behavior", async () => {
