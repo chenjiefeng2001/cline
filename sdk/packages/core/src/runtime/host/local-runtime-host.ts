@@ -7,6 +7,7 @@ import {
 	type AgentConfig,
 	type AgentEvent,
 	type AgentResult,
+	type AgentRuntimeEvent,
 	type AgentTool,
 	captureSdkError,
 	createSessionId,
@@ -28,8 +29,8 @@ import type { ToolExecutors } from "../../extensions/tools";
 import { DefaultToolNames } from "../../extensions/tools";
 import type { TeamEvent } from "../../extensions/tools/team";
 import type { HookEventPayload } from "../../hooks";
-import { wrapToolsWithMiddleware } from "../../middleware/wrap-tools";
 import { createRedactionMiddleware } from "../../middleware/redaction-middleware";
+import { wrapToolsWithMiddleware } from "../../middleware/wrap-tools";
 import { buildTelemetryAgentIdentity } from "../../services/agent-events";
 import { resolveWorkspacePath } from "../../services/config";
 import { prepareLocalRuntimeBootstrap } from "../../services/local-runtime-bootstrap";
@@ -2511,7 +2512,7 @@ export class LocalRuntimeHost implements RuntimeHost {
 			// Fires the `pre_compact` hook before any history is dropped. Undefined when
 			// the workspace has no PreCompact hook file.
 			onPreCompact: bootstrap.preCompactHook,
-		onPostCompact: bootstrap.postCompactHook,
+			onPostCompact: bootstrap.postCompactHook,
 		});
 		const rawInitialCompactionState =
 			explicitInitialCompactionState ?? resumedCompactionState;
@@ -2572,6 +2573,23 @@ export class LocalRuntimeHost implements RuntimeHost {
 			},
 		});
 
+		// Fields the lead agent deliberately does not set. None is declared on
+		// `CoreSessionConfig`, so the host has nothing to forward; each is populated
+		// on the path that owns it, and the lead is not on that path.
+		type IntentionallyNotLeadMapped =
+			// Set by `spawn_agent` / `delegated-agent`: a lead has no parent.
+			| "parentAgentId"
+			// The lead *is* the root run; the orchestrator reads it off the agent.
+			| "rootRunId"
+			// Sub-agent lineage, attached by `session-runtime-orchestrator`.
+			| "toolContextMetadata"
+			// Teammate-specific (`TEAMMATE_API_TIMEOUT_MS` in multi-agent.ts).
+			| "apiTimeoutMs"
+			// Scheduled-run metadata, owned by the scheduler rather than a session.
+			| "schedule"
+			// Per-run cancellation, supplied by the agents layer.
+			| "abortSignal";
+
 		const agentConfig = {
 			sessionId,
 			providerId: providerConfig.providerId,
@@ -2590,6 +2608,13 @@ export class LocalRuntimeHost implements RuntimeHost {
 			temperature: configWithProvider.temperature,
 			systemPrompt: configWithProvider.systemPrompt,
 			maxIterations: configWithProvider.maxIterations,
+			maxToolCalls: configWithProvider.maxToolCalls,
+			// Tool-call ceiling for the lead agent. Nothing in the tree populated
+			// `execution.maxToolCalls`, and the builder reads
+			// `agentConfig.maxToolCalls ?? agentConfig.execution?.maxToolCalls`, so
+			// with neither set the lead agent ran uncapped while
+			// `cline.maxToolCalls` and `--max-tool-calls` looked wired end to end.
+			// Forwarded at the top level, which is the spelling the builder prefers.
 			// Run budget is a session-level guardrail: it must reach the runtime
 			// so a runaway turn is stopped instead of only being reported.
 			budget: configWithProvider.budget,
@@ -2600,7 +2625,58 @@ export class LocalRuntimeHost implements RuntimeHost {
 			execution: configWithProvider.execution,
 			prepareTurn,
 			tools,
-			hooks: bootstrap.hooks,
+			// The host's own `beforeModel` is left untouched by the spread below:
+			// hosts use it to steer a turn (VS Code returns `stop` to switch
+			// plan/act mode), and composing it here would risk dropping that.
+			hooks: {
+				...bootstrap.hooks,
+				onEvent: async (event: AgentRuntimeEvent) => {
+					await bootstrap.hooks?.onEvent?.(event);
+					if (event.type !== "assistant-message") return;
+					const liveSession = this.sessions.get(sessionId);
+					if (!liveSession) return;
+					const messages = liveSession.agent.getMessages();
+					try {
+						await this.invoke<void>(
+							"persistSessionMessages",
+							sessionId,
+							messages,
+							configWithProvider.systemPrompt,
+						);
+					} catch (error) {
+						configWithProvider.logger?.error?.(
+							"Failed to persist session messages after assistant response",
+							{ sessionId, error },
+						);
+						captureSdkError(configWithProvider.telemetry, {
+							component: "core",
+							operation: "session.persist_messages_after_assistant_response",
+							error,
+							severity: "warn",
+							handled: true,
+							context: {
+								sessionId,
+								providerId: configWithProvider.providerId,
+								modelId: configWithProvider.modelId,
+							},
+						});
+					}
+				},
+			},
+			// Credential renewal is wired as a config callback rather than a
+			// `beforeModel` hook. This host owns the token store, but the model is built
+			// by SessionRuntime and a gateway captures its apiKey when it is constructed —
+			// so mutating `config.apiKey` from a hook here would not reach the request
+			// about to be sent. SessionRuntime calls this before every model request and
+			// rebuilds the model when the value changed, which is what lets a turn outlive
+			// its access token instead of replaying itself with a dead credential.
+			syncCredentials: async () => {
+				const liveSession = this.sessions.get(sessionId);
+				if (!liveSession) {
+					return;
+				}
+				await this.syncOAuthCredentials(liveSession);
+			},
 			extensions,
 			hookErrorMode: configWithProvider.hookErrorMode,
 			initialMessages: bootstrap.effectiveInput.initialMessages,
@@ -2610,11 +2686,12 @@ export class LocalRuntimeHost implements RuntimeHost {
 			// model context.
 			userFileContentLoader: (filePath: string) =>
 				loadUserFileContent(filePath, {
-					workspaceRoot: configWithProvider.workspaceRoot ?? configWithProvider.cwd,
+					workspaceRoot:
+						configWithProvider.workspaceRoot ?? configWithProvider.cwd,
 				}),
 			toolPolicies: bootstrap.toolPolicies,
 			requestToolApproval: bootstrap.requestToolApproval
-				? async (request) => {
+				? async (request: ToolApprovalRequest) => {
 						const requestToolApproval = bootstrap.requestToolApproval;
 						return this.approvalCoordinator.request(
 							request,
@@ -2702,60 +2779,40 @@ export class LocalRuntimeHost implements RuntimeHost {
 					configWithProvider,
 					event,
 				),
-		} as AgentConfig;
-		// Credential renewal is wired as a config callback rather than a
-		// `beforeModel` hook. This host owns the token store, but the model is built
-		// by SessionRuntime and a gateway captures its apiKey when it is constructed —
-		// so mutating `config.apiKey` from a hook here would not reach the request
-		// about to be sent. SessionRuntime calls this before every model request and
-		// rebuilds the model when the value changed, which is what lets a turn outlive
-		// its access token instead of replaying itself with a dead credential.
+		};
+
+		// Compile-time exhaustiveness over the lead agent's config. `AgentConfig`
+		// grew a field, or a field is renamed, and nothing here maps it: this stops
+		// compiling.
 		//
-		// The host's own `beforeModel` is left untouched by the spread below: hosts
-		// use it to steer a turn (VS Code returns `stop` to switch plan/act mode), and
-		// composing it here would risk dropping that.
-		agentConfig.syncCredentials = async () => {
-			const liveSession = this.sessions.get(sessionId);
-			if (!liveSession) {
-				return;
-			}
-			await this.syncOAuthCredentials(liveSession);
-		};
-		agentConfig.hooks = {
-			...agentConfig.hooks,
-			onEvent: async (event) => {
-				await bootstrap.hooks?.onEvent?.(event);
-				if (event.type !== "assistant-message") return;
-				const liveSession = this.sessions.get(sessionId);
-				if (!liveSession) return;
-				const messages = liveSession.agent.getMessages();
-				try {
-					await this.invoke<void>(
-						"persistSessionMessages",
-						sessionId,
-						messages,
-						configWithProvider.systemPrompt,
-					);
-				} catch (error) {
-					configWithProvider.logger?.error?.(
-						"Failed to persist session messages after assistant response",
-						{ sessionId, error },
-					);
-					captureSdkError(configWithProvider.telemetry, {
-						component: "core",
-						operation: "session.persist_messages_after_assistant_response",
-						error,
-						severity: "warn",
-						handled: true,
-						context: {
-							sessionId,
-							providerId: configWithProvider.providerId,
-							modelId: configWithProvider.modelId,
-						},
-					});
-				}
-			},
-		};
+		// The `as AgentConfig` annotation that used to close this literal is what
+		// hid exactly that, because an object literal satisfies a wider type without
+		// mentioning every key. It is how the tool-call ceiling went missing: the
+		// builder copied four neighbouring guardrails and not that one, the
+		// annotation accepted the result, and the runtime read `undefined` for every
+		// lead session while the setting looked fully wired end to end.
+		//
+		// Removing the annotation is the point: `keyof typeof agentConfig` is now
+		// the literal's real key set, so the subtraction below can fail.
+		type LeadAgentConfig = typeof agentConfig;
+		type UnmappedAgentConfigKeys = Exclude<
+			keyof AgentConfig,
+			keyof LeadAgentConfig | IntentionallyNotLeadMapped
+		>;
+		const _exhaustive: UnmappedAgentConfigKeys extends never ? true : never =
+			true;
+		void _exhaustive;
+
+		// The reciprocal check, so the allowlist cannot rot: an entry for a field
+		// that no longer exists would otherwise silently stop meaning anything, and
+		// the error above would look like coverage when it is not.
+		type StaleAllowlistEntry = Exclude<
+			IntentionallyNotLeadMapped,
+			keyof AgentConfig
+		>;
+		const _noStaleEntries: StaleAllowlistEntry extends never ? true : never =
+			true;
+		void _noStaleEntries;
 		const agent = this.createAgentInstance(agentConfig, {
 			wrapTools,
 			lazyToolLoading: configWithProvider.lazyToolLoading,
