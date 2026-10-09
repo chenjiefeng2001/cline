@@ -470,7 +470,12 @@ describe("createHookConfigFileHooks", () => {
 				retryDelay: 250,
 			});
 		}
-	}, 15000);
+	// No explicit timeout: this test spawns a real interpreter, and a cold Python
+		// start on a contended Windows runner does not reliably fit in 15s. An explicit
+		// 15000 used to sit here and overrode this package's own `testTimeout: 30_000`,
+		// making this one test stricter than the suite policy that exists to cover
+		// exactly this case. Inheriting the configured budget is the intent.
+	});
 
 	it("falls back from py -3 to python when the Windows launcher is missing", () => {
 		expect(
