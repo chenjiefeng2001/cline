@@ -11,7 +11,13 @@ describe("TaskResume Hook", () => {
 	let tempDir: string
 	let sandbox: sinon.SinonSandbox
 	let hookTestEnv: HookTestEnv
-	const WINDOWS_HOOK_TEST_TIMEOUT_MS = 15000
+	/**
+	 * Single-spawn hook tests start a real interpreter each. This must not be
+	 * stricter than the runner's own per-test budget (`TEST_TIMEOUT_MS` in
+	 * `scripts/run-bun-unit-tests.ts`), or it re-introduces the 15s ceiling that
+	 * reddened Windows CI on 2026-10-09.
+	 */
+	const WINDOWS_HOOK_TEST_TIMEOUT_MS = 45000
 
 	/**
 	 * Per-scenario allowance for the fixture test below.
