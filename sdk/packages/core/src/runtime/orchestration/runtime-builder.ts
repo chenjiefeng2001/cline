@@ -36,6 +36,7 @@ import {
 	ToolPresets,
 	type ToolRoutingRule,
 } from "../../extensions/tools";
+import { createPlanModeCommandGuardExtension } from "../../extensions/tools/command-guard-extension";
 import {
 	AgentTeamsRuntime,
 	bootstrapAgentTeams,
@@ -719,9 +720,20 @@ export class DefaultRuntimeBuilder implements RuntimeBuilder {
 						runtimeSourceReader,
 					)
 				: undefined;
-		const runtimeExtensions = userInstructionPlugin
-			? [...(extensions ?? config.extensions ?? []), userInstructionPlugin]
-			: (extensions ?? config.extensions);
+		// Plan mode keeps run_commands for read-only investigation, but the model can
+		// still write files through the shell - which is exactly how the original
+		// report reached one: `editor` was correctly withheld, so the model used
+		// `python -c "... open(..., 'w')"` instead. The guard is a `beforeTool` hook so
+		// it covers host-provided run_commands replacements too, not just this
+		// package's own shell tool. Reported as cline/cline#13586.
+		const planModeCommandGuard =
+			normalized.mode === "plan" ? createPlanModeCommandGuardExtension() : undefined;
+		const baseExtensions = extensions ?? config.extensions;
+		const runtimeExtensions = [
+			...(baseExtensions ?? []),
+			...(userInstructionPlugin ? [userInstructionPlugin] : []),
+			...(planModeCommandGuard ? [planModeCommandGuard] : []),
+		];
 
 		if (normalized.enableTools) {
 			tools.push(
