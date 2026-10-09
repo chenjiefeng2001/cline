@@ -92,7 +92,15 @@ function parseCounts(output: string): { pass: number; fail: number } {
 	return { pass, fail }
 }
 
-const PER_FILE_TIMEOUT_MS = 120_000
+/**
+ * File-level backstop: a child that has not reported in this long is killed.
+ *
+ * Sized against {@link TEST_TIMEOUT_MS} so roughly half a dozen slow-but-progressing
+ * tests still fit before the backstop fires. Raising the per-test budget without
+ * raising this would have quietly converted a per-test timeout into "wait 45s per
+ * test x N tests" before anything is reaped, so the two move together.
+ */
+const PER_FILE_TIMEOUT_MS = 300_000
 
 /**
  * Per-test budget handed to each `bun test` child, overriding bun's 5s default.
@@ -109,8 +117,20 @@ const PER_FILE_TIMEOUT_MS = 120_000
  * 20s gives a 7x margin over the slowest observed case (6.7s) while still
  * bounding a genuine hang, and stays well inside PER_FILE_TIMEOUT_MS so a stuck
  * child is still reaped at the file level rather than running to 20s x N cases.
+ *
+ * That 20s has since been outgrown, the same way 5s was. With four files in
+ * flight - CI passes `-c 6` - the hook suites contend for the same cores, and on
+ * 2026-10-09 ten hook tests crossed 20s and failed at exactly that ceiling:
+ *
+ *   (fail) TaskCancel Hook > ... should handle 'abandoned' completion status [20130.97ms]
+ *   (fail) TaskResume  Hook > ... should receive all required taskResume fields [20078.07ms]
+ *   Files: 70   Pass: 1023   Fail: 10
+ *
+ * Each was a timeout, never an assertion, and none was in code that had changed.
+ * The same tests cost ~3s each locally, so this is contention, not a regression.
+ * 45s restores the same order of margin 20s had over the 6.7s worst case.
  */
-const TEST_TIMEOUT_MS = 20_000
+const TEST_TIMEOUT_MS = 45_000
 
 async function runOne(file: string): Promise<FileResult> {
 	const proc = Bun.spawn(["bun", "test", "--timeout", String(TEST_TIMEOUT_MS), file], {
