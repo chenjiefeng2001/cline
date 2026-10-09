@@ -21,6 +21,7 @@ import {
 	trace,
 } from "@opentelemetry/api";
 import { type CallSettings, jsonSchema, NoSuchToolError, streamText } from "ai";
+import { createToolCallTextBuffer } from "./content-tool-call";
 import { nanoid } from "nanoid";
 import { extractErrorMessage } from "./format";
 import {
@@ -911,7 +912,12 @@ function extractGoogleThoughtMetadata(
 	return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
-async function* emitAiSdkEvents(
+/**
+ * Exported for testing: the content-delivered tool-call recovery lives in the
+ * streaming loop, so covering it needs this seam rather than a mock of `ai`.
+ * Same pattern as `normalizeUsage`, which this module already exports to its test.
+ */
+export async function* emitAiSdkEvents(
 	stream: AiSdkStreamResult,
 	request: GatewayStreamRequest,
 	context: GatewayProviderContext,
@@ -924,6 +930,41 @@ async function* emitAiSdkEvents(
 	let streamError: string | undefined;
 	let finishUsage: unknown;
 	let finishProviderMetadata: unknown;
+	// Some OpenAI-compatible servers return a tool call inside message.content
+	// instead of message.tool_calls (cline/cline#14453, #13008). Deciding that needs
+	// the complete text, so deltas are buffered only while they could still become
+	// an envelope; prose is flushed on the first delta and streams normally. The
+	// buffer also refuses any name the model was not offered, so a false positive
+	// cannot execute anything.
+	const textBuffer = createToolCallTextBuffer({
+		toolNames: (request.tools ?? []).map((tool) => tool.name),
+		makeToolCallId: () => `tool_${nanoid()}`,
+	});
+	const flushTextBuffer = function* (this: void): Generator<AgentModelEvent> {
+		const decision = textBuffer.finish();
+		if (!decision) {
+			return;
+		}
+		if (decision.kind === "text") {
+			yield { type: "text-delta", text: decision.text };
+			return;
+		}
+		const { toolName, toolCallId, input } = decision.toolCall;
+		sawToolCalls = true;
+		emittedToolCallIds.add(toolCallId);
+		yield {
+			type: "tool-call-delta",
+			toolCallId,
+			toolName,
+			input: input as never,
+			inputText: JSON.stringify(input),
+			metadata: buildToolCallMetadata({
+				metadata: undefined,
+				request,
+				context,
+			}),
+		};
+	}.bind(undefined);
 
 	try {
 		if (stream.fullStream) {
@@ -937,7 +978,16 @@ async function* emitAiSdkEvents(
 						(part.text as string | undefined) ??
 						(part.delta as string | undefined);
 					if (text) {
-						yield { type: "text-delta", text };
+						// Once released the buffer is out of the path: deltas must stream
+						// straight through, or everything after the first flush is lost.
+						if (textBuffer.released()) {
+							yield { type: "text-delta", text };
+						} else {
+							const flushed = textBuffer.push(text);
+							if (flushed) {
+								yield { type: "text-delta", text: flushed.flush };
+							}
+						}
 					}
 					continue;
 				}
@@ -959,6 +1009,12 @@ async function* emitAiSdkEvents(
 
 				if (part.type === "tool-call") {
 					sawToolCalls = true;
+					// This turn is already calling a tool, so buffered text is prose and
+					// must be emitted before the call rather than after it.
+					const pendingText = textBuffer.drainAsText();
+					if (pendingText) {
+						yield { type: "text-delta", text: pendingText };
+					}
 					const toolCallId =
 						(part.toolCallId as string | undefined) ??
 						(part.id as string | undefined) ??
@@ -1047,7 +1103,16 @@ async function* emitAiSdkEvents(
 			// Same stall guard as the fullStream path above - a text-only provider
 			// stream has exactly the same half-open failure mode.
 			for await (const text of withStallTimeout(stream.textStream)) {
-				yield { type: "text-delta", text };
+				// Same recovery: a text-only stream from one of these servers carries the
+				// tool call and nothing else.
+				if (textBuffer.released()) {
+					yield { type: "text-delta", text };
+					continue;
+				}
+				const flushed = textBuffer.push(text);
+				if (flushed) {
+					yield { type: "text-delta", text: flushed.flush };
+				}
 			}
 		}
 	} catch (error) {
@@ -1055,6 +1120,11 @@ async function* emitAiSdkEvents(
 		// NoOutputGeneratedError the AI SDK throws when 0 steps are recorded.
 		streamError = capturedError?.current ?? extractErrorMessage(error);
 	}
+
+	// End of the turn: whatever is still buffered either was a tool call in all but
+	// name, or is text the user needs to see. Emitted before the finish event so
+	// ordering matches an unbuffered stream.
+	yield* flushTextBuffer();
 
 	// Prefer stream.usage (has raw cost data) over finish part usage.
 	// stream.usage may be undefined in mocked/test scenarios, fall back to finish part + its providerMetadata.
