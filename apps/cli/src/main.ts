@@ -1,5 +1,4 @@
 import { fstatSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename } from "node:path";
 import type { ToolPolicy } from "@cline/core";
 
@@ -141,11 +140,10 @@ export async function runCli(): Promise<void> {
 
 	const cliArgs = process.argv.slice(2);
 	const configDir = resolveConfigDirArg(cliArgs);
-	const { setClineDir, setHomeDir } = await import("@cline/shared/storage");
+	const { setClineDir } = await import("@cline/shared/storage");
 	if (configDir) {
 		setClineDir(configDir);
 	}
-	setHomeDir(homedir());
 
 	// Capture activation telemetry only after config/home directory selection
 	// has been applied, so the telemetry singleton's persisted distinct-id
@@ -514,7 +512,7 @@ export async function runCli(): Promise<void> {
 			const opts = historyDeleteCmd.opts();
 			if (!opts.sessionId) {
 				writeErr("history delete requires --session-id <id>");
-				ctx.exitCode = 0;
+				ctx.exitCode = 1;
 				return;
 			}
 			const outputMode =

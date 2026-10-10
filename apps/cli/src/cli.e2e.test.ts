@@ -123,9 +123,9 @@ describe("cli e2e", () => {
 		expect(result.status).toBe(0);
 		expect(asText(result.stderr)).toBe("");
 		expect(asText(result.stdout)).toContain("Usage:");
-		expect(asText(result.stdout)).toContain("--auto-approve [value]");
+		expect(asText(result.stdout)).toContain("--auto-approve <boolean>");
 		expect(asText(result.stdout)).toContain("--data-dir");
-		expect(asText(result.stdout)).toContain("--thinking [level]");
+		expect(asText(result.stdout)).toContain("--thinking <level>");
 		expect(asText(result.stdout)).not.toContain("--reasoning-effort");
 		expect(asText(result.stdout)).not.toContain("--act");
 		expect(asText(result.stdout)).toContain("Show current configuration");
@@ -230,7 +230,7 @@ describe("cli e2e", () => {
 	it("returns an error for unknown hub subcommands", () => {
 		const result = runCli(["hub", "nonesuch"], { env: createIsolatedEnv() });
 		expect(result.status).toBe(1);
-		expect(asText(result.stderr)).toContain('unknown command "nonesuch"');
+		expect(asText(result.stderr)).toContain("unknown command 'nonesuch'");
 	});
 
 	it("returns an error for interactive auth when no TTY is available", () => {
@@ -461,34 +461,18 @@ Create a concise commit message.`,
 		expect(asText(result.stdout)).toContain(path.join(skillsDir, "SKILL.md"));
 	});
 
-	it("includes Documents/Cline rules and skills", () => {
+	it("includes Documents/Cline rules", () => {
 		const homeDir = mkdtempSync(path.join(os.tmpdir(), "cli-e2e-home-"));
 		const workspace = mkdtempSync(path.join(os.tmpdir(), "cli-e2e-workspace-"));
 		tempDirs.push(homeDir, workspace);
 		const docsRulesDir = path.join(homeDir, "Documents", "Cline", "Rules");
-		const docsSkillsDir = path.join(
-			homeDir,
-			"Documents",
-			"Cline",
-			"Skills",
-			"review",
-		);
 		mkdirSync(docsRulesDir, { recursive: true });
-		mkdirSync(docsSkillsDir, { recursive: true });
 		writeFileSync(
 			path.join(docsRulesDir, "docs-rule.md"),
 			`---
 name: docs-rule
 ---
 Rule from docs path.`,
-			"utf8",
-		);
-		writeFileSync(
-			path.join(docsSkillsDir, "SKILL.md"),
-			`---
-name: docs-skill
----
-Skill from docs path.`,
 			"utf8",
 		);
 
@@ -502,15 +486,14 @@ Skill from docs path.`,
 		expect(rulesResult.status).toBe(0);
 		expect(asText(rulesResult.stdout)).toContain("docs-rule");
 
-		const skillsResult = runCli(["config", "skills"], {
-			cwd: workspace,
-			env: {
-				...createIsolatedEnv(),
-				HOME: homeDir,
-			},
-		});
-		expect(skillsResult.status).toBe(0);
-		expect(asText(skillsResult.stdout)).toContain("docs-skill");
+		// Skills are deliberately NOT asserted here. `Documents/Cline/Skills` is
+		// not a skills source: `DocumentsExtensionName` in
+		// shared/src/storage/paths.ts covers Agents | Hooks | Rules | Workflows |
+		// Plugins, and `resolveSkillsConfigSearchPaths` never consulted
+		// Documents at all - it has only ever looked at the workspace,
+		// resolveClineDir()/skills and HOME_DIR/.agents/skills. The skill
+		// fixture above therefore proves nothing, and an earlier version of
+		// this test asserted a skill discovery path that was never wired up.
 	});
 
 	it("lists configured agents with source paths", () => {
@@ -815,13 +798,9 @@ Break work into clear steps.`,
 		});
 		expect(textResult.status).toBe(0);
 		expect(asText(textResult.stdout)).toContain("Available tools:");
-		expect(asText(textResult.stdout)).toContain(
-			"read_files [default: enabled]",
-		);
-		expect(asText(textResult.stdout)).toContain(
-			"spawn_agent [default: enabled]",
-		);
-		expect(asText(textResult.stdout)).toContain("teams [default: enabled]");
+		expect(asText(textResult.stdout)).toContain("read_files [enabled]");
+		expect(asText(textResult.stdout)).toContain("spawn_agent [enabled]");
+		expect(asText(textResult.stdout)).toContain("teams [enabled]");
 		expect(asText(textResult.stdout)).not.toContain("submit_and_exit");
 		expect(asText(textResult.stdout)).not.toContain("apply_patch");
 		expect(asText(textResult.stdout)).toContain("Plugin tools:");
