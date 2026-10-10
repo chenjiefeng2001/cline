@@ -22,11 +22,11 @@ export function getEditorSizeError(input: EditFileInput): string | null {
 		typeof input.old_text === "string" &&
 		input.old_text.length > INPUT_ARG_CHAR_LIMIT
 	) {
-		return `Editor input too large: old_text was ${input.old_text.length} characters, exceeding the recommended limit of ${INPUT_ARG_CHAR_LIMIT}. Split the edit into smaller tool calls so later tool calls are less likely to be truncated or time out.`;
+		return `Editor input too large: old_text was ${input.old_text.length} characters, above the hard limit of ${INPUT_ARG_CHAR_LIMIT}. The edit was not applied. Split it into smaller editor calls.`;
 	}
 
 	if (input.new_text.length > INPUT_ARG_CHAR_LIMIT) {
-		return `Editor input too large: new_text was ${input.new_text.length} characters, exceeding the recommended limit of ${INPUT_ARG_CHAR_LIMIT}. Split the edit into smaller tool calls so later tool calls are less likely to be truncated or time out.`;
+		return `Editor input too large: new_text was ${input.new_text.length} characters, above the hard limit of ${INPUT_ARG_CHAR_LIMIT}. The edit was not applied. Split it into smaller editor calls.`;
 	}
 
 	return null;

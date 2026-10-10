@@ -2174,8 +2174,9 @@ describe("default editor tool", () => {
 			throw new Error("Expected editor tool result to include an error.");
 		}
 		expect(result.error).toContain(
-			`recommended limit of ${INPUT_ARG_CHAR_LIMIT}`,
+			`above the hard limit of ${INPUT_ARG_CHAR_LIMIT}`,
 		);
+		expect(result.error).toContain("The edit was not applied.");
 		expect(execute).not.toHaveBeenCalled();
 	});
 });

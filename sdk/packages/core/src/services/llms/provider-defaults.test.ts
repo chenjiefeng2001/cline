@@ -566,6 +566,40 @@ describe("resolveProviderConfig", () => {
 		);
 	});
 
+	it("derives the base gpt-5.4 budget from the catalog rather than pinning a literal", async () => {
+		const [codexResolved, openAiResolved] = await Promise.all([
+			resolveProviderConfig("openai-codex"),
+			resolveProviderConfig("openai-native"),
+		]);
+		const codexModel = codexResolved?.knownModels?.["gpt-5.4"];
+		const openAiModel = openAiResolved?.knownModels?.["gpt-5.4"];
+
+		expect(codexModel).toBeDefined();
+		expect(openAiModel).toBeDefined();
+		if (!codexModel || !openAiModel) {
+			throw new Error("Expected gpt-5.4 on both routes.");
+		}
+
+		// gpt-5.5 has hardcoded backend caps; gpt-5.4 does not, so the
+		// subscription route keeps the generated catalog's contextWindow and
+		// applies only the universal 0.95 input haircut. Asserting the
+		// derivation rather than a literal keeps this honest: whether the
+		// backend actually tolerates a ~1M budget for gpt-5.4 is unverified,
+		// and pinning today's number would lock in an answer nobody confirmed.
+		expect(codexModel.contextWindow).toBe(openAiModel.contextWindow);
+		expect(codexModel.maxInputTokens).toBe(
+			openAiModel.maxInputTokens !== undefined
+				? openAiModel.maxInputTokens * 0.95
+				: undefined,
+		);
+		// The derived cap must never exceed the catalog input budget.
+		if (codexModel.maxInputTokens !== undefined && openAiModel.maxInputTokens) {
+			expect(codexModel.maxInputTokens).toBeLessThanOrEqual(
+				openAiModel.maxInputTokens,
+			);
+		}
+	});
+
 	it("resolves ChatGPT OAuth models from the filtered catalog", async () => {
 		const resolved = await resolveProviderConfig(
 			"openai-codex",
