@@ -186,6 +186,17 @@ export async function runHistoryList(input: {
 		return 0;
 	}
 
+	// Text mode opens the interactive picker. Without a terminal on both ends
+	// there is nothing to drive it with, and the picker would block forever -
+	// in CI, in a pipeline, or in any script. Fail fast and point at --json,
+	// matching how the auth command reports a missing interactive session.
+	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+		io.writeErr(
+			"history list requires an interactive terminal; use --json for machine-readable output.",
+		);
+		return 1;
+	}
+
 	disableOpenTuiGraphicsProbe();
 	const { renderHistoryStandalone } = await import("../tui/history-standalone");
 	return await renderHistoryStandalone({

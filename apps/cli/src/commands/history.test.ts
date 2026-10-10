@@ -198,7 +198,20 @@ describe("formatHistoryListLine", () => {
 describe("runHistoryList", () => {
 	afterEach(() => {
 		vi.clearAllMocks();
+		vi.restoreAllMocks();
 	});
+
+	// process.stdin.isTTY is absent under vitest, so it cannot be spied on as a
+	// getter; define it directly and let afterEach restore the real descriptor.
+	function setTty(value: boolean | undefined): void {
+		for (const stream of [process.stdin, process.stdout]) {
+			Object.defineProperty(stream, "isTTY", {
+				value,
+				configurable: true,
+				writable: true,
+			});
+		}
+	}
 
 	it("hydrates interactive history rows so titles can be inferred from messages", async () => {
 		const row = createHistoryRow({ prompt: undefined, metadata: undefined });
@@ -207,6 +220,7 @@ describe("runHistoryList", () => {
 			writeln: vi.fn(),
 			writeErr: vi.fn(),
 		};
+		setTty(true);
 
 		const code = await runHistoryList({
 			limit: 25,
@@ -221,6 +235,50 @@ describe("runHistoryList", () => {
 		expect(mockedRenderHistoryStandalone).toHaveBeenCalledWith(
 			expect.objectContaining({ rows: [row] }),
 		);
+	});
+
+	it("refuses the interactive picker when there is no terminal, instead of blocking", async () => {
+		mockedListSessions.mockResolvedValue([
+			createHistoryRow({ prompt: undefined, metadata: undefined }),
+		]);
+		const io = {
+			writeln: vi.fn(),
+			writeErr: vi.fn(),
+		};
+		setTty(false);
+
+		const code = await runHistoryList({
+			limit: 25,
+			outputMode: "text",
+			io,
+		});
+
+		expect(code).toBe(1);
+		expect(io.writeErr).toHaveBeenCalledWith(
+			expect.stringContaining("requires an interactive terminal"),
+		);
+		expect(mockedRenderHistoryStandalone).not.toHaveBeenCalled();
+	});
+
+	it("still emits json without requiring a terminal", async () => {
+		mockedListSessions.mockResolvedValue([
+			createHistoryRow({ prompt: undefined, metadata: undefined }),
+		]);
+		const io = {
+			writeln: vi.fn(),
+			writeErr: vi.fn(),
+		};
+		setTty(false);
+
+		const code = await runHistoryList({
+			limit: 25,
+			outputMode: "json",
+			io,
+		});
+
+		expect(code).toBe(0);
+		expect(io.writeErr).not.toHaveBeenCalled();
+		expect(mockedRenderHistoryStandalone).not.toHaveBeenCalled();
 	});
 
 	it("keeps json history listing unhydrated", async () => {
