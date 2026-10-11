@@ -106,6 +106,33 @@ describe("filterOpenAICodexModels", () => {
 			filterOpenAICodexModels({ "gpt-6.0": model });
 			expect(model).toEqual(snapshot);
 		});
+
+		it("does not let a suffixed or look-alike id inherit the pinned gpt-5.5 caps", () => {
+			// These all clear the 5.3 version gate, so they reach the override.
+			// Under substring matching they either wrongly received the 400K cap
+			// (gpt-5.55) or would silently fall back to the inflated catalog
+			// values (a future gpt-5.5.1). Both are the bug this guards.
+			for (const id of ["gpt-5.55", "gpt-5.51", "gpt-5.5-preview"]) {
+				const result = filterOne(id, {
+					contextWindow: 1_000_000,
+					maxInputTokens: 900_000,
+				});
+				expect(result?.contextWindow, id).not.toBe(400_000);
+				expect(result?.maxInputTokens, id).toBe(900_000 * 0.95);
+			}
+		});
+
+		it("still pins the exact gpt-5.5 id", () => {
+			const result = filterOne("gpt-5.5", {
+				contextWindow: 1_000_000,
+				maxInputTokens: 900_000,
+			});
+			expect(result).toMatchObject({
+				contextWindow: 400_000,
+				maxInputTokens: 272_000 * 0.95,
+				maxTokens: 128_000,
+			});
+		});
 	});
 
 	it("keeps allowed models and drops disallowed ones from a mixed catalog", () => {

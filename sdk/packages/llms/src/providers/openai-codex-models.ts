@@ -28,13 +28,28 @@ function isOpenAICodexAllowedModel(id: string, model: ModelInfo): boolean {
 }
 
 /**
+ * Models whose ChatGPT/Codex backend caps are known and hardcoded.
+ *
+ * Matched by exact id, not substring. A substring test let `gpt-5.55` inherit
+ * these caps, and would let a future `gpt-5.5.1` slip past them while still
+ * clearing the 5.3 version gate in `isOpenAICodexAllowedModel` - silently
+ * restoring the inflated catalog values this override exists to correct.
+ *
+ * `gpt-5.5-codex` is listed explicitly because the previous substring test
+ * covered it and it is specified as a supported id, even though the generated
+ * catalog does not carry it today. Adding an id here is a deliberate act; that
+ * is the intent.
+ */
+const CODEX_PINNED_CAP_MODEL_IDS = new Set(["gpt-5.5", "gpt-5.5-codex"]);
+
+/**
  * Applies the effective input budget to every allowed model. GPT-5.5
  * additionally gets hardcoded limits because the ChatGPT/Codex backend
  * enforces a 272K input / 128K output cap that is lower than what the
  * generated OpenAI API catalog reports.
  */
 function toOpenAICodexModel(id: string, model: ModelInfo): ModelInfo {
-	if (id.includes("gpt-5.5")) {
+	if (CODEX_PINNED_CAP_MODEL_IDS.has(id)) {
 		return {
 			...model,
 			contextWindow: 400_000,
