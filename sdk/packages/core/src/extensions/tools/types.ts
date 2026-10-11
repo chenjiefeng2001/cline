@@ -90,11 +90,22 @@ export type GlobExecutor = (
  * @param context - Tool execution context
  * @returns Command output (stdout)
  */
-export type ShellExecutor = (
+export type ShellExecutor = ((
 	command: string | StructuredCommandInput,
 	cwd: string,
 	context: AgentToolContext,
-) => Promise<string>;
+) => Promise<string>) & {
+	/**
+	 * Set when the executor enforces its own timeout.
+	 *
+	 * `createShellTool` races executors against its own timer as a safety net
+	 * for ones that have none. That race is unsafe once a timeout can detach
+	 * instead of failing: the executor's timer fires first but its handover is
+	 * asynchronous, so the outer timer would reject before the detach resolved
+	 * and the detach would be lost. Declaring ownership removes the race.
+	 */
+	managesOwnTimeout?: boolean;
+};
 
 /**
  * Executor for fetching web content

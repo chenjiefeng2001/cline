@@ -18,6 +18,7 @@ import type {
 	AgentTool,
 	AgentToolCallPart,
 	AgentToolDefinition,
+	AgentToolNotice,
 	AgentToolResult,
 	AgentUsage,
 	AgentRuntimeConfig as BaseAgentRuntimeConfig,
@@ -2661,6 +2662,17 @@ export class AgentRuntime {
 						iteration: this.state.iteration,
 						toolCall: prepared.toolCall,
 						update,
+					});
+				},
+				emitNotice: (notice: AgentToolNotice) => {
+					void this.emit({
+						type: "status-notice",
+						snapshot: this.snapshot(),
+						message: notice.message,
+						metadata: {
+							...(notice.reason ? { reason: notice.reason } : {}),
+							...notice.metadata,
+						},
 					});
 				},
 			});

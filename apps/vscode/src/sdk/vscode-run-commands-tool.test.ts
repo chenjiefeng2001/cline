@@ -7,6 +7,7 @@ import type { VscodeTerminalManager } from "@/hosts/vscode/terminal/VscodeTermin
 import type { TerminalCompletionDetails } from "@/integrations/terminal/types"
 import { SdkForegroundCommandCoordinator } from "./sdk-foreground-command-coordinator"
 import {
+	createTimeoutDetachedLogSink,
 	createVscodeRunCommandsTool,
 	executeForeground,
 	formatCommandForTerminal,
@@ -1248,5 +1249,72 @@ describe("executeForeground (fork behaviour)", () => {
 		} catch {
 			expect(coordinator.isRunning).toBe(false)
 		}
+	})
+})
+
+describe("createTimeoutDetachedLogSink", () => {
+	const readLog = (path: string) => {
+		const handle = fs.openSync(path, "r")
+		try {
+			return fs.readFileSync(handle, "utf8")
+		} finally {
+			fs.closeSync(handle)
+		}
+	}
+
+	it("writes the snapshot, later output and a closing status to a real file", async () => {
+		const sink = createTimeoutDetachedLogSink("npm run dev")
+		const handle = await sink.open({
+			command: "npm run dev",
+			initialOutput: "line-1\nline-2\n",
+			truncated: false,
+		})
+
+		expect(handle.path).toMatch(/timed-out-command-/)
+		await handle.write("line-3\n")
+		await handle.close("[Command completed with exit code 0]")
+
+		const contents = readLog(handle.path)
+		expect(contents).toContain("[Command timed out and was detached: npm run dev]")
+		expect(contents).toContain("line-1\nline-2\n")
+		expect(contents).toContain("line-3")
+		expect(contents).toContain("[Command completed with exit code 0]")
+		// Snapshot precedes everything written after the handover.
+		expect(contents.indexOf("line-2")).toBeLessThan(contents.indexOf("line-3"))
+	})
+
+	it("records that the pre-timeout output was truncated", async () => {
+		const sink = createTimeoutDetachedLogSink("go test ./...")
+		const handle = await sink.open({
+			command: "go test ./...",
+			initialOutput: "partial",
+			truncated: true,
+		})
+		await handle.close("[done]")
+		expect(readLog(handle.path)).toContain("was truncated to fit its budget")
+	})
+
+	it("rejects rather than silently truncating once the cap is reached", async () => {
+		const sink = createTimeoutDetachedLogSink("yes")
+		const handle = await sink.open({
+			command: "yes",
+			initialOutput: "",
+			truncated: false,
+		})
+		// A rejection is what lets the SDK tell the user the log went incomplete;
+		// quietly dropping output here would leave that claim standing.
+		await expect(handle.write("x".repeat(PROCEED_LOG_MAX_BYTES + 1))).rejects.toThrow(/cap/)
+		await handle.close("[done]")
+	})
+
+	it("refuses writes after close so a finished log cannot be reopened", async () => {
+		const sink = createTimeoutDetachedLogSink("sleep 1")
+		const handle = await sink.open({
+			command: "sleep 1",
+			initialOutput: "",
+			truncated: false,
+		})
+		await handle.close("[done]")
+		await expect(handle.write("late\n")).rejects.toThrow(/closed/)
 	})
 })

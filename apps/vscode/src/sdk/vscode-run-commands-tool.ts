@@ -20,7 +20,7 @@ import {
 	type StructuredCommandInput,
 	truncateCommandOutput,
 } from "@cline/core"
-import type { AgentTool } from "@cline/shared"
+import type { AgentTool, AgentToolContext, DetachedCommandLogHandle, DetachedCommandLogSink } from "@cline/shared"
 import { TerminalUserInterventionAction, telemetryService } from "@services/telemetry"
 import { ClineTempManager } from "@services/temp"
 import * as fs from "fs"
@@ -195,6 +195,71 @@ function createDetachedCommandLog(terminalCommand: string, existingLines: string
 		fail: (error) => {
 			const message = error instanceof Error ? error.message : String(error)
 			end(`[Command failed before log capture completed: ${message}]`)
+		},
+	}
+}
+
+/**
+ * Host-side sink for a background command that outlived its tool timeout.
+ *
+ * The SDK decides when to detach and hands over the output collected so far;
+ * this side owns the file, its path, its cap and its cleanup. Writes are
+ * awaited so a genuine I/O failure surfaces as a rejection — the SDK treats a
+ * rejection as permanent and tells the user the log is incomplete, which is
+ * the only honest description of a file that stopped growing.
+ */
+export function createTimeoutDetachedLogSink(command: string): DetachedCommandLogSink {
+	return {
+		open: ({ initialOutput, truncated }): DetachedCommandLogHandle => {
+			const logFilePath = ClineTempManager.createTempFilePath("timed-out-command")
+			const stream = fs.createWriteStream(logFilePath, { flags: "a" })
+			stream.on("error", (error) => {
+				Logger.error(`[VscodeRunCommands] Failed writing timed-out command log ${logFilePath}:`, error)
+			})
+
+			let bytesWritten = 0
+			let closed = false
+			const header = `${[
+				`[Command timed out and was detached: ${command}]`,
+				truncated ? "[Output before the timeout was truncated to fit its budget.]" : undefined,
+				initialOutput.length > 0 ? initialOutput : undefined,
+			]
+				.filter((line): line is string => line !== undefined)
+				.join("\n")}\n`
+			bytesWritten += Buffer.byteLength(header)
+			stream.write(header)
+
+			return {
+				path: logFilePath,
+				write: (chunk: string): Promise<void> => {
+					return new Promise((resolve, reject) => {
+						if (closed) {
+							reject(new Error("detached command log is already closed"))
+							return
+						}
+						const chunkBytes = Buffer.byteLength(chunk)
+						if (bytesWritten + chunkBytes > PROCEED_LOG_MAX_BYTES) {
+							reject(new Error(`detached command log reached its ${PROCEED_LOG_MAX_BYTES} byte cap`))
+							return
+						}
+						bytesWritten += chunkBytes
+						stream.write(chunk, (error) => (error ? reject(error) : resolve()))
+					})
+				},
+				close: (finalMessage: string): Promise<void> => {
+					if (closed) {
+						return Promise.resolve()
+					}
+					closed = true
+					// Output obeys the strict cap, but a terminal status line is
+					// always written so a full log never hides how the command ended.
+					// Resolved on the stream's finish so a caller awaiting close()
+					// can rely on the file being complete, not merely enqueued.
+					return new Promise((resolve) => {
+						stream.end(`${finalMessage.slice(0, PROCEED_LOG_FINAL_MESSAGE_MAX_CHARS)}\n`, () => resolve())
+					})
+				},
+			}
 		},
 	}
 }
@@ -608,7 +673,11 @@ function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state:
 	// Lazy-init terminal manager reference
 	let terminalManager: VscodeTerminalManager | undefined
 
-	return async (command, commandCwd, context): Promise<string> => {
+	const executorFn = async (
+		command: string | StructuredCommandInput,
+		commandCwd: string,
+		context: AgentToolContext,
+	): Promise<string> => {
 		Logger.log(`[VscodeRunCommands] Executing command in ${executionMode} mode`)
 
 		// Execute with the shell named in the model request that produced this
@@ -632,7 +701,14 @@ function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state:
 			// foreground mode in the same task.terminal_execution event —
 			// essential for judging the backgroundExec-by-default change.
 			try {
-				const result = await bgExecutor(command, commandCwd || cwd, context)
+				// The sink is injected here, for background invocations only, so
+				// that a timeout detaches instead of killing. Foreground
+				// commands keep their existing 1-hour timeout and their own
+				// user-driven detach, so they are deliberately left untouched.
+				const result = await bgExecutor(command, commandCwd || cwd, {
+					...context,
+					detachedCommandLog: createTimeoutDetachedLogSink(formatCommandForTerminal(command)),
+				})
 				telemetryService.captureTerminalExecution(true, "vscode", "child_process", {
 					exitCode: 0,
 					terminalExecutionMode: "backgroundExec",
@@ -662,4 +738,12 @@ function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state:
 			context.emitUpdate,
 		)
 	}
+
+	// Background delegates to createShellExecutor, which always arms its own
+	// timer — and that timer now detaches rather than killing, so racing it
+	// from the tool wrapper would discard the handover. Foreground has no
+	// internal timer and must keep the wrapper's 1-hour timeout.
+	executorFn.managesOwnTimeout = executionMode === "backgroundExec"
+
+	return executorFn
 }

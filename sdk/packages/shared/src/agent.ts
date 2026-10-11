@@ -5,7 +5,10 @@
  *
  */
 
-import type { AgentRunBudget } from "./agents/types";
+import type {
+	AgentNoticeEvent,
+	AgentRunBudget,
+} from "./agents/types";
 import type { ModelInfo } from "./llms/model-info";
 import type {
 	ToolApprovalRequest,
@@ -203,6 +206,60 @@ export interface AgentToolResult<TOutput = unknown> {
 	metadata?: Record<string, unknown>;
 }
 
+/**
+ * Host-owned sink for the output of a command that outlived its tool timeout.
+ *
+ * The SDK decides *when* a still-running command is detached and hands over the
+ * output collected so far; the host owns the log file, its path, permissions
+ * and cleanup. The contract carries no filesystem or host policy, so the SDK
+ * stays free of host modules.
+ */
+export interface DetachedCommandLogSink {
+	/**
+	 * Create the log and seed it with everything collected before the timeout.
+	 * Called at most once per detach. Rejecting means the handover failed and no
+	 * log exists, so the caller must not report a path in that case.
+	 */
+	open(
+		input: DetachedCommandLogOpenInput,
+	):
+		| Promise<DetachedCommandLogHandle>
+		| DetachedCommandLogHandle;
+}
+
+export interface DetachedCommandLogOpenInput {
+	command: string;
+	/** Output collected before the timeout. May be empty. */
+	initialOutput: string;
+	/** True when `initialOutput` had to drop output to fit its budget. */
+	truncated: boolean;
+}
+
+export interface DetachedCommandLogHandle {
+	/** Where the host wrote the log. Reported to the user and the model. */
+	path: string;
+	/**
+	 * Append output produced after the detach.
+	 *
+	 * Deliberately returns nothing: backpressure is the sink's own concern (a
+	 * write stream buffers on its own), and a boolean return would be ambiguous
+	 * between "buffered, try later" and "rejected permanently" — a caller that
+	 * read it the first way would close a healthy log during ordinary buffering.
+	 * Throwing is the only signal for permanent failure.
+	 */
+	write(chunk: string): Promise<void> | void;
+	/** Finalise the log. Called exactly once per successfully opened handle. */
+	close(finalMessage: string): Promise<void> | void;
+}
+
+/** A notice a tool may surface on the runtime event stream. */
+export interface AgentToolNotice {
+	noticeType: AgentNoticeEvent["noticeType"];
+	message: string;
+	reason?: AgentNoticeEvent["reason"];
+	metadata?: Record<string, unknown>;
+}
+
 export interface AgentToolContext {
 	sessionId?: string;
 	agentId: string;
@@ -236,6 +293,19 @@ export interface AgentToolContext {
 	metadata?: Record<string, unknown>;
 	snapshot?: AgentRuntimeStateSnapshot;
 	emitUpdate?: (update: unknown) => void;
+	/**
+	 * Presence of this sink enables timeout-detach for tools that support it.
+	 * When absent the tool keeps its existing timeout behaviour, so hosts that
+	 * do not opt in are unaffected. A host that provides one also takes over
+	 * timeout enforcement for those tools — see {@link DetachedCommandLogSink}.
+	 */
+	detachedCommandLog?: DetachedCommandLogSink;
+	/**
+	 * Emit a notice on the runtime event stream. Display-only: notices reach the
+	 * user, they are not injected into the model conversation, so a notice must
+	 * never be treated as a way to correct a claim already made to the model.
+	 */
+	emitNotice?: (notice: AgentToolNotice) => void;
 }
 
 export interface AgentTool<TInput = unknown, TOutput = unknown>

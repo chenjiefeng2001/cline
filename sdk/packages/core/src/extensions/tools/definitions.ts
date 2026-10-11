@@ -191,17 +191,20 @@ async function executeShellCommands(
 	},
 ): Promise<ToolOperationResult[]> {
 	const { executor, cwd, context, timeoutMs, timeoutSource } = options;
+	// Racing an executor that already arms its own timer would reject before an
+	// asynchronous timeout-detach could hand over its log. See ShellExecutor.
+	const raced =
+		executor.managesOwnTimeout === true
+			? <T>(promise: Promise<T>) => promise
+			: <T>(promise: Promise<T>) =>
+					withTimeout(promise, timeoutMs, `Command timed out after ${timeoutMs}ms`);
 
 	return Promise.all(
 		commands.map(async (command): Promise<ToolOperationResult> => {
 			const startedAt = Date.now();
 			const query = formatRunCommandQueryPreview(command);
 			try {
-				const output = await withTimeout(
-					executor(command, cwd, context),
-					timeoutMs,
-					`Command timed out after ${timeoutMs}ms`,
-				);
+				const output = await raced(executor(command, cwd, context));
 				return {
 					query,
 					result: output,

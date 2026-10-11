@@ -164,7 +164,8 @@ export interface AgentNoticeEvent extends AgentEventMetadata {
 		| "mistake_limit"
 		| "auto_compaction"
 		| "manual_compaction"
-		| "compaction_budget_emergency";
+		| "compaction_budget_emergency"
+		| "detached_output_log_failed";
 	metadata?: Record<string, unknown>;
 }
 

@@ -13,7 +13,7 @@ import {
 	createShellTool,
 	createSkillsTool,
 } from "./definitions";
-import { CommandExitError } from "./executors/bash";
+import { CommandExitError, createShellExecutor } from "./executors/bash";
 import { RUN_COMMAND_QUERY_PREVIEW_LIMIT, TimeoutError } from "./helpers";
 import { INPUT_ARG_CHAR_LIMIT } from "./schemas";
 import type { SkillsExecutorWithMetadata } from "./types";
@@ -1450,6 +1450,41 @@ describe("default run_commands tool", () => {
 			expect(call.properties).not.toHaveProperty("commands");
 		}
 	});
+
+	it("still emits timeout telemetry when the executor owns its timeout", async () => {
+		// createShellExecutor arms its own timer and declares managesOwnTimeout,
+		// so the wrapper no longer races it. The timeout therefore arrives as the
+		// executor's own TimeoutError, and telemetry must still be captured from
+		// that path rather than being lost along with the removed race.
+		const telemetry = createTelemetryStub();
+		const execute = createShellExecutor({ timeoutMs: 120 });
+		const tool = createShellTool(execute, { bashTimeoutMs: 120 });
+
+		await tool.execute(
+			{
+				commands: [
+					{
+						command: process.execPath,
+						args: ["-e", "setTimeout(() => {}, 60000)"],
+					},
+				],
+			} as never,
+			{
+				agentId: "agent-1",
+				conversationId: "conv-1",
+				iteration: 1,
+				metadata: {
+					[CLINE_INTERNAL_TELEMETRY_METADATA_KEY]: telemetry,
+					mode: "act",
+					source: "sdk-test",
+				},
+			},
+		);
+
+		const events = capturedTimeoutEvents(telemetry);
+		expect(events.length).toBeGreaterThan(0);
+		expect(typeof events[0].properties.duration_ms).toBe("number");
+	}, 20000);
 
 	it("does not emit timeout telemetry for normal command success", async () => {
 		const execute = vi.fn(async () => "ok");
