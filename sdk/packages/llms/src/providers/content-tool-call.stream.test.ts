@@ -108,6 +108,29 @@ describe("content-delivered tool calls", () => {
 		expect(texts).toContain("write_to_file");
 	});
 
+	it("tells the model the unoffered call did not run, and what it could call", async () => {
+		// The refusal above is only half the fix. Echoing the payload back gives
+		// the model no tool result and no reason to change course, so it repeats
+		// it. This is the signal that ends the loop - and it stays text, so the
+		// no-promotion guarantee is untouched.
+		const events = await collect([
+			'{"name": "write_to_file", "arguments": {"path":"a.txt"}}',
+		]);
+		const texts = events
+			.filter((e) => (e as { type?: string }).type === "text-delta")
+			.map((e) => (e as { text: string }).text)
+			.join("");
+
+		expect(texts).toContain("was not run");
+		expect(texts).toContain("write_to_file");
+		// Names what does exist, so the model can correct itself.
+		expect(texts).toContain("get_weather");
+		expect(texts).toContain("run_commands");
+		expect(
+			events.find((e) => (e as { type?: string }).type === "tool-call-delta"),
+		).toBeUndefined();
+	});
+
 	it("promotes a single unchunked envelope too", async () => {
 		const events = await collect([
 			'{"name":"run_commands","arguments":{"command":"ls"}}',

@@ -949,6 +949,26 @@ export async function* emitAiSdkEvents(
 			yield { type: "text-delta", text: decision.text };
 			return;
 		}
+		if (decision.kind === "unoffered-tool") {
+			// Deliberately not a tool call: this fork does not offer the named
+			// tool, so promoting it would only move the refusal downstream and
+			// widen what can be invoked. It stays text - but the text now says
+			// the call did not run and names the tools that do exist, so the model
+			// can correct itself instead of re-emitting the same payload forever
+			// (cline/cline#10843).
+			const available = (request.tools ?? []).map((tool) => tool.name);
+			yield {
+				type: "text-delta",
+				text: [
+					`[tool call not executed] "${decision.toolName}" is not a tool available in this session, so the call was not run.`,
+					available.length > 0
+						? `Available tools: ${available.join(", ")}.`
+						: "No tools are available in this session.",
+					"Re-issue the request using one of those names.",
+				].join(" "),
+			};
+			return;
+		}
 		const { toolName, toolCallId, input } = decision.toolCall;
 		sawToolCalls = true;
 		emittedToolCallIds.add(toolCallId);

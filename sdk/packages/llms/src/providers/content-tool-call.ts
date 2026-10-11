@@ -143,6 +143,56 @@ export function parseToolCallEnvelope(
 }
 
 /**
+ * The tool an envelope names, when the envelope is otherwise well-formed but
+ * names something the model was never offered.
+ *
+ * Returns null for anything that is not a recognisable envelope, including
+ * prose that happens to be JSON. This never authorises execution - the call is
+ * still refused. It exists so the caller can tell the model why, instead of
+ * echoing the payload back as prose with no tool result, which leaves the model
+ * retrying the identical JSON forever. Reported as cline/cline#10843.
+ */
+export function readEnvelopeToolName(text: string): string | null {
+	const candidate = trimmedCandidate(text);
+	if (!candidate.startsWith("{")) {
+		return null;
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(candidate);
+	} catch {
+		return null;
+	}
+
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return null;
+	}
+
+	const record = parsed as Record<string, unknown>;
+	for (const key of Object.keys(record)) {
+		if (!ALLOWED_ENVELOPE_KEYS.has(key)) {
+			return null;
+		}
+	}
+
+	const name = record.name;
+	if (typeof name !== "string" || name.length === 0) {
+		return null;
+	}
+
+	const rawArgs = record.arguments ?? record.parameters;
+	if (rawArgs !== undefined && (typeof rawArgs !== "object" || rawArgs === null)) {
+		return null;
+	}
+	if (Array.isArray(rawArgs)) {
+		return null;
+	}
+
+	return name;
+}
+
+/**
  * Accumulates text deltas and decides, at the end, whether they were a tool call.
  *
  * `push` returns the text to emit immediately when the buffer can be released;
@@ -156,6 +206,7 @@ export function createToolCallTextBuffer(options: {
 	push: (delta: string) => { flush: string } | undefined;
 	finish: () =>
 		| { kind: "tool-call"; toolCall: RecoveredToolCall }
+		| { kind: "unoffered-tool"; toolName: string; text: string }
 		| { kind: "text"; text: string }
 		| undefined;
 	released: () => boolean;
@@ -214,6 +265,12 @@ export function createToolCallTextBuffer(options: {
 						toolCallId: toolCall.toolCallId || makeToolCallId(),
 					},
 				};
+			}
+			// Still refused. The caller only needs to know the name so it can say
+			// so in the response, which is what breaks the retry loop.
+			const unofferedName = readEnvelopeToolName(text);
+			if (unofferedName !== null) {
+				return { kind: "unoffered-tool", toolName: unofferedName, text };
 			}
 			return { kind: "text", text };
 		},
