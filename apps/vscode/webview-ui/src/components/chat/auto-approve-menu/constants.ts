@@ -15,9 +15,11 @@ export const ACTION_METADATA: ActionMetadata[] = [
 	},
 	{
 		id: "executeSafeCommands",
-		label: "Execute commands",
+		label: "Run safe commands",
 		shortName: "Commands",
 		icon: "codicon-terminal",
+		description:
+			"Skips approval for read-only commands only. Anything that writes, deletes, chains, pipes or runs another program still asks.",
 	},
 	{
 		id: "useBrowser",

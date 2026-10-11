@@ -47,6 +47,9 @@ const AutoApproveMenuItem = ({ action, isChecked, onToggle, showIcon = true, dis
 						{showIcon && <span className={`codicon ${action.icon} icon`} />}
 						<span className="label">{action.label}</span>
 					</div>
+					{action.description && (
+						<div className="w-full text-xs text-description/80 mt-0.5 pl-6">{action.description}</div>
+					)}
 				</VSCodeCheckbox>
 			</CheckboxWrapper>
 			{action.subAction && (

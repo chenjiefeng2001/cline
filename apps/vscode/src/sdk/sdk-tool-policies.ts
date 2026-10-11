@@ -1,5 +1,6 @@
 import type { AutoApprovalSettings } from "@shared/AutoApprovalSettings"
 import type { McpHub } from "@/services/mcp/McpHub"
+import { areCommandsSafeToAutoApprove } from "./safe-command-classifier"
 
 const READ_TOOL_NAMES = [
 	"read_files",
@@ -64,7 +65,7 @@ export function buildToolPolicies(
  * approval callback, so changes from the AutoApproveBar are respected even if
  * an SDK session was created before the toggle changed.
  */
-export function isToolAutoApproved(toolName: string, settings: AutoApprovalSettings, mcpHub?: McpHub): boolean {
+export function isToolAutoApproved(toolName: string, settings: AutoApprovalSettings, mcpHub?: McpHub, input?: unknown): boolean {
 	if (isReadTool(toolName)) {
 		return !!settings.actions.readFiles
 	}
@@ -72,7 +73,12 @@ export function isToolAutoApproved(toolName: string, settings: AutoApprovalSetti
 		return !!settings.actions.editFiles
 	}
 	if (isCommandTool(toolName)) {
-		return !!settings.actions.executeSafeCommands
+		// The setting is named for safe commands, so it must not authorise every
+		// command. The call is only auto-approved when each command it contains
+		// is provably read-only; anything else - `git commit --amend`, a
+		// compound command, an unparsable one - falls through to the approval
+		// UI. cline/cline#12133.
+		return !!settings.actions.executeSafeCommands && areCommandsSafeToAutoApprove(input)
 	}
 	if (isBrowserTool(toolName)) {
 		return !!settings.actions.useBrowser
