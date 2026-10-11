@@ -87,6 +87,27 @@ describe("content-delivered tool calls", () => {
 		expect(texts).toContain("rm_rf");
 	});
 
+	it("refuses to promote the exact payload cline/cline#10843 reports", async () => {
+		// A local coder model emitted this inside message.content. This fork has
+		// no write_to_file tool - the editor tool is called `editor` - so the
+		// envelope names something the model was never offered and must stay
+		// text. It is still a live trap: the model gets no tool result back and
+		// can repeat the payload indefinitely. Locked here so the guarantee is
+		// explicit rather than incidental, and so any future change to this path
+		// has to confront this case deliberately.
+		const events = await collect([
+			'{"name": "write_to_file", "arguments": {"path":"a.txt"}}',
+		]);
+		expect(
+			events.find((e) => (e as { type?: string }).type === "tool-call-delta"),
+		).toBeUndefined();
+		const texts = events
+			.filter((e) => (e as { type?: string }).type === "text-delta")
+			.map((e) => (e as { text: string }).text)
+			.join("");
+		expect(texts).toContain("write_to_file");
+	});
+
 	it("promotes a single unchunked envelope too", async () => {
 		const events = await collect([
 			'{"name":"run_commands","arguments":{"command":"ls"}}',
