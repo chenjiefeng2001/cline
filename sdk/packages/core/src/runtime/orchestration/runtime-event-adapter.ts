@@ -68,17 +68,29 @@ import type {
 
 type StatusNoticeReason = Extract<AgentEvent, { type: "notice" }>["reason"];
 
+/**
+ * Reasons a tool or runtime may set through `status-notice` metadata.
+ *
+ * Deliberately narrower than every reason an AgentEvent notice can carry:
+ * unrelated producers set `reason` on their own events, and letting arbitrary
+ * metadata be promoted here would let a caller's string masquerade as a
+ * structured reason. A reason missing from this list is not rejected — the
+ * notice still reaches the user — but its reason is dropped, so anything that
+ * needs to be acted on downstream must be listed here.
+ */
+const STATUS_NOTICE_REASONS: ReadonlySet<string> = new Set([
+	"auto_compaction",
+	"manual_compaction",
+	"compaction_budget_emergency",
+	"detached_output_log_failed",
+]);
+
 function resolveStatusNoticeReason(
 	reason: unknown,
 ): StatusNoticeReason | undefined {
-	switch (reason) {
-		case "auto_compaction":
-		case "manual_compaction":
-		case "compaction_budget_emergency":
-			return reason;
-		default:
-			return undefined;
-	}
+	return typeof reason === "string" && STATUS_NOTICE_REASONS.has(reason)
+		? (reason as StatusNoticeReason)
+		: undefined;
 }
 
 function extractTextPart(message: AgentMessage): string | undefined {

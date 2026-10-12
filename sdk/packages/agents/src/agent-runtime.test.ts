@@ -2203,6 +2203,66 @@ describe("AgentRuntime", () => {
 		expect(model.requests).toHaveLength(1);
 	});
 
+	it("lets a tool emit a status notice that keeps its reason", async () => {
+		// A detached command's log can stop recording after the tool result was
+		// already returned, which is the only way the user learns. The reason
+		// travels in metadata, so this pins that it survives the runtime hop
+		// instead of arriving as a bare message a host cannot act on.
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_notice",
+					toolName: "slow",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "done" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			sessionId: "session_notice",
+			model,
+			tools: [
+				{
+					name: "slow",
+					description: "Emits a status notice",
+					inputSchema: { type: "object" },
+					execute: async (_input, context) => {
+						context.emitNotice?.({
+							noticeType: "status",
+							reason: "detached_output_log_failed",
+							message: "recording stopped",
+						});
+						return "ok";
+					},
+				},
+			],
+			toolPolicies: { "*": { autoApprove: true } },
+		});
+		const notices: {
+			message: string;
+			metadata?: Record<string, unknown>;
+		}[] = [];
+		runtime.subscribe((event) => {
+			if (event.type === "status-notice") {
+				notices.push({ message: event.message, metadata: event.metadata });
+			}
+		});
+
+		await runtime.run("go");
+
+		expect(notices).toEqual([
+			{
+				message: "recording stopped",
+				metadata: { reason: "detached_output_log_failed" },
+			},
+		]);
+	});
+
 	it("merges beforeModel options metadata into the model request", async () => {
 		const model = new ScriptedModel([
 			(request) => {

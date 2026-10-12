@@ -175,6 +175,30 @@ describe("RuntimeEventAdapter — status notices", () => {
 			reason: undefined,
 		});
 	});
+
+	it("carries the detached-output-log reason through to the user", () => {
+		// A detached log that stops recording is reported after the tool result
+		// was already returned, so the reason is the only structured signal a
+		// host has. If it is dropped here the notice still shows but nothing can
+		// act on it.
+		const out = adapter.translate({
+			type: "status-notice",
+			snapshot: makeSnapshot(),
+			message: "Output recording for a detached command has stopped.",
+			metadata: { reason: "detached_output_log_failed" },
+		});
+
+		expect(out).toEqual([
+			{
+				type: "notice",
+				noticeType: "status",
+				displayRole: "status",
+				message: "Output recording for a detached command has stopped.",
+				reason: "detached_output_log_failed",
+				metadata: { reason: "detached_output_log_failed" },
+			},
+		]);
+	});
 });
 
 // ---------------------------------------------------------------------------
