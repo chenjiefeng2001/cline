@@ -12,25 +12,29 @@ describe("Hook System", () => {
 	let sandbox: sinon.SinonSandbox
 	let hookTestEnv: HookTestEnv
 	/**
-	 * Budget for the two cases that assert a hook's working directory.
+	 * The two cases below assert a hook's working directory, and deliberately
+	 * carry **no** per-test timeout override.
 	 *
-	 * These are the only cases in the file that resolve a realpath against what
-	 * the hook reported, so they are the ones that pay the full Windows cold
-	 * start: PowerShell, then Node, on a script that was written milliseconds
-	 * earlier and is therefore unscanned. Locally they cost ~1.5s, but the
-	 * 2026-09-30 `windows-latest` run put one at 15083ms and failed it - a
-	 * timeout, never an assertion - while every other hook case in the same file
-	 * passed in 0.8-1.7s and the previous four Windows runs of this file were
-	 * green.
+	 * They used to pin 30000ms, reasoning that it matched HookProcess's own
+	 * 30000ms hook timeout so a genuinely hanging hook would fail with the
+	 * hook-timeout error (which names the script and the elapsed time) instead
+	 * of a bare harness timeout. Setting the two to the same value defeated
+	 * that: whichever timer lost the race was a coin flip, and the two became
+	 * indistinguishable.
 	 *
-	 * The previous 15000ms cap was also below the 20000ms per-test budget the
-	 * shared runner documents for these suites, so a per-test value silently
-	 * overrode the runner policy it was meant to sit inside. 30s sits above the
-	 * observed outlier and matches HookProcess's own 30000ms hook timeout, so a
-	 * hook that genuinely hangs fails with the hook-timeout error - which names
-	 * the script and the elapsed time - rather than a bare test timeout.
+	 * Worse, the pin was overtaken. run-bun-unit-tests.ts has raised its
+	 * per-test budget twice (5s -> 20s -> 45s) as the hook suites outgrew it
+	 * under CI contention, so a 30000ms override sat *below* the policy the
+	 * runner had just established, and became the binding constraint. On
+	 * 2026-10-12 `should execute workspace hook from its respective workspace
+	 * root directory` passed locally in ~0.6s and failed on windows-latest at
+	 * 30590.55ms — past the override, well inside the 45s it should have had.
+	 *
+	 * Inheriting the runner's budget keeps the original intent intact for free:
+	 * 45s is above HookProcess's 30s, so a real hang still surfaces as the
+	 * product's hook-timeout error. Re-adding an override here would silently
+	 * drop these two cases back below policy.
 	 */
-	const CWD_HOOK_TEST_TIMEOUT_MS = 30000
 
 	// Helper to write executable hook script
 	const writeHookScript = async (hookPath: string, nodeScript: string): Promise<void> => {
@@ -69,15 +73,13 @@ describe("Hook System", () => {
 	})
 
 	describe("StdioHookRunner", () => {
-		it(
-			"should execute workspace hook from its respective workspace root directory",
-			async () => {
-				if (process.platform === "win32") {
-				}
+		it("should execute workspace hook from its respective workspace root directory", async () => {
+			if (process.platform === "win32") {
+			}
 
-				// Create a test hook script that outputs the current working directory
-				const hookPath = path.join(tempDir, ".clinerules", "hooks", "PreToolUse")
-				const hookScript = `#!/usr/bin/env node
+			// Create a test hook script that outputs the current working directory
+			const hookPath = path.join(tempDir, ".clinerules", "hooks", "PreToolUse")
+			const hookScript = `#!/usr/bin/env node
 const input = require('fs').readFileSync(0, 'utf-8');
 // Output the current working directory
 console.log(JSON.stringify({
@@ -85,30 +87,28 @@ console.log(JSON.stringify({
   contextModification: "CWD: " + process.cwd()
 }))`
 
-				await writeHookScript(hookPath, hookScript)
+			await writeHookScript(hookPath, hookScript)
 
-				// Test execution
-				const factory = new HookFactory()
-				const runner = await factory.create("PreToolUse")
+			// Test execution
+			const factory = new HookFactory()
+			const runner = await factory.create("PreToolUse")
 
-				const result = await runner.run({
-					taskId: "test-task",
-					preToolUse: {
-						toolName: "test_tool",
-						parameters: {},
-					},
-				})
+			const result = await runner.run({
+				taskId: "test-task",
+				preToolUse: {
+					toolName: "test_tool",
+					parameters: {},
+				},
+			})
 
-				result.cancel.should.be.false()
-				// The hook should execute from its workspace root (tempDir)
-				// Use fs.realpath to normalize paths (handles macOS /private prefix)
-				const cwdFromHook = result.contextModification?.replace("CWD: ", "")
-				const normalizedCwd = await fs.realpath(cwdFromHook)
-				const normalizedTempDir = await fs.realpath(tempDir)
-				normalizedCwd.should.equal(normalizedTempDir)
-			},
-			CWD_HOOK_TEST_TIMEOUT_MS,
-		)
+			result.cancel.should.be.false()
+			// The hook should execute from its workspace root (tempDir)
+			// Use fs.realpath to normalize paths (handles macOS /private prefix)
+			const cwdFromHook = result.contextModification?.replace("CWD: ", "")
+			const normalizedCwd = await fs.realpath(cwdFromHook)
+			const normalizedTempDir = await fs.realpath(tempDir)
+			normalizedCwd.should.equal(normalizedTempDir)
+		})
 
 		it("should execute hook script and parse output", async () => {
 			// Create a test hook script
@@ -637,45 +637,41 @@ console.log(JSON.stringify({
 			result.errorMessage?.should.match(/Workspace error/)
 		})
 
-		it(
-			"should execute global hook from primary workspace root directory",
-			async () => {
-				if (process.platform === "win32") {
-				}
+		it("should execute global hook from primary workspace root directory", async () => {
+			if (process.platform === "win32") {
+			}
 
-				// Create a global hook script that outputs the current working directory
-				const globalHookPath = path.join(globalHooksDir, "PreToolUse")
-				const globalHookScript = `#!/usr/bin/env node
+			// Create a global hook script that outputs the current working directory
+			const globalHookPath = path.join(globalHooksDir, "PreToolUse")
+			const globalHookScript = `#!/usr/bin/env node
 const input = require('fs').readFileSync(0, 'utf-8');
 // Output the current working directory
 console.log(JSON.stringify({
   cancel: false,
   contextModification: "CWD: " + process.cwd()
 }))`
-				await writeHookScript(globalHookPath, globalHookScript)
+			await writeHookScript(globalHookPath, globalHookScript)
 
-				// Test execution
-				const factory = new HookFactory()
-				const runner = await factory.create("PreToolUse")
+			// Test execution
+			const factory = new HookFactory()
+			const runner = await factory.create("PreToolUse")
 
-				const result = await runner.run({
-					taskId: "test-task",
-					preToolUse: {
-						toolName: "test_tool",
-						parameters: {},
-					},
-				})
+			const result = await runner.run({
+				taskId: "test-task",
+				preToolUse: {
+					toolName: "test_tool",
+					parameters: {},
+				},
+			})
 
-				result.cancel.should.be.false()
-				// Global hooks should execute from the primary workspace root (tempDir)
-				// Use fs.realpath to normalize paths (handles macOS /private prefix)
-				const cwdFromHook = result.contextModification?.replace("CWD: ", "")
-				const normalizedCwd = await fs.realpath(cwdFromHook)
-				const normalizedTempDir = await fs.realpath(tempDir)
-				normalizedCwd.should.equal(normalizedTempDir)
-			},
-			CWD_HOOK_TEST_TIMEOUT_MS,
-		)
+			result.cancel.should.be.false()
+			// Global hooks should execute from the primary workspace root (tempDir)
+			// Use fs.realpath to normalize paths (handles macOS /private prefix)
+			const cwdFromHook = result.contextModification?.replace("CWD: ", "")
+			const normalizedCwd = await fs.realpath(cwdFromHook)
+			const normalizedTempDir = await fs.realpath(tempDir)
+			normalizedCwd.should.equal(normalizedTempDir)
+		})
 
 		it("should work with global PostToolUse hooks", async () => {
 			// Create global PostToolUse hook
