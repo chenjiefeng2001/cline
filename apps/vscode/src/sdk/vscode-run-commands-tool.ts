@@ -622,7 +622,7 @@ export async function executeForeground(
  * the profile ID for foreground terminal creation and the shell executable
  * it resolves to for background spawning and description building.
  */
-interface ShellSnapshot {
+export interface ShellSnapshot {
 	profileId: string
 	shell: string
 }
@@ -662,13 +662,19 @@ export function createVscodeRunCommandsTool(options: VscodeRunCommandsToolOption
 	})
 }
 
-function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state: { snapshot: ShellSnapshot }): ShellExecutor {
+export function createVscodeShellExecutor(
+	options: VscodeRunCommandsToolOptions,
+	state: { snapshot: ShellSnapshot },
+): ShellExecutor {
 	const { cwd, getTerminalManager } = options
 	const executionMode = options.vscodeTerminalExecutionMode ?? "backgroundExec"
 
 	// Lazy-init background executor — recreated when the snapshotted shell changes.
 	let bgExecutor: ShellExecutor | undefined
 	let bgExecutorShell: string | undefined
+	// Tracks the tool-configured timeout so a recreated executor is built with
+	// the same value rather than reverting to the SDK default.
+	let bgTimeoutMs: number | undefined
 
 	// Lazy-init terminal manager reference
 	let terminalManager: VscodeTerminalManager | undefined
@@ -694,6 +700,7 @@ function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state:
 					// Set SHELL env to match the shell we're spawning so child
 					// processes see the correct value instead of the inherited parent's.
 					env: { SHELL: shell },
+					...(bgTimeoutMs !== undefined && { timeoutMs: bgTimeoutMs }),
 				})
 				Logger.log(`[VscodeRunCommands] Background executor using shell: ${shell}`)
 			}
@@ -744,6 +751,16 @@ function createVscodeShellExecutor(options: VscodeRunCommandsToolOptions, state:
 	// from the tool wrapper would discard the handover. Foreground has no
 	// internal timer and must keep the wrapper's 1-hour timeout.
 	executorFn.managesOwnTimeout = executionMode === "backgroundExec"
+
+	// Forward the tool's timeout to the background executor. Without this the
+	// wrapper claims ownership of a timer it does not own, and a bashTimeoutMs
+	// configured for background mode would be silently ignored.
+	if (executorFn.managesOwnTimeout) {
+		executorFn.setTimeoutMs = (ms: number) => {
+			bgTimeoutMs = ms
+			bgExecutor?.setTimeoutMs?.(ms)
+		}
+	}
 
 	return executorFn
 }

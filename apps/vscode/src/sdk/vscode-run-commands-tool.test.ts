@@ -9,6 +9,7 @@ import { SdkForegroundCommandCoordinator } from "./sdk-foreground-command-coordi
 import {
 	createTimeoutDetachedLogSink,
 	createVscodeRunCommandsTool,
+	createVscodeShellExecutor,
 	executeForeground,
 	formatCommandForTerminal,
 	PROCEED_LOG_MAX_BYTES,
@@ -1316,5 +1317,39 @@ describe("createTimeoutDetachedLogSink", () => {
 		})
 		await handle.close("[done]")
 		await expect(handle.write("late\n")).rejects.toThrow(/closed/)
+	})
+})
+
+describe("background executor timeout wiring", () => {
+	// Execution-level assertions are not possible here: vitest.config.ts aliases
+	// @cline/core to cline-core-vitest-stub, whose createShellExecutor is
+	// `async () => ""`. Anything that actually runs a command would be measuring
+	// the stub. These assertions cover the wiring that the stub cannot exercise.
+	const build = (mode: "backgroundExec" | "vscodeTerminal") =>
+		createVscodeShellExecutor(
+			{
+				cwd: process.cwd(),
+				getTerminalManager: () => {
+					throw new Error("terminal manager is not used in these assertions")
+				},
+				vscodeTerminalExecutionMode: mode,
+			},
+			{ snapshot: { profileId: "default", shell: "bash" } },
+		)
+
+	it("declares timeout ownership and a timeout setter in background mode", () => {
+		const executor = build("backgroundExec")
+		expect(executor.managesOwnTimeout).toBe(true)
+		expect(typeof executor.setTimeoutMs).toBe("function")
+		// Must not throw when the tool configures it before the lazy executor exists.
+		expect(() => executor.setTimeoutMs?.(1234)).not.toThrow()
+	})
+
+	it("leaves timeout ownership with the wrapper in foreground mode", () => {
+		const executor = build("vscodeTerminal")
+		// Foreground has no internal timer, so the wrapper's 1-hour timeout has
+		// to stay in charge.
+		expect(executor.managesOwnTimeout).toBe(false)
+		expect(executor.setTimeoutMs).toBeUndefined()
 	})
 })
