@@ -105,6 +105,12 @@ export type ShellExecutor = ((
 	 * and the detach would be lost. Declaring ownership removes the race.
 	 */
 	managesOwnTimeout?: boolean;
+	/**
+	 * Receives the tool's configured timeout so the executor's own timer cannot
+	 * silently disagree with `bashTimeoutMs`. Once the wrapper stops racing, a
+	 * longer executor timer would otherwise ignore a shorter tool setting.
+	 */
+	setTimeoutMs?: (ms: number) => void;
 };
 
 /**

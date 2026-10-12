@@ -594,6 +594,10 @@ export function createShellTool(
 		config.bashTimeoutMs === undefined
 			? "default_setting"
 			: "configured_setting";
+	// An executor that owns its timeout is the one that fires, so the tool's
+	// configuration has to reach it — otherwise a longer executor timer would
+	// quietly override a shorter bashTimeoutMs.
+	executor.setTimeoutMs?.(timeoutMs);
 	const cwd = config.cwd ?? process.cwd();
 	const isWindows = process.platform === "win32";
 	const configShell = config.shell;

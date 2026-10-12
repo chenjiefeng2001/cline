@@ -1486,6 +1486,31 @@ describe("default run_commands tool", () => {
 		expect(typeof events[0].properties.duration_ms).toBe("number");
 	}, 20000);
 
+	it("keeps bashTimeoutMs authoritative when it is shorter than the executor's own timeout", async () => {
+		// createShellExecutor no longer races the tool wrapper's timer, so the
+		// two can no longer be resolved by "whichever is shorter". The public
+		// tool setting must still win, or a host that configures a long
+		// executor timeout would silently ignore a shorter bashTimeoutMs.
+		const execute = createShellExecutor({ timeoutMs: 10_000 });
+		const tool = createShellTool(execute, { bashTimeoutMs: 200 });
+
+		const startedAt = Date.now();
+		await tool.execute(
+			{
+				commands: [
+					{
+						command: process.execPath,
+						args: ["-e", "setTimeout(() => {}, 5000)"],
+					},
+				],
+			} as never,
+			{ agentId: "agent-1", conversationId: "conv-1", iteration: 1 },
+		);
+		const elapsed = Date.now() - startedAt;
+
+		expect(elapsed).toBeLessThan(4000);
+	}, 20000);
+
 	it("does not emit timeout telemetry for normal command success", async () => {
 		const execute = vi.fn(async () => "ok");
 		const tool = createShellTool(execute, { bashTimeoutMs: 50 });

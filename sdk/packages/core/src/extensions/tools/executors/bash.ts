@@ -428,10 +428,11 @@ export function createShellExecutor(
 ): ShellExecutor {
 	const {
 		shell = getDefaultShell(process.platform),
-		timeoutMs = 30000,
+		timeoutMs: initialTimeoutMs = 30000,
 		env = {},
 		combineOutput = true,
 	} = options;
+	let timeoutMs = initialTimeoutMs;
 	const maxOutputChars =
 		options.maxOutputChars ??
 		options.maxOutputBytes ??
@@ -458,6 +459,13 @@ export function createShellExecutor(
 	// Always true: spawnAndCollect arms its own timer unconditionally, so the
 	// wrapper must not race it with a second one.
 	executorFn.managesOwnTimeout = true;
+
+	// Because the wrapper no longer races this timer, the two could otherwise
+	// disagree and the shorter one would stop winning. Keeping bashTimeoutMs
+	// authoritative here is what preserves that.
+	executorFn.setTimeoutMs = (ms: number) => {
+		timeoutMs = ms;
+	};
 
 	return executorFn;
 }
