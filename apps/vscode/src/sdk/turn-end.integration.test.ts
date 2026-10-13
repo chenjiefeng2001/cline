@@ -86,7 +86,7 @@ function makeTurnEndHarness(input: { messages: ClineMessage[]; turnDrainTimeoutM
 	const sendComplete = vi.fn(async () => {
 		// This is SdkController.onSendComplete's decision, with its two other duties
 		// (discarding diff previews, posting state) left out - they cannot change the phase.
-		const decision = decideTurnEndPhase(tracker.currentPhase)
+		const decision = decideTurnEndPhase(tracker.currentPhase, translatorState.wasAttemptCompletionSeen())
 		if (decision.action === "fallback") {
 			tracker.set(decision.phase, task.messageStateHandler.getClineMessages().at(-1)?.ts)
 		}
@@ -195,21 +195,43 @@ describe("turn end: drain, event and phase decision together", () => {
 		})
 	})
 
-	it("falls back to completed, anchored, when no terminal event ever arrives", async () => {
+	it("falls back to awaiting_followup when no terminal event ever arrives", async () => {
 		// The other ordering: send() settles and the runtime never says how the turn ended.
-		// The drain expires, and the fallback is a guess - but the turn must not be left
-		// in `streaming` with a live Cancel button, which is the failure the drain exists
-		// to bound.
+		// The drain expires and the fallback guesses - but it must guess with the same rule
+		// the stream uses (sdk-session-event-coordinator: limit -> limit_reached, completion
+		// tool -> completed, otherwise -> awaiting_followup). Guessing `completed` here is
+		// what stranded a long turn: completed is terminal, so the awaiting_followup that
+		// arrived moments later was discarded and the footer showed only "Start New Task".
+		// awaiting_followup is also the safe landing spot - its contract is that the
+		// composer is never gated, so a turn that really did end leaves the user able to
+		// continue rather than locked out.
 		const messages: ClineMessage[] = [{ ts: 9, type: "say", say: "text", text: "partial output" }]
 		const harness = makeTurnEndHarness({ messages, turnDrainTimeoutMs: 10 })
 		const { lifecycle, tracker, sendComplete, posted } = harness
 		const sessionId = await startStreamingTurn(harness, "hello")
 		await vi.waitFor(() => expect(sendComplete).toHaveBeenCalledWith(sessionId))
 
-		expect(tracker.currentPhase).toBe("completed")
+		expect(tracker.currentPhase).toBe("awaiting_followup")
 		// Anchored, so the footer has a stable identity rather than keying off a moving tail.
 		expect(tracker.get().anchorTs).toBe(9)
 		expect(lifecycle.getActiveSession()?.isRunning).toBe(false)
+		expect(posted).toEqual(["awaiting_followup"])
+	})
+
+	it("still falls back to completed when the completion tool actually ran", async () => {
+		// The flip side: `completed` means the agent called its completion tool, so the
+		// fallback has to be able to reach it. Otherwise a finished task that lost its
+		// terminal event would show a follow-up prompt for work already done.
+		const messages: ClineMessage[] = [{ ts: 9, type: "say", say: "text", text: "done" }]
+		const harness = makeTurnEndHarness({ messages, turnDrainTimeoutMs: 10 })
+		const { tracker, sendComplete, posted, translatorState } = harness
+		// Recorded at completion-tool translation time, exactly as the real translator
+		// does, so the fallback reads a fact rather than inferring one.
+		translatorState.setAttemptCompletionSeen()
+		const sessionId = await startStreamingTurn(harness, "hello")
+		await vi.waitFor(() => expect(sendComplete).toHaveBeenCalledWith(sessionId))
+
+		expect(tracker.currentPhase).toBe("completed")
 		expect(posted).toEqual(["completed"])
 	})
 

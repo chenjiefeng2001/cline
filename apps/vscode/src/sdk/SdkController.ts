@@ -468,7 +468,10 @@ export class Controller {
 				// anchorTs is a footer that goes stale as soon as the tail moves. The
 				// event stream supplies its own anchor now, so this only has to cover the
 				// fallback - a turn the runtime ended without ever reporting.
-				const decision = decideTurnEndPhase(this.turnStateTracker.currentPhase)
+				const decision = decideTurnEndPhase(
+					this.turnStateTracker.currentPhase,
+					this.messageTranslatorState.wasAttemptCompletionSeen(),
+				)
 				if (decision.action === "keep") {
 					Logger.log(
 						`[SdkController] Turn end: keeping the phase the event stream reported ` +
@@ -476,6 +479,10 @@ export class Controller {
 					)
 				} else {
 					const lastMessage = this.task?.messageStateHandler.getClineMessages().at(-1)
+					Logger.log(
+						`[SdkController] Turn end: the event stream reported no terminal phase; falling back to ` +
+							`${decision.phase} (completionToolSeen=${this.messageTranslatorState.wasAttemptCompletionSeen()})`,
+					)
 					this.turnStateTracker.set(decision.phase, lastMessage?.ts)
 				}
 

@@ -46,17 +46,35 @@ export function isTerminalTurnPhase(phase: TurnPhase): boolean {
  *
  * Split out of SdkController's turn-end hook because that decision is the whole point of
  * the bounded drain and it was only reachable by constructing the Controller - which
- * needs the VS Code host, so nothing could test it. Here it is a pure function over one
- * input, and the integration test drives it with a real drain and a real event.
+ * needs the VS Code host, so nothing could test it. Here it is a pure function over its
+ * inputs, and the integration test drives it with a real drain and a real event.
  *
  * `kept` means the event stream already said how the turn ended and there is nothing
  * left to decide. `fallback` means it never said, and the phase is a guess - which is
  * why the caller logs it as one.
+ *
+ * The guess follows the same rule the stream itself applies in
+ * sdk-session-event-coordinator (limit -> limit_reached, completion tool -> completed,
+ * otherwise -> awaiting_followup). Guessing `completed` unconditionally asserted the
+ * task was finished whenever the stream had not yet spoken: on a long turn the event
+ * arrives late, the fallback stamped `completed`, and because `completed` is a terminal
+ * phase the real `awaiting_followup` that followed was discarded. The footer then showed
+ * only "Start New Task" with no way back into the same task.
+ *
+ * `attemptCompletionSeen` is recorded when the completion tool call is translated, not
+ * at turn end, so by the time the send promise resolves it already reflects what the
+ * stream would have said. The fallback reads a fact rather than guessing one.
  */
-export type TurnEndDecision = { action: "keep" } | { action: "fallback"; phase: "completed" }
+export type TurnEndDecision = { action: "keep" } | { action: "fallback"; phase: "completed" | "awaiting_followup" }
 
-export function decideTurnEndPhase(currentPhase: TurnPhase): TurnEndDecision {
-	return isTerminalTurnPhase(currentPhase) ? { action: "keep" } : { action: "fallback", phase: "completed" }
+export function decideTurnEndPhase(currentPhase: TurnPhase, attemptCompletionSeen: boolean): TurnEndDecision {
+	if (isTerminalTurnPhase(currentPhase)) {
+		return { action: "keep" }
+	}
+	return {
+		action: "fallback",
+		phase: attemptCompletionSeen ? "completed" : "awaiting_followup",
+	}
 }
 
 export class TurnStateTracker {

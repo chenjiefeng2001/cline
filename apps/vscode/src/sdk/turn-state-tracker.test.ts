@@ -95,12 +95,39 @@ describe("isTerminalTurnPhase", () => {
 			"limit_reached",
 		]
 		for (const phase of phases) {
-			expect(typeof decideTurnEndPhase(phase).action, phase).toBe("string")
+			expect(typeof decideTurnEndPhase(phase, false).action, phase).toBe("string")
 		}
 		// `idle` is deliberately non-terminal so a restored transcript is not declared
 		// finished; `streaming` and `awaiting_approval` are live turns.
-		expect(decideTurnEndPhase("streaming")).toEqual({ action: "fallback", phase: "completed" })
-		expect(decideTurnEndPhase("limit_reached")).toEqual({ action: "keep" })
+		expect(decideTurnEndPhase("streaming", false)).toEqual({
+			action: "fallback",
+			phase: "awaiting_followup",
+		})
+		expect(decideTurnEndPhase("limit_reached", false)).toEqual({ action: "keep" })
+	})
+
+	it("falls back to awaiting_followup unless the completion tool actually ran", () => {
+		// The fallback is a guess, and guessing "completed" is the guess that strands
+		// a long turn: completed is terminal, so the real awaiting_followup that landed
+		// moments later was discarded and the footer showed only "Start New Task".
+		expect(decideTurnEndPhase("streaming", false)).toEqual({
+			action: "fallback",
+			phase: "awaiting_followup",
+		})
+		expect(decideTurnEndPhase("streaming", true)).toEqual({
+			action: "fallback",
+			phase: "completed",
+		})
+	})
+
+	it("keeps a phase the stream already reported regardless of the completion tool", () => {
+		// awaiting_followup is terminal, so a stream that said "the turn is done, type
+		// your next message" must not be overwritten just because the completion tool
+		// had run earlier in the same turn.
+		expect(decideTurnEndPhase("awaiting_followup", true)).toEqual({ action: "keep" })
+		expect(decideTurnEndPhase("completed", false)).toEqual({ action: "keep" })
+		expect(decideTurnEndPhase("resumable", false)).toEqual({ action: "keep" })
+		expect(decideTurnEndPhase("error", false)).toEqual({ action: "keep" })
 	})
 
 	it("treats idle as non-terminal so a restored transcript is not declared finished", () => {
