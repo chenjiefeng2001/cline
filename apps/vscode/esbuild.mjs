@@ -10,6 +10,12 @@ const production = process.argv.includes("--production") || process.env["IS_DEBU
 const watch = process.argv.includes("--watch")
 const standalone = process.argv.includes("--standalone")
 const e2eBuild = process.argv.includes("--e2e-build")
+// Escape hatch for local/test packaging only. See the production guard below.
+// Also readable from the environment because packaging goes through nested
+// invocations (vsce -> vscode:prepublish -> npm run package) that cannot forward
+// extra argv, so an argv-only flag would be unusable exactly where it is needed.
+const allowMissingTelemetryKeys =
+	process.argv.includes("--allow-missing-telemetry-keys") || process.env.CLINE_ALLOW_MISSING_TELEMETRY_KEYS === "1"
 const destDir = standalone ? "dist-standalone" : "dist"
 
 /**
@@ -107,6 +113,27 @@ if (process.env.TELEMETRY_SERVICE_API_KEY) {
 }
 if (process.env.ERROR_SERVICE_API_KEY) {
 	buildEnvVars["process.env.ERROR_SERVICE_API_KEY"] = JSON.stringify(process.env.ERROR_SERVICE_API_KEY)
+}
+
+// A build without these two keys is not merely telemetry-free. isPostHogConfigValid
+// gates PostHog itself, so a keyless bundle also silently disables error reporting
+// and falls FeatureFlagsProvider back to no-op — which can change behaviour well
+// outside anything named "telemetry". That made a misconfigured release build
+// indistinguishable from an intentional one, since nothing warned.
+if (production && !allowMissingTelemetryKeys && !(process.env.TELEMETRY_SERVICE_API_KEY && process.env.ERROR_SERVICE_API_KEY)) {
+	throw new Error(
+		"Refusing to build a production bundle without telemetry keys.\n" +
+			"  Missing: " +
+			[
+				process.env.TELEMETRY_SERVICE_API_KEY ? null : "TELEMETRY_SERVICE_API_KEY",
+				process.env.ERROR_SERVICE_API_KEY ? null : "ERROR_SERVICE_API_KEY",
+			]
+				.filter(Boolean)
+				.join(", ") +
+			"\n  A keyless bundle disables telemetry, error reporting AND feature flags.\n" +
+			"  Set both variables, or pass --allow-missing-telemetry-keys if a\n" +
+			"  keyless bundle is genuinely intended (local packaging, offline testing).",
+	)
 }
 
 // OpenTelemetry configuration (injected at build time from GitHub secrets)
