@@ -1510,7 +1510,7 @@ describe("toSdkModelInfo context window", () => {
 			modelId: "deepseek-v4-pro",
 			modelInfo,
 			...(overrides ? { overrides } : {}),
-		}) as Parameters<typeof toSdkModelInfo>[0]
+		}) as unknown as Parameters<typeof toSdkModelInfo>[0]
 
 	it("prefers a configured context window over the catalog value", () => {
 		// The reported case: a model absent from the catalog falls back to a
