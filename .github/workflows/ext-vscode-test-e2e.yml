@@ -171,12 +171,23 @@ jobs:
               run: sudo apt-get update && sudo apt-get install -y xvfb
 
             # Run optimized E2E tests (eliminates redundant builds)
+            #
+            # `test:e2e:optimal` reaches a production esbuild via vsce ->
+            # vscode:prepublish -> npm run package, which refuses to build without
+            # the PostHog keys. That guard exists so a misconfigured *release*
+            # cannot ship keyless by accident; this job is a test artifact that
+            # was already keyless before the guard, so it opts out explicitly
+            # rather than being handed secrets it never had.
             - name: Run E2E tests - Linux
               if: matrix.runner == 'ubuntu'
+              env:
+                  CLINE_ALLOW_MISSING_TELEMETRY_KEYS: "1"
               run: xvfb-run -a bun run test:e2e:optimal
 
             - name: Run E2E tests - Non-Linux
               if: matrix.runner != 'ubuntu'
+              env:
+                  CLINE_ALLOW_MISSING_TELEMETRY_KEYS: "1"
               run: bun run test:e2e:optimal
 
             - uses: actions/upload-artifact@v4
