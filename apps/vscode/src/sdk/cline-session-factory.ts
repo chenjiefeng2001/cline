@@ -227,7 +227,7 @@ function resolveOpenAiCompatibleMaxTokens(config: ApiConfiguration | undefined, 
 	return positiveFiniteNumber(modelInfo?.maxTokens)
 }
 
-function toSdkModelInfo(selection: ResolvedModelSelection): SdkModelInfo {
+export function toSdkModelInfo(selection: ResolvedModelSelection): SdkModelInfo {
 	const modelInfo = selection.modelInfo
 	const capabilities = new Set<NonNullable<SdkModelInfo["capabilities"]>[number]>(
 		(selection.overrides?.capabilities ?? []) as NonNullable<SdkModelInfo["capabilities"]>,
@@ -242,7 +242,13 @@ function toSdkModelInfo(selection: ResolvedModelSelection): SdkModelInfo {
 	if (selection.overrides?.supportsAttachments !== undefined) setCapability("files", selection.overrides.supportsAttachments)
 
 	const maxTokens = positiveFiniteNumber(modelInfo.maxTokens)
-	const contextWindow = positiveFiniteNumber(modelInfo.contextWindow)
+	// An explicit user setting outranks the catalog. Reading only modelInfo here
+	// silently discarded a configured context window: the override is normalized,
+	// persisted and read back by the model store, then dropped at this last hop,
+	// so a model absent from the catalog kept its fallback cap no matter what the
+	// user had entered. Same precedence maxInputTokens below already applies.
+	const contextWindow =
+		positiveFiniteNumber(selection.overrides?.contextWindow) ?? positiveFiniteNumber(modelInfo.contextWindow)
 	const maxInputTokens = positiveFiniteNumber(selection.overrides?.maxInputTokens)
 	const temperature = nonNegativeFiniteNumber(modelInfo.temperature)
 	const inputPrice = nonNegativeFiniteNumber(modelInfo.inputPrice)

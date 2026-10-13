@@ -16,6 +16,7 @@ import {
 	normalizeProviderReasoningSettings,
 	normalizeSdkBaseUrl,
 	resolveApiKey,
+	toSdkModelInfo,
 	updateHistoryItem,
 } from "./cline-session-factory"
 import { parseProviderId } from "./model-catalog/provider-id"
@@ -1496,5 +1497,45 @@ describe("buildSessionConfig - orchestration switches", () => {
 		const config = await buildSessionConfig({ cwd: "/tmp/workspace" })
 		expect(config.enableSpawnAgent).toBe(false)
 		expect(config.enableAgentTeams).toBe(false)
+	})
+})
+
+describe("toSdkModelInfo context window", () => {
+	const selection = (
+		modelInfo: Record<string, unknown>,
+		overrides?: Record<string, unknown>,
+	): Parameters<typeof toSdkModelInfo>[0] =>
+		({
+			providerId: "openai",
+			modelId: "deepseek-v4-pro",
+			modelInfo,
+			...(overrides ? { overrides } : {}),
+		}) as Parameters<typeof toSdkModelInfo>[0]
+
+	it("prefers a configured context window over the catalog value", () => {
+		// The reported case: a model absent from the catalog falls back to a
+		// 128K window, and a user who entered 1M still got 128K because this
+		// function read only modelInfo. contracts.ts documents the opposite
+		// invariant, so this restores documented behaviour.
+		const result = toSdkModelInfo(
+			selection({ contextWindow: 128_000, maxInputTokens: 128_000 }, { contextWindow: 1_048_576 }),
+		)
+		expect(result.contextWindow).toBe(1_048_576)
+	})
+
+	it("uses the configured window even when the catalog supplies none", () => {
+		expect(toSdkModelInfo(selection({ name: "deepseek-v4-pro" }, { contextWindow: 1_048_576 })).contextWindow).toBe(1_048_576)
+	})
+
+	it("keeps the catalog value when the user configured nothing", () => {
+		expect(toSdkModelInfo(selection({ contextWindow: 128_000 })).contextWindow).toBe(128_000)
+	})
+
+	it("ignores a non-positive configured window instead of emitting it", () => {
+		// normalizeModelSelectionOverrides already rejects these at the storage
+		// boundary, but this hop is the last place a bad value could still reach
+		// the runtime, and a zero window would make every prompt look over-budget.
+		const result = toSdkModelInfo(selection({ contextWindow: 128_000 }, { contextWindow: 0 }))
+		expect(result.contextWindow).toBe(128_000)
 	})
 })
