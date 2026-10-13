@@ -154,3 +154,99 @@ describe("content-delivered tool calls", () => {
 		expect(finishIdx).toBeGreaterThan(callIdx);
 	});
 });
+
+/**
+ * A provider that streams a tool call and gets cut off partway — typically at a
+ * token cap. The call is never run, but the model is told which call was dropped
+ * and why, so it stops re-emitting the identical payload (cline/cline#10551).
+ */
+describe("truncated tool call envelopes", () => {
+	const TOOLS = [{ name: "get_weather" }, { name: "run_commands" }];
+
+	const request = {
+		providerId: "openai-compatible",
+		modelId: "deepseek-v4-pro",
+		tools: TOOLS,
+		messages: [{ role: "user", content: "list the files" }],
+	} as never;
+
+	const collect = async (chunks: string[]) => {
+		const events: unknown[] = [];
+		for await (const e of emitAiSdkEvents(
+			{
+				textStream: (async function* () {
+					for (const c of chunks) {
+						yield c;
+					}
+				})(),
+			} as never,
+			request,
+			{ provider: { capabilities: [] } } as never,
+		)) {
+			events.push(e);
+		}
+		return events;
+	};
+
+	const text = (events: unknown[]) =>
+		events
+			.filter((e) => (e as { type?: string }).type === "text-delta")
+			.map((e) => (e as { text: string }).text)
+			.join("");
+
+	it("does not run a call whose arguments were cut off", async () => {
+		const events = await collect([
+			'{"name":"run_commands","arguments":{"command":"ls -la"',
+		]);
+		expect(
+			events.find((e) => (e as { type?: string }).type === "tool-call-delta"),
+		).toBeUndefined();
+		expect(
+			events.find((e) => (e as { type?: string }).type === "tool-call"),
+		).toBeUndefined();
+	});
+
+	it("tells the model which call was dropped and that it did not run", async () => {
+		const events = await collect([
+			'{"name":"run_commands","arguments":{"command":"ls -la"',
+		]);
+		const message = text(events);
+		expect(message).toContain("not executed");
+		expect(message).toContain("run_commands");
+		expect(message).toContain("cut off");
+	});
+
+	it("survives a call arriving across several deltas", async () => {
+		const events = await collect([
+			'{"name":"run_com',
+			'mands","arguments":{"comm',
+			'and":"ls"}}',
+		]);
+		// Whole and well-formed, so this one does run. Same bytes as the
+		// unchunked case, split across deltas.
+		expect(
+			events.find((e) => (e as { type?: string }).type === "tool-call-delta"),
+		).toBeDefined();
+	});
+
+	it("stays silent when the cut is inside a string literal", async () => {
+		// The missing text is value data here, so no closer can be invented and
+		// the model gets ordinary prose back rather than a guess.
+		const events = await collect([
+			'{"name":"run_commands","arguments":{"command":"ls -la ',
+		]);
+		expect(text(events)).not.toContain("not executed");
+	});
+
+	it("stays silent for a truncated call to a tool that was never offered", async () => {
+		// The unoffered-tool path owns that message; this must not claim the
+		// call was truncated when the real problem is the tool name.
+		const events = await collect(['{"name":"delete_everything","arguments":{"tar']);
+		expect(text(events)).not.toContain("cut off");
+	});
+
+	it("leaves ordinary prose alone", async () => {
+		const events = await collect(["here is a list: {a: 1, b: 2"]);
+		expect(text(events)).toContain("here is a list");
+	});
+});

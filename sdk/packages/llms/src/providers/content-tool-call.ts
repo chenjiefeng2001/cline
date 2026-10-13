@@ -193,6 +193,125 @@ export function readEnvelopeToolName(text: string): string | null {
 }
 
 /**
+ * Close a JSON prefix that was cut off, so the *name* can be read back.
+ *
+ * This never authorises execution and never produces arguments for the caller.
+ * It exists so a truncated call can be named in the refusal the model receives,
+ * instead of the payload being echoed back as prose with no tool result — which
+ * is what leaves a model re-emitting the identical JSON until it trips the
+ * mistake limit (cline/cline#10551).
+ *
+ * Refuses outright when the cut landed inside a string literal: there the
+ * missing text is value data, and any closing we invented would be a guess about
+ * what the model meant.
+ */
+function closeTruncatedJson(candidate: string): string | null {
+	const stack: string[] = [];
+	let inString = false;
+	let escaped = false;
+
+	for (const ch of candidate) {
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+			} else if (ch === "\\") {
+				escaped = true;
+			} else if (ch === '"') {
+				inString = false;
+			}
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === "{" || ch === "[") {
+			stack.push(ch);
+			continue;
+		}
+		if (ch === "}" || ch === "]") {
+			const open = stack.pop();
+			if (open === undefined) {
+				return null;
+			}
+			if (ch === "}" ? open !== "{" : open !== "[") {
+				return null;
+			}
+		}
+	}
+
+	if (inString || escaped || stack.length === 0) {
+		// Unterminated literal: the remainder is value data, not structure.
+		// Nothing was open: this was not a cut-off envelope to begin with.
+		return null;
+	}
+
+	const closed = candidate + stack.reverse().map((open) => (open === "{" ? "}" : "]")).join("");
+	try {
+		JSON.parse(closed);
+		return closed;
+	} catch {
+		// The cut landed somewhere a closer cannot fix (a dangling key, a
+		// half-written number). Not a shape we can speak to.
+		return null;
+	}
+}
+
+/**
+ * The offered tool named by an envelope whose JSON was cut off mid-stream.
+ *
+ * Returns null unless the repaired prefix parses AND names a tool this session
+ * actually offered, under the same allow-list {@link parseToolCallEnvelope}
+ * applies. That conjunction is what makes this safe to name: a mis-parse has to
+ * still land on a real tool name to produce a message.
+ */
+export function readTruncatedEnvelopeToolName(
+	text: string,
+	toolNames: readonly string[],
+): string | null {
+	const candidate = trimmedCandidate(text);
+	if (!candidate.startsWith("{")) {
+		return null;
+	}
+	try {
+		// Well-formed envelopes are handled by the real paths; this is only the
+		// cut-off case.
+		JSON.parse(candidate);
+		return null;
+	} catch {
+		// Expected.
+	}
+
+	const closed = closeTruncatedJson(candidate);
+	if (closed === null) {
+		return null;
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(closed);
+	} catch {
+		return null;
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return null;
+	}
+
+	const record = parsed as Record<string, unknown>;
+	for (const key of Object.keys(record)) {
+		if (!ALLOWED_ENVELOPE_KEYS.has(key)) {
+			return null;
+		}
+	}
+
+	const name = record.name;
+	if (typeof name !== "string" || name.length === 0 || !toolNames.includes(name)) {
+		return null;
+	}
+	return name;
+}
+
+/**
  * Accumulates text deltas and decides, at the end, whether they were a tool call.
  *
  * `push` returns the text to emit immediately when the buffer can be released;
@@ -207,6 +326,7 @@ export function createToolCallTextBuffer(options: {
 	finish: () =>
 		| { kind: "tool-call"; toolCall: RecoveredToolCall }
 		| { kind: "unoffered-tool"; toolName: string; text: string }
+		| { kind: "truncated-tool-call"; toolName: string; text: string }
 		| { kind: "text"; text: string }
 		| undefined;
 	released: () => boolean;
@@ -271,6 +391,12 @@ export function createToolCallTextBuffer(options: {
 			const unofferedName = readEnvelopeToolName(text);
 			if (unofferedName !== null) {
 				return { kind: "unoffered-tool", toolName: unofferedName, text };
+			}
+			// A call to a real tool whose JSON was cut off. Naming it is safe;
+			// running it is not, because the arguments are incomplete.
+			const truncatedName = readTruncatedEnvelopeToolName(text, toolNames);
+			if (truncatedName !== null) {
+				return { kind: "truncated-tool-call", toolName: truncatedName, text };
 			}
 			return { kind: "text", text };
 		},

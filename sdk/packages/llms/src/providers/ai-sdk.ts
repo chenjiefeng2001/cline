@@ -969,6 +969,23 @@ export async function* emitAiSdkEvents(
 			};
 			return;
 		}
+		if (decision.kind === "truncated-tool-call") {
+			// The call names a real tool but its JSON was cut off, so the
+			// arguments are incomplete. Running it would mean guessing at the
+			// missing values, so it stays text — but the text now says which
+			// call was dropped and why, instead of echoing the broken payload
+			// back with no tool result. Without this the model re-emits the
+			// same payload until the mistake limit stops it, which reads as a
+			// capability problem rather than a truncated response
+			// (cline/cline#10551).
+			yield {
+				type: "text-delta",
+				text:
+					`[tool call not executed] The call to "${decision.toolName}" arrived with its arguments cut off partway through, so it could not be parsed and was not run. ` +
+					"Re-issue the request as a complete tool call, or split the work into smaller steps.",
+			};
+			return;
+		}
 		const { toolName, toolCallId, input } = decision.toolCall;
 		sawToolCalls = true;
 		emittedToolCallIds.add(toolCallId);
